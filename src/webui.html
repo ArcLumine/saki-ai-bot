@@ -1,0 +1,4672 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>客服 Saki · 管理台</title>
+<style>
+  /* ── 配色：蓝白 + Saki 代表色 ──
+     ⚠️ 2026-09-17（用户要求「模仿 NapCat 的 webui，蓝白动态渐变、鼠标周围扰乱色调」）：
+        查过了：NapCat 的 webui 是 HeroUI（主色 `#0072f5`），它自己**没有**这个动效 ——
+        这是用户想要的效果，不是照抄。所以这里自己实现：
+          ① 底层几团彩色光斑缓慢漂移（26 秒一轮，很慢，不晃眼）
+          ② 上面叠一层**跟着鼠标走**的光晕（JS 只改 --mx / --my 两个变量）
+     ⚠️ 关键：卡片必须**半透明 + 毛玻璃**，否则渐变被卡片挡住，动效等于白做。
+     ⚠️ 只改 CSS，**不碰任何类名**（HTML 和 JS 都依赖它们）。 */
+  :root{
+    /* ⚠️ 2026-09-17：**必须声明 `color-scheme`** —— 见下面 `body.dark` 那段的长注释。
+       浅色主题这一份声明 light，深色那份覆盖成 dark。 */
+    color-scheme:light;
+    --bg:#dfe9f7; --card:rgba(255,255,255,.34); --card2:rgba(255,255,255,.22);
+    --line:rgba(20,50,90,.13); --text:#16233a; --dim:#5c6b82; --dim2:#8494a8;
+    --accent:#3b6fb5; --accent-soft:rgba(59,111,181,.12); --accent-line:rgba(59,111,181,.45);
+    --ok:#16a34a; --warn:#c2780a; --err:#dc2626;
+    --radius:12px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    /* ⚠️ 2026-09-17：底色不能再是一块纯色 —— 液态玻璃要「透出东西」才有意义。
+       下面三层柔光分别是左上偏蓝、右上偏紫、底部偏青，再压一层蓝白线性底。 */
+    /* ⚠️ 2026-09-17（第十版）：用户报「背景有点太亮了」→ 整体压暗约 6%。
+       起因是卡片底色压到三成之后透出得更多，底子太亮就显得刺眼。
+       ⚠️ 三处柔光的 rgba 结尾必须跟前面的 hex 同色（否则边缘会出现一圈脏色）。 */
+    background:
+      radial-gradient(1200px 700px at 12% -8%,#c9daf5 0%,rgba(201,218,245,0) 62%),
+      radial-gradient(1000px 620px at 92% 8%,#d4cdf6 0%,rgba(212,205,246,0) 60%),
+      radial-gradient(900px 600px at 50% 108%,#c7e2f8 0%,rgba(199,226,248,0) 60%),
+      linear-gradient(160deg,#dfe9f8 0%,#ecf2fc 46%,#d8e4f4 100%);
+    background-attachment:fixed;
+    color:var(--text);min-height:100vh}
+  /* ── 背景：会流动、会被鼠标撑散的色坨（2026-09-17 第三版）──
+     ⚠️ 前两版都不对，用户连着纠正了两次：
+        第一版「两个大渐变慢慢漂」→ **肉眼看是静态的**（位移太小、还叠了 blur）；
+        第二版加大幅度 → 仍然不是他要的，他要的是
+        **「一堆小色坨像浮在水上的油滴，鼠标穿过去把它们撑散，过后又自己合回来」**。
+     所以这版不再是"写死的 background 动画"，改成**真实元素 + 极简物理**：
+        每个色坨有一个「家」的位置 → 被鼠标推开 → 弹簧把它拉回去。
+     实现细节（别再改错）：
+        · 只改 `transform`（GPU 合成），**绝不改 `background`** —— 改背景会触发重绘，14 个必卡；
+        · 用 `blur` 让相邻色坨视觉上"融"在一起（油滴互溶的观感）；
+        · 色坨数量/大小/颜色和物理参数都在下面的 JS 里，调那几个常量就行。 */
+  .bgfx{position:fixed;inset:0;z-index:-2;pointer-events:none;overflow:hidden}
+  .blob{position:absolute;top:0;left:0;border-radius:50%;will-change:transform;
+    filter:blur(26px);opacity:.72}
+  .blob.m{opacity:.60;filter:blur(22px)}
+  @media (prefers-reduced-motion:reduce){.blob{filter:blur(24px)}}
+  header{background:linear-gradient(180deg,rgba(255,255,255,.56),rgba(255,255,255,.28));
+    backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    -webkit-backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    border-bottom:1px solid rgba(255,255,255,.66);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.75),0 6px 24px -14px rgba(31,38,135,.18);
+    padding:13px 24px;display:flex;align-items:center;gap:14px;
+    position:sticky;top:0;z-index:10}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.3px}
+  header h1::before{content:'';display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:var(--accent);margin-right:9px;vertical-align:middle;
+    box-shadow:0 0 0 4px var(--accent-soft)}
+  header .sub{color:var(--dim);font-size:12px}
+  header .spacer{flex:1}
+  /* ── 布局：左侧栏目 + 右侧内容（纯 CSS Grid，**不动 HTML 结构**）── */
+  .wrap{max-width:1320px;margin:0 auto;padding:22px 24px 60px;
+    display:grid;grid-template-columns:190px minmax(0,1fr);gap:22px;align-items:start}
+  nav{display:flex;flex-direction:column;gap:3px;grid-column:1;
+    position:sticky;top:76px;padding:13px 0 13px 11px;border-radius:18px;
+    /* 和 .card 同一套指数折射带（见 .card 的注释），只是窄一档 —— 侧栏是配角 */
+    background:linear-gradient(135deg,rgba(255,255,255,.21),rgba(255,255,255,.03) 48%,rgba(255,255,255,.11));
+    backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    -webkit-backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    border:0;
+    box-shadow:
+      inset 0 0 0 2px rgba(255,255,255,.92),
+      inset 0 0 9px 3px rgba(255,255,255,.58),
+      inset 0 0 18px 8px rgba(255,255,255,.36),
+      inset 0 0 30px 14px rgba(255,255,255,.20),
+      inset 0 0 48px 22px rgba(255,255,255,.10),
+      inset 0 1px 0 rgba(255,255,255,.82),
+      0 0 0 1px rgba(255,255,255,.30),
+      0 10px 34px -10px rgba(31,38,135,.20)}
+  nav button{background:transparent;border:0;padding:9px 12px;border-radius:8px;cursor:pointer;
+    font-size:13.5px;color:var(--dim);text-align:left;
+    /* ── Dock 放大（2026-09-17 用户要求「macOS dock 那种悬停自动放大」）──
+       ⚠️ 用户后来纠正过两次，这两条都是他明确要的：
+         ① **必须等比缩放** —— 第一版我用 `scale(x, y)` 横竖给不同倍数，
+            结果**字体被拉变形了**（「不好看，我建议还是长宽比例不能变」）。
+         ② 等比之后横向就会顶出面板（「选择框有点出头了」），
+            所以**右留 24px 余量**：按钮平时窄一点，放大到 1.16 倍正好填满，
+            既明显、又不会溢到边框外面。
+       `transform-origin` 必须是**左边缘**：放大要"往右顶出去"，
+       用默认的 center 会两边一起撑，看着像抖。 */
+    transform-origin:left center;
+    margin-right:24px;
+    transition:transform .1s ease-out,background .12s,color .12s}
+  nav button:hover{background:var(--accent-soft);color:var(--text)}
+  nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:600;
+    box-shadow:inset 2px 0 0 var(--accent)}
+  #problems{grid-column:1/-1}
+  section{grid-column:2;min-width:0}
+  /* ── 「液态玻璃」（2026-09-17 用户要求模仿 iOS 26 Liquid Glass）──
+     真液态玻璃的四件套，缺一不可：
+       ① 半透明 + 大 blur + 提高 saturate/brightness（让底下透出来的颜色更艳、更"湿"）
+       ② **斜向高光渐变**（左上亮、右下暗）—— 玻璃"有厚度"靠的就是它
+       ③ 亮描边 `1px rgba(255,255,255,.58)` —— 模拟边缘折射
+       ④ 内阴影：顶部一道强高光 + 底部一道弱反光 —— 镜面反射
+     ⚠️ 别用 `::before` 铺高光：卡片里有 h2/div，伪元素会**盖住内容**，
+        还得给每个子元素补 z-index —— 这文件有 80 多处卡片子元素，补不干净。
+        所以高光走 `background` 的多层渐变，不另开图层。 */
+  .card{position:relative;border-radius:22px;padding:21px 23px;margin-bottom:14px;
+    /* ⚠️ 2026-09-17 第五版：原来那组 (.60/.26/.46) 太白了 —— 用户连报两次「没有生效」。
+       查清了：**不是缓存，是白得看不出来**（六成白 + 浅底 ≈ 一张白纸）。
+       ── 第六版：用户要求「加大边框的厚度，也就是能折射后方背景的那一块面积」──
+       当时用 10px 实心半透明 border 做厚边，原理没错（`backdrop-filter` 覆盖整个 border-box，
+       边框区照样在折射背景），但**做出来有两条硬边**：border 内外各一条亮度跳变，
+       外加一条 `0 0 0 1px` 的实线 —— 用户一眼看出「明显有个边线，过渡不够平滑」。
+       ── 第七版（现在）：改用**多层带 blur 的 inset 内发光**叠出衰减曲线 ──
+       ① 去掉 border，折射带完全由 inset 阴影构成，每一档都比外一档暗约一半：
+          1px .92 → 5px .58 → 11px .34 → 20px .18 → 32px .09
+          连起来就是**指数衰减**的亮度剖面（用户原话「折射率应该是呈指数变化的」）。
+       ② `blur` 负责把每一档的边缘糊开，档与档之间自然接上，不再有跳变。
+       ③ 外面只留一道很淡的 `.34` 轮廓交代玻璃边界（原来 `.50` 太实，那条"边线"就是它）。
+       ⚠️ 去掉 border 后 padding 要加回同样厚度（21 ≈ 原来的 10+11），否则内容会贴到折射带上。 */
+       /* ── 第八版：用户要求「给玻璃加上高光，只有面朝鼠标的一侧边缘有高光」──
+       把鼠标当**光源**：从卡片中心朝鼠标画一条线，落在边框上的那个点就是高光中心
+       （`--glare` 由 JS 算好整条渐变写进来，见文件末尾的 updateGlare）。
+       ⚠️ 高光整个走 `var(--glare,none)`，CSS 里**不出现 calc / 变量算式** ——
+       只要有一个表达式非法，整条 `background` 都会作废（卡片会变成没背景）。 */
+    /* ⚠️ 第十八版：用户要「先把整个卡片稍微压暗一点」。
+       压暗的手段是**降低白色的 alpha（让它更透）**，而不是叠黑 ——
+       叠黑会得到一层灰、显脏；降白则是露出背景的蓝，暗得干净。 */
+    background:linear-gradient(135deg,rgba(255,255,255,.20) 0%,rgba(255,255,255,.02) 42%,rgba(255,255,255,.10) 100%);
+    backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    -webkit-backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    border:0;
+    box-shadow:
+      /* ① 折射带：由外向内指数衰减（先写的在最上层）
+         ⚠️ 第九版把每档的 spread 拉开，因为改成指数衰减后亮部被压在最外 1px
+            （用户报「看起来变薄了」）。亮度按约 ×0.6 递减 = 指数剖面，只是带更厚。
+         ⚠️ 第十一版在这里加过"内侧暗环 + 压弱玻璃体"，用户否了：
+            「这版改的不行，回退吧，我的意思不是内外的问题，就是高光方向的问题」
+            —— 而且我当时把背景油滴透过来的紫色误判成了暗环的效果。已回退。 */
+      inset 0 0 0 2px rgba(255,255,255,.95),
+      inset 0 0 9px 3px rgba(255,255,255,.66),
+      inset 0 0 18px 8px rgba(255,255,255,.44),
+      inset 0 0 30px 15px rgba(255,255,255,.27),
+      inset 0 0 48px 24px rgba(255,255,255,.15),
+      inset 0 0 72px 36px rgba(255,255,255,.07),
+      /* ② 顶部受光（光从左上来，厚度才有方向） */
+      inset 0 1px 0 rgba(255,255,255,.85),
+      /* ③ 外轮廓：很淡的一道 */
+      0 0 0 1px rgba(255,255,255,.34),
+      /* ④ 外投影 */
+      0 10px 34px -10px rgba(31,38,135,.20),
+      0 1px 2px rgba(31,38,135,.06)}
+  /* ── 边框折射高光（第十九版，2026-09-17）──
+     用户要求「高光也要参与边框光线折射弯曲，现在看着有点穿模的感觉」。
+     原来高光是一条**直线**线性渐变，从卡片一侧直穿到另一侧 → 所以像穿模。
+     真实玻璃的高光是**贴着边缘拐弯**的，所以这版两处一起换：
+       ① 高光改用 `conic-gradient` —— 它本来就是绕圈（按角度）的，
+          天然沿边框弯曲，不可能横穿卡片；
+       ② 伪元素铺满 + **四条边的渐变带 mask** 只保留边缘那一圈。
+          四层 mask 叠出来的是**渐变**，所以没有第十六版 `mask-composite:xor` 那种硬边。
+     ⚠️ 角度约定：conic 的 0deg 同样是"正上方、顺时针"，跟 linear 一致，
+        所以 JS 里那个 ang 的算法不用改。 */
+  .card::after,nav::after{content:'';position:absolute;inset:0;border-radius:inherit;
+    background:var(--glare,none);pointer-events:none;
+    /* ⚠️⚠️ 2026-09-17（用户截图报的「红圈内的高光比鼠标旁更亮」）——
+       换过两版，记一下结论，别再走回头路：
+
+       ① **四层边带**（上/下/左/右各一层）：mask 默认相加，**角上两层重叠 alpha 翻倍** ✗
+       ② **单层椭圆**（`closest-side`）：不叠加了，但椭圆弧在中点和角之间**内凹** →
+          靠角处覆盖带更宽 → 用户反馈「高光面积又变大了」✗
+       ③ **回到四层边带**（就是现在这个）：覆盖宽度均匀，而且——
+          **真正的病根不在这儿，在 `--glare` 用的 `conic-gradient`**：
+          conic 按"角度"均匀，而**角上一小段角度只对应很短的一段边缘** →
+          同等亮度压在一个角上就显得比边上亮。改用 `radial-gradient` 之后
+          （见 `updateGlare`）亮度按**到圆心的实际距离**衰减，沿边缘是均匀的，
+          角上会自然衰减掉 —— 那时候四层边带在角上的那点叠加也就不明显了。 */
+    -webkit-mask:
+      linear-gradient(to bottom,#000 0,#000 7px,rgba(0,0,0,0) 34px) top/100% 34px no-repeat,
+      linear-gradient(to top,#000 0,#000 7px,rgba(0,0,0,0) 34px) bottom/100% 34px no-repeat,
+      linear-gradient(to right,#000 0,#000 7px,rgba(0,0,0,0) 34px) left/34px 100% no-repeat,
+      linear-gradient(to left,#000 0,#000 7px,rgba(0,0,0,0) 34px) right/34px 100% no-repeat;
+    mask:
+      linear-gradient(to bottom,#000 0,#000 7px,rgba(0,0,0,0) 34px) top/100% 34px no-repeat,
+      linear-gradient(to top,#000 0,#000 7px,rgba(0,0,0,0) 34px) bottom/100% 34px no-repeat,
+      linear-gradient(to right,#000 0,#000 7px,rgba(0,0,0,0) 34px) left/34px 100% no-repeat,
+      linear-gradient(to left,#000 0,#000 7px,rgba(0,0,0,0) 34px) right/34px 100% no-repeat}
+  .card h2{font-size:14.5px;margin:0 0 4px;font-weight:600;letter-spacing:.2px}
+  .card .hint{color:var(--dim);font-size:12.5px;margin:0 0 14px}
+  /* 说明用的表格 */
+  .tbl{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
+  .tbl th,.tbl td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  .tbl th{background:rgba(255,255,255,.40);font-weight:600;white-space:nowrap;color:var(--dim)}
+  .tbl td:last-child{white-space:nowrap;color:var(--dim)}
+  /* 分群灵敏度列表 */
+  .gr-list{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+  .gr-row{display:flex;align-items:center;gap:12px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.34)}
+  .gr-name{flex:1;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .gr-id{color:var(--dim);font-size:11.5px;margin-left:8px}
+  .gr-row select{width:auto;min-width:210px;flex:0 0 auto}
+  label{display:block;font-size:13px;color:var(--dim);margin:10px 0 4px}
+  input[type=text],input[type=number],input[type=password],textarea,select{
+    width:100%;padding:8px 10px;border-radius:9px;font:inherit;
+    /* 输入框也走液态玻璃，但比卡片更透 —— 它是要填内容的地方，不该比卡片还抢眼 */
+    background:linear-gradient(135deg,rgba(255,255,255,.42),rgba(255,255,255,.18));
+    backdrop-filter:blur(18px) saturate(2.2);
+    -webkit-backdrop-filter:blur(18px) saturate(2.2);
+    border:1px solid rgba(255,255,255,.50);
+    /* 输入框也走"指数衰减"：一条亮线 + 一圈柔和内发光，别做成硬边 */
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.72),
+      inset 0 0 9px 2px rgba(255,255,255,.26),
+      inset 0 1px 0 rgba(255,255,255,.70),
+      0 1px 2px rgba(31,38,135,.05);
+    color:var(--text)}
+  input:focus,textarea:focus,select:focus{outline:0;border-color:var(--accent-line);
+    box-shadow:0 0 0 3px var(--accent-soft)}
+  textarea{resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+  .row{display:flex;gap:14px;flex-wrap:wrap}
+  .row>div{flex:1;min-width:190px}
+  button.act{background:var(--accent);color:#0d1117;border:0;padding:9px 18px;border-radius:7px;
+    cursor:pointer;font-size:14px;font-weight:600}
+  button.act:hover{filter:brightness(1.1)}
+  button.act:disabled{opacity:.45;cursor:default}
+  button.ghost{background:var(--card2);border:1px solid var(--line);color:var(--text);
+    padding:9px 16px;border-radius:7px;cursor:pointer}
+  button.ghost:hover{border-color:var(--accent-line);color:var(--accent)}
+  button.danger{background:transparent;border:1px solid var(--err);color:var(--err);
+    padding:6px 12px;border-radius:7px;cursor:pointer}
+  .btns{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap}
+  /* ⚠️ 2026-09-21 加：人设页那几组"标签在上、输入框在下"的字段。
+     为什么要这三个类：原来用 `.row` + `label>&nbsp;` 硬凑，结果
+     输入框宽窄不一、按钮跟输入框**基线对不齐**，一屏看着很乱。
+     · `.flds` 横向排一组、**底部对齐**（按钮和输入框底部一条线）
+     · `.fld`  一个字段：标签上、控件下
+     · `.grp`  组标题（同一张卡片里分几段用） */
+  .flds{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-top:10px}
+  .fld{display:flex;flex-direction:column;gap:4px;min-width:200px}
+  .fld>label{margin:0}
+  .grp{font-weight:600;font-size:14px;margin:16px 0 0;color:var(--text)}
+  .msg{font-size:13px;padding:7px 12px;border-radius:7px;display:none;white-space:pre-wrap}
+  .msg.show{display:inline-block}
+  .msg.ok{background:rgba(63,185,80,.12);color:var(--ok);border:1px solid rgba(63,185,80,.35)}
+  .msg.err{background:rgba(248,81,73,.12);color:var(--err);border:1px solid rgba(248,81,73,.35)}
+  .msg.warn{background:rgba(210,153,34,.12);color:var(--warn);border:1px solid rgba(210,153,34,.35)}
+  .switch{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px dashed var(--line)}
+  .switch:last-child{border-bottom:0}
+  .switch input{width:17px;height:17px;accent-color:var(--accent)}
+  .switch .t{font-size:14px}
+  .switch .d{color:var(--dim);font-size:12.5px}
+  .faces{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px;margin-top:6px}
+  .face{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--card2)}
+  .face img{width:100%;height:112px;object-fit:contain;background:#0a0e13;display:block}
+  .face .body{padding:8px 9px}
+  .face .tag{font-weight:600;font-size:13px;margin-bottom:3px}
+  .face .when{color:var(--dim);font-size:11.5px;line-height:1.45;min-height:32px}
+  .face .ops{display:flex;gap:6px;margin-top:7px}
+  .face .ops button{flex:1;font-size:12px;padding:4px 0;border-radius:6px;border:1px solid var(--line);
+    background:var(--card);color:var(--text);cursor:pointer}
+  .drop{border:2px dashed var(--line);border-radius:9px;padding:26px;text-align:center;
+    color:var(--dim);cursor:pointer;font-size:13px;background:var(--card2)}
+  .drop.over{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;
+    background:var(--accent-soft);color:var(--accent);margin-right:6px}
+  .kv{display:flex;gap:10px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+  .kv b{color:var(--dim);font-weight:500;min-width:96px}
+  /* ⚠️ 容器类：`kv()` 生成的行本身就是 .kv，外层**不能**再套 .kv ——
+     套了外层就成了横向 flex，每一格被挤成一列竖排（一个字一行，2026-09-15 用户截图）。 */
+  .kvs{display:block;padding:0;border:0;font-size:13.5px}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;word-break:break-all;color:#9db6d8}
+  details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:6px 0}
+  details summary:hover{color:var(--accent)}
+  .hidden{display:none}
+  .rad{display:flex;align-items:flex-start;gap:10px;padding:11px 13px;border:1px solid var(--line);
+    border-radius:9px;cursor:pointer;background:var(--card2)}
+  .rad:hover{border-color:var(--accent-line);background:var(--accent-soft)}
+  .rad input{margin-top:3px;width:16px;height:16px;accent-color:var(--accent);flex-shrink:0}
+  .rad .t{font-size:14px;font-weight:500}
+  .rad .d{color:var(--dim);font-size:12.5px;line-height:1.5}
+  /* ── 窄屏：栏目回到顶部横排（手机上还能用）── */
+  @media (max-width:820px){
+    .wrap{grid-template-columns:1fr;padding:16px}
+    nav{flex-direction:row;flex-wrap:wrap;position:static;grid-column:1}
+    nav button{text-align:center}
+    section,#problems{grid-column:1}
+  }
+  /* ══════════════════════════════════════════════════════════════
+     深色模式（第十六版，2026-09-17 用户要求「增加黑暗模式，把背景改成黑色，
+     其他的颜色也做相应的变动使得不影响美观和可读性」）
+     ── 三条原则 ──
+     ① **只覆盖颜色，不动任何布局**（宽高、间距、圆角一律不碰）；
+     ② 深色玻璃靠"白边 + 暗底"出效果 —— 卡片底压到 .10 以下，
+        边缘折射带仍是白色（低透明度）。跟浅色模式正好相反；
+     ③ 正文 #e6edf7 压 #080b11 对比度约 15:1，可读性够（次要文字 #9aa8bf ≈ 8:1）。
+     ⚠️ 油滴必须单独调：它那套青/蓝/紫是给浅底调的，直接搬到黑底上会很跳。
+     ══════════════════════════════════════════════════════════════ */
+  body.dark{
+    /* ⚠️⚠️ 2026-09-17（用户截图报的：**深色模式下下拉框看不清**）——
+       `<select>` 点开后那个选项列表是**浏览器原生渲染**的，CSS 里
+       `body.dark select{color:...}` 只管得到**框本身**，管不到那个弹出层 →
+       结果是"浅色字 + 白底"，灰得几乎看不见。
+
+       **正解是 `color-scheme: dark`**：它告诉浏览器"这个页面是深色主题"，
+       浏览器会**连原生控件一起**换成深色（下拉列表、滚动条、日期选择器、复选框…）。
+       这比一条条去 style 原生控件靠谱得多 —— 那些东西本来就大半不受 CSS 管。
+
+       下面那两条 `option` 规则是**补充**：个别浏览器认 color-scheme 但 option 仍漏。 */
+    color-scheme:dark;
+    --bg:#080b11;
+    --card:rgba(255,255,255,.07); --card2:rgba(255,255,255,.05);
+    --line:rgba(255,255,255,.11); --text:#e6edf7; --dim:#9aa8bf; --dim2:#6f7d93;
+    --accent:#6ea8f0; --accent-soft:rgba(110,168,240,.16); --accent-line:rgba(110,168,240,.55);
+    --ok:#4ade80; --warn:#fbbf24; --err:#f87171;
+    background:
+      radial-gradient(1200px 700px at 12% -8%,#16233c 0%,rgba(22,35,60,0) 62%),
+      radial-gradient(1000px 620px at 92% 8%,#241d3d 0%,rgba(36,29,61,0) 60%),
+      radial-gradient(900px 600px at 50% 108%,#0e2733 0%,rgba(14,39,51,0) 60%),
+      linear-gradient(160deg,#080b11 0%,#0d121b 46%,#090d13 100%);
+    background-attachment:fixed}
+  body.dark header{background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.035));
+    border-bottom-color:rgba(255,255,255,.13);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 6px 24px -14px rgba(0,0,0,.7)}
+  /* 卡片：折射带的六档全部换成低透明度（**顺序、spread、blur 一律不动**，
+     只改 alpha —— 这样两种主题下的"厚度"是一致的） */
+  /* ⚠️⚠️ 2026-09-17（用户截图报的「高光在中间，鼠标在右边」）——
+     这条是**固定**的（`135deg` 的左上角最亮），它**不跟鼠标**。
+     深色下我把跟随鼠标的高光降到 0.5 之后，**这个固定亮部反而比它显眼了**，
+     看起来就像"高光不跟手 / 高光在中间"。
+     现在压平（三档都在 .035~.055，几乎均匀）→ **卡片上只剩跟随鼠标的那一道光**。
+     ⚠️ 浅色那份**不动**：那里跟随鼠标的高光是"拉满"的（0.98），
+        本来就盖得住这道底光，而且用户没报过浅色有这问题。 */
+  body.dark .card,body.dark nav{background:linear-gradient(135deg,rgba(255,255,255,.055) 0%,rgba(255,255,255,.035) 46%,rgba(255,255,255,.045) 100%)}
+  /* ⚠️⚠️ 2026-09-17（用户截图报的「夜间模式的高光可以薄一点，晚上有点晃眼睛」）——
+     原来的六档 alpha 是照浅色的比例配的，**放在暗背景上对比太强**，夜里刺眼。
+     现在整体降约 40%（最外那道亮线 .20 → .13 是主要刺眼源），
+     而且**顺序 / spread / blur 一律不动** —— 只改亮度，玻璃的"厚度"不变。
+     ⚠️ 浅色那份**故意不动**：那里的高光是用户明确要过"拉满"的效果，而且白底不刺眼。 */
+  body.dark .card{box-shadow:
+      inset 0 0 0 2px rgba(255,255,255,.13),
+      inset 0 0 9px 3px rgba(255,255,255,.060),
+      inset 0 0 18px 8px rgba(255,255,255,.032),
+      inset 0 0 30px 15px rgba(255,255,255,.016),
+      inset 0 0 48px 24px rgba(255,255,255,.009),
+      inset 0 0 72px 36px rgba(255,255,255,.004),
+      inset 0 1px 0 rgba(255,255,255,.10),
+      0 0 0 1px rgba(255,255,255,.06),
+      0 10px 34px -10px rgba(0,0,0,.70),
+      0 1px 2px rgba(0,0,0,.40)}
+  body.dark nav{box-shadow:
+      inset 0 0 0 2px rgba(255,255,255,.12),
+      inset 0 0 9px 3px rgba(255,255,255,.055),
+      inset 0 0 18px 8px rgba(255,255,255,.030),
+      inset 0 0 30px 14px rgba(255,255,255,.015),
+      inset 0 0 48px 22px rgba(255,255,255,.008),
+      inset 0 1px 0 rgba(255,255,255,.09),
+      0 0 0 1px rgba(255,255,255,.05),
+      0 10px 34px -10px rgba(0,0,0,.70)}
+  /* ⚠️ 深色下还要把 `backdrop-filter` 的 **brightness 收回来**（2026-09-17）。
+     原来它沿用了浅色那份的 `brightness(1.06)`：那是**在提亮**。
+     白底上提亮看不出来，黑底上等于给整张卡片糊了一层灰白光 ——
+     比折射带更"闷"的晃眼源就是它。这里直接去掉 brightness（= 1.0）。 */
+  body.dark .card,body.dark nav{
+    backdrop-filter:blur(24px) saturate(2.3);
+    -webkit-backdrop-filter:blur(24px) saturate(2.3)}
+  body.dark button.ghost{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.15)}
+  body.dark button.act{color:#07101d}          /* 亮蓝底 → 深色字 */
+  body.dark nav button:hover{background:rgba(255,255,255,.08)}
+  body.dark input[type=text],body.dark input[type=number],body.dark input[type=password],
+  body.dark textarea,body.dark select{
+    background:linear-gradient(135deg,rgba(255,255,255,.09),rgba(255,255,255,.035));
+    border-color:rgba(255,255,255,.16);color:var(--text)}
+  /* ⚠️ 兜底：`color-scheme:dark` 是主力（见上面那段注释），
+     但个别浏览器认了 color-scheme、`option` 却仍然用系统色 → 再钉一层。 */
+  body.dark select option,body.dark select optgroup{background:#141b29;color:var(--text)}
+  body.dark .tbl th{background:rgba(255,255,255,.07)}
+  body.dark .gr-row{background:rgba(255,255,255,.06)}
+  body.dark .blob{opacity:.40;filter:blur(30px)}
+  body.dark .blob.m{opacity:.34;filter:blur(24px)}
+  /* ⚠️ 2026-09-20 用户要求：「把 webUI 需要粗体的地方改为粗体，比如标题、左侧栏」——
+     原来标题是 600、左侧栏压根没设字重（等于 400，看着很细），统一提上来：
+       标题 700 / 次级标题 600 / 左侧栏 600（选中的那个 700，配合背景色区分）
+     ⚠️ 放在样式表最后是**故意的**：同权重下后者生效，这样不用去改上面那些原规则，
+      以后想回退也只删这几行就行。 */
+  header h1{font-weight:700}
+  .card h2{font-weight:700}
+  .card h3{font-weight:600}
+  /* ⚠️ 2026-09-20 用户要求：「把 webui 左边侧栏的字体调大一点」——
+     侧栏原来没设字号、继承 body 的 14px，而按钮又高又宽，字看着偏小 → 提到 15.5px。
+     （和上面那组字重规则放一起，都属于"末尾覆盖"，想回退只删这几行。） */
+  nav button{font-weight:600;font-size:15.5px}
+  nav button.on{font-weight:700}
+</style>
+</head>
+<body>
+<!-- 背景色坨的容器（2026-09-17 用户要求「像浮在水上的油滴，鼠标穿过会撑散、过后自己合回来」）：
+     里面的色坨由 JS 生成并逐帧算位置 —— 写死在 HTML 里没法做物理。 -->
+<div class="bgfx" id="bgfx"></div>
+<header>
+  <h1>客服 Saki · 管理台</h1>
+  <span class="sub" id="hdr"></span>
+  <span class="spacer"></span>
+  <!-- 深色模式开关（2026-09-17 加）：文案由 JS 按当前主题写（开着显示"浅色"） -->
+  <button class="ghost" id="themeBtn" onclick="toggleTheme()">深色</button>
+  <button class="ghost" onclick="reloadAll()">重新读取</button>
+</header>
+
+<div class="wrap">
+  <div id="problems"></div>
+
+  <nav>
+    <button data-tab="model" class="on">模型</button>
+    <button data-tab="groups">群与触发</button>
+    <button data-tab="faces">表情包</button>
+    <button data-tab="knowledge">知识库</button>
+    <!-- ⚠️ 2026-09-21：人设**单独一页**（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
+    <button data-tab="persona">人设</button>
+    <button data-tab="qzone">QQ空间</button>
+    <button data-tab="life">日常事件</button>
+    <button data-tab="quest">二级剧情</button>
+    <!-- ⚠️ 2026-09-16：按群设定**单独一页**（它管日常事件 + 二级剧情 + 收紧度三样） -->
+    <button data-tab="groupcfg">按群设定</button>
+    <button data-tab="affinity">好感度 / 好友</button>
+    <button data-tab="qqlogin">QQ登录</button>
+      <button data-tab="status">运行状态</button>
+  </nav>
+
+  <!-- 模型 -->
+  <section id="tab-model">
+    <div class="card">
+      <h2>身份（主人 / 机器人）</h2>
+      <p class="hint">
+        「<b>主人</b>」= 这台机器人**归谁**（原来的叫法是"群主/服主"，用户 2026-09-15 改叫<b>主人</b>）。
+        对他说话是**同级口吻**、不走客服那套；好感度那套也**对他不生效**。<br>
+        「<b>机器人账号</b>」= 它自己那个 QQ —— **登录脚本（一键启动）也读这里**去做快速登录，所以别填错。
+      </p>
+      <div class="row">
+        <div style="flex:1">
+          <label>主人 QQ</label>
+          <input type="text" id="id-ownerQQ" placeholder="例如 10000001">
+        </div>
+        <div style="flex:1">
+          <label>机器人 QQ</label>
+          <input type="text" id="id-botQQ" placeholder="例如 10000002">
+        </div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveIdentity()">保存</button>
+        <span class="msg" id="msg-id"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>大模型</h2>
+      <p class="hint">换成别的服务（百炼、Kimi、本地 Ollama…）也可以，只要兼容 OpenAI 接口。改完记得保存。</p>
+      <div class="row">
+        <div style="flex:2">
+          <label>API 地址（baseURL）</label>
+          <input type="text" id="llm-baseURL" placeholder="https://api.deepseek.com/v1">
+        </div>
+        <div style="flex:1.4">
+          <label>模型（点右边按钮从 API 拉取列表）</label>
+          <div style="display:flex;gap:8px">
+            <select id="llm-model" style="flex:1"></select>
+            <button class="ghost" onclick="loadModels()" id="btn-models" style="white-space:nowrap;padding:8px 12px">刷新列表</button>
+          </div>
+        </div>
+      </div>
+      <p class="hint" id="model-hint" style="margin-top:8px"></p>
+      <label>API Key</label>
+      <input type="password" id="llm-apiKey" placeholder="sk-...">
+      <div class="row">
+        <div><label>temperature（0~2，越大越发散）</label><input type="number" step="0.1" min="0" max="2" id="llm-temperature"></div>
+        <div><label>单次最大 token</label><input type="number" id="llm-maxTokens"></div>
+        <div><label>超时（毫秒）</label><input type="number" id="llm-timeout"></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveModel()">保存</button>
+        <button class="ghost" onclick="testLLM()">测试连通性</button>
+        <span class="msg" id="msg-llm"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 群与触发 -->
+  <section id="tab-groups" class="hidden">
+    <div class="card">
+      <h2>它能在哪些群说话</h2>
+      <p class="hint">
+        ⚠️ <b>这个名单同时决定两件事</b>：① 不在名单里的群，消息它<b>完全不处理</b>；
+        ② <b>只有名单里的群，它才会主动搭话</b>（没 @ 它也接）。<br>
+        一行一个群号。留空 = 所有群都应答（不推荐，客服容易在无关的群里乱说话）。<br>
+        不知道群号？在目标群里随便发条消息，然后看机器人日志，或者用
+        <span class="mono">node test/group-history.js</span> 拉群列表。<br>
+        ⚠️ 想让它<b>主动搭话</b>，除了填在这里，那个群的<b>灵敏度还要设成 1 或 2</b>
+        （在「每个群的灵敏度」里设）；3 档只认 @。
+      </p>
+      <textarea id="trigger-allowGroups" rows="4" placeholder="200000001"></textarea>
+
+      <h3 style="margin:18px 0 6px">它能回应哪些人的私聊</h3>
+      <p class="hint">
+        一行一个 QQ 号。<b>只有名单中的人私聊时，它才会回应</b>；留空 = 不回应任何私聊。<br>
+        这与群聊白名单分开：即使开启「私聊应答」，也不会放开未列入名单的陌生人。
+      </p>
+      <textarea id="trigger-allowPrivateUsers" rows="4" placeholder="10000001"></textarea>
+
+      <div class="switch">
+        <input type="checkbox" id="trigger-groupChat">
+        <div><div class="t">群聊应答</div><div class="d">关掉之后它只在私聊里回话</div></div>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="trigger-privateChat">
+        <div><div class="t">私聊应答</div><div class="d">仅回应上方私聊名单中的人</div></div>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="trigger-requireAtInGroup">
+        <div><div class="t">群里需要 @ 才回复</div><div class="d">旧选项，下面选了灵敏度之后以灵敏度为准</div></div>
+      </div>
+      <div class="btns">
+        <!-- ⚠️ 保存按钮必须放在**这个卡片里**。
+             以前它只在下面「回复与分条」那个卡片里，用户在这儿填完群号
+             根本找不到保存按钮（真实反馈：「我都不知道哪个按钮是保存群号的」）。 -->
+        <button class="act" onclick="saveTrigger()">保存以上设置</button>
+        <span class="msg" id="msg-groups"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>群里回复灵敏度</h2>
+      <p class="hint">决定它在群里多主动。越往下越活跃，但也越费 token。</p>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:6px">
+        <label class="rad">
+          <input type="radio" name="respondTo" value="3">
+          <div><div class="t">③ 只有 @ 它才回复</div><div class="d">最安静。群里不 @ 它它就不说话，除非命中关键词。</div></div>
+        </label>
+        <label class="rad">
+          <input type="radio" name="respondTo" value="2">
+          <div><div class="t">② 只回跟服务器有关、或聊到它的消息（推荐）</div><div class="d">有人问服务器的事它主动答；有人聊「Saki」它出来接话。普通闲聊不插嘴。</div></div>
+        </label>
+        <label class="rad">
+          <input type="radio" name="respondTo" value="1">
+          <div><div class="t">① 只要有能回答的就马上回</div><div class="d">最活跃，什么话题都可能接。token 消耗最大，群里会显得很话痨。</div></div>
+        </label>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveRespondTo()">保存灵敏度</button>
+        <span class="msg" id="msg-respond"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>① 档的「收紧度」（按群）</h2>
+      <p class="hint">
+        <b>只对灵敏度 ① 的群生效</b>（② ③ 本来就是安静档，不受这里影响）。<br>
+        往左 = 更活跃，往右 = 更安静。<b>改了当场生效，不用重启。</b>
+        <br>⚠️ **按群各设各的**（2026-09-15 晚）：热闹的大群可以调松一点（才接得上话），
+        严肃的群可以调紧。<b>没设过的群 = 默认 50</b>。
+      </p>
+      <div class="kv" style="flex-wrap:wrap;gap:8px;margin:0 0 8px">
+        <b>哪个群</b>
+        <select id="strict-group" style="width:auto;margin:0" onchange="fillStrictForGroup()"></select>
+        <span class="hint" style="margin:0" id="strict-group-note"></span>
+      </div>
+      <div style="margin:14px 0 6px">
+        <input type="range" id="strictness" min="0" max="100" step="5" value="50"
+               style="width:100%" oninput="onStrictInput()">
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:#666">
+        <span>0 · 最活跃</span><span>50 · 平衡</span><span>100 · 最克制</span>
+      </div>
+      <div id="strict-desc" style="margin-top:10px;font-size:13px;line-height:1.7"></div>
+      <div class="btns">
+        <button class="act" onclick="saveStrictForGroup()">保存这个群的</button>
+        <button class="ghost" onclick="clearStrictForGroup()">还原成默认（50）</button>
+        <span class="msg" id="msg-strict-group"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>分群调节（每个群可以不一样）</h2>
+      <p class="hint">
+        上面那个是**全局默认**。这里可以给**单个群**单独设一档 ——
+        比如大群收紧成「只认 @」，熟人小群放开成「什么都能聊」。<br>
+        选「跟随全局」就用上面的默认值。
+      </p>
+      <div id="group-respond-list" class="gr-list">加载中…</div>
+      <div class="btns">
+        <button class="ghost" onclick="loadGroupRespond()">刷新群列表</button>
+        <span class="msg" id="msg-group-respond"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>谁能教它</h2>
+      <p class="hint">群里默认只认群主和管理员（靠 QQ 角色判断）。这里可以额外授权某些 QQ 号，一行一个。</p>
+      <textarea id="teach-teachers" rows="3" placeholder="（留空 = 只认群主和管理员）"></textarea>
+      <div class="switch">
+        <input type="checkbox" id="teach-allowPrivateTeach">
+        <div><div class="t">允许群主私聊教它</div><div class="d">关掉则只能在群里教</div></div>
+      </div>
+      <div class="row">
+        <div>
+          <label>触发教学的词（逗号分隔）</label>
+          <input type="text" id="teach-keywords" placeholder="记住,你需要知道,更正一下">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>回复与分条</h2>
+      <div class="row">
+        <div><label>记忆轮数</label><input type="number" id="trigger-historyRounds"></div>
+        <div><label>冷却（毫秒）</label><input type="number" id="trigger-cooldownMs"></div>
+        <div><label>单条最多字数</label><input type="number" id="chunking-maxChars"></div>
+        <div><label>分条间隔（毫秒）</label><input type="number" id="chunking-delayMs"></div>
+        <div><label>分条间隔上限（毫秒，留空=不随机）</label><input type="number" id="chunking-delayMaxMs"></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveTrigger()">保存以上设置</button>
+        <span class="msg" id="msg-trigger"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>实时查服务器</h2>
+      <div class="switch">
+        <input type="checkbox" id="status-enable">
+        <div><div class="t">开启实时查询</div><div class="d">问「几个人在线」时去查真实状态，而不是瞎猜</div></div>
+      </div>
+      <div class="row">
+        <div style="flex:2"><label>服务器地址（带 SRV 记录的域名即可）</label><input type="text" id="status-host"></div>
+        <div><label>显示名</label><input type="text" id="status-displayName"></div>
+        <div><label>缓存秒数</label><input type="number" id="status-cacheSeconds"></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveStatus()">保存</button>
+        <button class="ghost" onclick="testServer()">立即查一次</button>
+        <span class="msg" id="msg-status"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 表情包 -->
+  <section id="tab-faces" class="hidden">
+    <div class="card">
+      <h2>添加表情</h2>
+      <p class="hint">
+        图片会被存到 <span class="mono">library/</span>。<b>「适用场合」写得越具体，它用得越准</b>——
+        这句话是它决定什么时候发这张图的唯一依据。<br>
+        QQ 表情支持 jpg / png / gif / webp，单张建议不超过 1MB。
+      </p>
+      <div class="drop" id="drop">点这里选图片，或把图片拖进来（可多选）</div>
+      <input type="file" id="file" accept="image/*" multiple class="hidden">
+      <div class="btns">
+        <button class="act" onclick="scanFaces()" id="btn-scan">更新表情库</button>
+        <button class="ghost" onclick="annotateFaces()" id="btn-annotate">自动补注释</button>
+        <span class="hint" style="margin:0">先扫一遍 <span class="mono">library/</span>；
+          「自动补注释」让机器人看图补上「图里是谁 / 什么时候用」（每张约 5~10 秒）</span>
+      </div>
+      <div class="btns">
+        <span class="msg" id="msg-face"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>表情列表 <span class="pill" id="face-count"></span></h2>
+      <p class="hint">点「编辑」可以改标签和适用场合。标签是模型调用时写的名字。</p>
+      <div class="faces" id="faces"></div>
+    </div>
+  </section>
+
+  <!-- 知识库 -->
+  <section id="tab-knowledge" class="hidden">
+    <div class="card">
+      <h2>该往哪个库写（别放错）</h2>
+      <p class="hint">知识分成几类，**放错地方会出现「我记录了你」这种副作用**，或者该记住的记不住。对照着写：</p>
+      <table class="tbl">
+        <tr><th>内容</th><th>放哪</th></tr>
+        <tr><td>它**自己**是什么、会干什么（比如「你会自己发说说」）</td><td><b>persona.md</b>（人设）</td></tr>
+        <tr><td>服务器的事：进服、排障、规则、存档、价格</td><td><b>hzymtr-server.md</b></td></tr>
+        <tr><td>**群友是谁**、什么性格、群里发生过什么（比如「luomosan 上初三，压力大」）</td><td><b>group-memory.md</b>（群资料库）</td></tr>
+        <tr><td>二次元作品、乐队、角色</td><td><b>knowledge/anime/&lt;库名&gt;.md</b>（⚠️ 由人设的 <span class="mono">anime.works</span> 决定读哪几个 —— 见「人设」页）</td></tr>
+        <tr><td>群里临时教的一句话（「记住：…」）</td><td><b>learned.md</b>（自动维护，这里只读）</td></tr>
+      </table>
+      <p class="hint" style="margin-top:8px">
+        简单判断：<b>关于「它自己」→ 人设</b>；<b>关于「服务器」→ 服务器库</b>；
+        <b>关于「群和群友」→ 群资料库</b>。
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>知识文件</h2>
+      <p class="hint">改完保存立即生效（不需要重启）。<span class="mono">learned.md</span> 由机器人和群主在群里维护，这里只读。</p>
+      <div class="row">
+        <div>
+          <label>选择文件</label>
+          <select id="k-file"></select>
+        </div>
+      </div>
+      <p class="hint" id="k-desc" style="margin-top:6px"></p>
+      <label>内容</label>
+      <textarea id="k-content" rows="22"></textarea>
+      <div class="btns">
+        <button class="act" onclick="saveKnowledge()" id="k-save">保存</button>
+        <span class="msg" id="msg-k"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>它学到的 <span class="pill" id="learned-count"></span></h2>
+      <p class="hint">群主在群里教它的内容。想删就在群里说「忘记：主题名」。</p>
+      <div id="learned-list" class="mono"></div>
+    </div>
+  </section>
+
+  <!-- 人设（2026-09-21 加：直接切换机器人核心人设） -->
+  <section id="tab-persona" class="hidden">
+    <div class="card">
+      <h2>当前人设 <span class="pill" id="p-cur-pill"></span></h2>
+      <p class="hint">
+        「人设包」= 一个角色的**一整套**：名字 / 自称 / 别人怎么叫她 / 口癖 / 性格正文 /
+        示例对话 / 引用哪些动画库。一个包 = 一个目录（<span class="mono">personas/&lt;id&gt;/</span>）。
+      </p>
+      <p class="hint">
+        ⚠️ 切换和保存都**不用重启机器人** —— 人设包是热重载的，存完立刻生效。
+      </p>
+      <div id="p-cur" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>切换人设</h2>
+      <p class="hint">
+        换角色 = 换这一整个包：名字 / 自称 / 外号 / 口癖 / 人设正文 / 示例对话 /
+        读哪几个动画库 / QQ 昵称头像。<b>切换和保存都不用重启机器人</b>。
+      </p>
+      <div class="flds">
+        <div class="fld" style="flex:1;min-width:260px">
+          <label>切到哪个人设包</label>
+          <select id="p-pick" onchange="personaPickChange()"></select>
+        </div>
+        <button class="act" onclick="personaSwitch()">切到这个</button>
+      </div>
+      <p class="hint" id="p-pick-hint" style="margin-top:8px"></p>
+      <div class="btns"><span class="msg" id="msg-p-switch"></span></div>
+    </div>
+
+    <div class="card">
+      <h2>新建人设</h2>
+      <p class="hint">
+        填 id + 角色名 →「搜集并起草」：联网搜资料，然后**按模板把人设逐字段填满**
+        （每个字段都会给值，填不出来的会留空并**列出来告诉你**）。
+        ⚠️ 结果**先给你看，点了保存才落盘**。
+      </p>
+
+      <div class="flds">
+        <div class="fld">
+          <label>新的 id（小写字母数字）</label>
+          <input id="p-new-id" placeholder="例：miku">
+        </div>
+        <div class="fld">
+          <label>角色名</label>
+          <input id="p-draft-name" placeholder="例：初音未来">
+        </div>
+        <div class="fld">
+          <label>出自哪部作品</label>
+          <input id="p-draft-work" placeholder="例：VOCALOID">
+        </div>
+      </div>
+
+      <div class="flds">
+        <div class="fld">
+          <label>动画库怎么办</label>
+          <select id="p-anime-mode" onchange="onAnimeModeChange()">
+            <option value="none">不用动画库</option>
+            <option value="reuse">复用已有的库（只读，不往里写）</option>
+            <option value="new">新建一个库（把搜到的资料填进去）</option>
+          </select>
+        </div>
+        <div class="fld" id="p-anime-reuse-wrap" style="display:none">
+          <label>复用哪一个</label>
+          <select id="p-anime-lib"></select>
+        </div>
+        <div class="fld" id="p-anime-new-wrap" style="display:none">
+          <label>新库的名字</label>
+          <input id="p-anime-name" placeholder="例：bangdream">
+        </div>
+        <button class="act" onclick="personaDraftStart()" id="p-draft-btn">搜集并起草</button>
+      </div>
+
+      <p class="hint" style="margin-top:10px">
+        ⚠️ 不给真人做人设；<span class="mono">persona.md</span> 限 3000 字（它每次请求都进提示词）。<br>
+        「复用」= 只在她的人设里**声明**引用那份库，**绝不动库里的内容**；
+        「新建」= 才把资料写进 <span class="mono">knowledge/anime/&lt;新库名&gt;.md</span>。
+      </p>
+      <div class="btns"><span class="msg" id="msg-p"></span></div>
+
+      <div class="grp" style="margin-top:20px">不想联网？建一个空的 / 复刻现成的</div>
+      <div class="flds">
+        <div class="fld">
+          <label>照谁复制</label>
+          <select id="p-new-from"></select>
+        </div>
+        <button class="ghost" onclick="personaCreate()">建一个（id 用上面那个）</button>
+      </div>
+      <div id="p-draft"></div>
+    </div>
+
+    <div class="card">
+      <h2>删除人设</h2>
+      <p class="hint">
+        删除是**挪走**（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
+        不是真销毁。<br>
+        而且**正在用的那个删不了** —— 先切到别的再删它。
+      </p>
+      <div class="btns">
+        <button class="danger" onclick="personaDelete()">删除「<span id="p-del-name">（上面选中的）</span>」</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>QQ 昵称 / 头像 <span class="pill" id="p-qq-pill"></span></h2>
+      <p class="hint">
+        ⚠️ 这两样**跟着人设走**：把昵称 / 头像存进这个人设包，**切换人设时会自动改成它的**
+        （改的是 <b>QQ 上真实的</b>昵称 / 头像，所有群和好友都看得见）。<br>
+        留空 = 切换时**不动**那一项（不是清空）。
+      </p>
+      <div class="row">
+        <div style="flex:0 0 auto">
+          <label>这个人设的头像</label>
+          <img id="p-avatar" src="" alt="（还没设）"
+               style="width:96px;height:96px;border-radius:12px;object-fit:cover;background:#1a1a2e;display:block">
+          <p class="hint" id="p-avatar-name" style="margin:6px 0 0"></p>
+        </div>
+        <div style="flex:1">
+          <label>这个人设的 QQ 昵称</label>
+          <input id="p-nick" placeholder="（留空 = 切换时不动昵称）">
+          <label style="margin-top:10px">换这个人设的头像（png / jpg / gif / webp，≤8MB）</label>
+          <div class="row">
+            <div style="flex:1"><input type="file" id="p-avatar-file" accept="image/png,image/jpeg,image/gif,image/webp"></div>
+            <div style="flex:0 0 auto"><label>&nbsp;</label><button onclick="qqSaveAvatar()">上传进人设包</button></div>
+          </div>
+          <div class="btns">
+            <button class="act" onclick="qqSaveNick()">把昵称存进人设包</button>
+            <button onclick="qqApplyNow()">立即应用到 QQ</button>
+          </div>
+        </div>
+      </div>
+      <p class="hint" id="p-qq-now" style="margin-top:10px"></p>
+      <div class="btns"><span class="msg" id="msg-qqp"></span></div>
+    </div>
+
+    <div class="card">
+      <h2>结构化设置</h2>
+      <p class="hint">
+        这些字段是**代码要用的**（判"这句话是不是在叫她""该不该去搜"）—— 换名字时她会跟着变，不用改代码。<br>
+        ⚠️ <b>「主人是谁」不在这里</b>：那是**共用事实**（QQ 号在「模型」页、资料在
+        <span class="mono">owner.md</span>），换人设改的是「<b>你叫他什么</b>」。
+      </p>
+      <div id="p-fields"></div>
+      <div class="btns">
+        <button class="act" onclick="personaSaveIdentity()" id="p-save">保存</button>
+        <span class="msg" id="msg-pi"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>提示词里的整句（prompt.*）</h2>
+      <p class="hint">
+        ⚠️⚠️ 这些是**整句替换**的 —— 直接写"这个角色会说的那句话"，**别指望代码帮你拼**。
+        不同角色的自我介绍结构本来就不一样，拼出来只会是个谁也不像的平均角色。<br>
+        ⚠️ <b>留空 = 那一段不出现</b>（代码不会兜底编一句，编出来的不是这个人设说的话）。
+      </p>
+      <div id="p-prompts"></div>
+      <div class="btns">
+        <button class="act" onclick="personaSaveIdentity()">保存</button>
+        <span class="msg" id="msg-pp"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>人设文档</h2>
+      <p class="hint">
+        改完保存立即生效（不用重启）。<span class="mono">cast.md</span> / <span class="mono">life-events.md</span> /
+        <span class="mono">quest-ideas.md</span> 是这个角色**专属的数据**（名册、日常事件库、剧情点子），
+        它们不进聊天提示词，但剧情和日常事件要用。
+      </p>
+      <div class="row">
+        <div>
+          <label>选择文件</label>
+          <select id="p-doc" onchange="personaLoadDoc()"></select>
+        </div>
+      </div>
+      <label>内容</label>
+      <textarea id="p-doc-text" rows="20"></textarea>
+      <div class="btns">
+        <button class="act" onclick="personaSaveDoc()">保存</button>
+        <span class="msg" id="msg-pd"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 运行状态 -->
+  <section id="tab-qzone" class="hidden">
+    <div class="card">
+      <h2>QQ空间</h2>
+      <p class="hint">让客服 Saki 把群里的趣事、服务器近况、自己的感想发到 QQ 空间。
+        自动模式会定期看一遍攒下来的群消息，<b>觉得值得发才发</b>；觉得没什么可发的就什么都不做。</p>
+      <div id="qzone-status" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>立刻发一条</h2>
+      <div class="btns">
+        <button class="act" onclick="qzonePreview()" id="btn-qz-preview">先看看会发什么（不发布）</button>
+        <button class="act" onclick="qzonePost()" id="btn-qz-post" style="background:#16a34a">立刻发送说说</button>
+        <span class="msg" id="msg-qzone"></span>
+      </div>
+      <p class="hint">「立刻发送」会让它自己挑素材写一条发出去。<b>发出去就收不回来了</b>，建议先点预览看看。</p>
+    </div>
+
+    <div class="card">
+      <h2>自己写一条</h2>
+      <p class="hint">不想让它自己写？直接在这里写好内容发出去。</p>
+      <textarea id="qz-manual" rows="4" placeholder="想说点什么……"></textarea>
+      <div class="btns">
+        <label style="margin:0;display:flex;align-items:center;gap:6px;font-size:13px">
+          配表情（可留空，一条说说配一张）
+          <select id="qz-face" style="width:auto;margin:0"></select>
+        </label>
+        <button class="act" onclick="qzoneManualPost()">发送这条</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>设置</h2>
+      <div class="row">
+        <div><label>每天最多发几条</label><input type="number" id="qz-maxPerDay" min="1" max="10"></div>
+        <div><label>两次间隔（小时）</label><input type="number" id="qz-cooldownHours" min="1" max="24" step="0.5"></div>
+        <div>
+          <label>查看权限</label>
+          <select id="qz-ugcRight">
+            <option value="1">所有人可见</option>
+            <option value="4">好友可见</option>
+            <option value="64">仅自己可见</option>
+          </select>
+        </div>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="qz-enable">
+        <div><div class="t">启用 QQ 空间功能</div><div class="d">关掉之后既不自动发，也发不出去</div></div>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="qz-auto">
+        <div><div class="t">自动判断并发布</div><div class="d">关掉后只能手动点「立刻发送」</div></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveQzone()">保存设置</button>
+        <span class="msg" id="msg-qzone-cfg"></span>
+      </div>
+    </div>
+  </section>
+  <!-- QQ 登录 -->
+  <section id="tab-life" class="hidden">
+    <div class="card">
+      <h2>日常事件（一级）</h2>
+      <p class="hint">
+        让 Saki 像真人一样，在一天里随机发生些小事（拼好饭被偷、没赶上末班地铁…），
+        她用自己的口气吐槽/炫耀，主动发到 <b>1 档群</b>。
+        节奏是「<b>随机 + 冷却</b>」，不是计划表。<br>
+        ⚠️ 同一件事<b>只润色一次</b>、发给所有 1 档群，但<b>每个群各记各的故事线</b>
+        —— 所以两个群看到的是同一件小事，往后两边的剧情却各走各的。
+        想<b>单独关掉某个群</b>的日常事件，去「二级剧情 → 按群设定」。
+      </p>
+      <div id="life-status" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>手动发一条（测试用）</h2>
+      <p class="hint">
+        「<b>预览一条</b>」= 按现在这个时段抽一条、让模型润色出来给你看，<b>不发、不记账</b>（会调一次模型）。<br>
+        「<b>立即发送</b>」= <b>发的就是上面预览的那一条</b>（没预览过才现抽一条），
+        <b>算今天的一条</b>（今天已发数 +1，后面的时间会重排）。
+        ⚠️ 只有 <b>1 档群</b>会收到 —— 别的档位不进事件系统。
+      </p>
+      <div class="kv" style="margin:6px 0">
+        <b>发到哪个群</b>
+        <select id="life-group" style="width:auto;margin:0"
+          onchange="localStorage.setItem('life-group', this.value)"></select>
+        <span class="hint" style="margin:0">每群的条数和排程是分开的 —— 这里只发到你选的那个群</span>
+      </div>
+      <div id="life-preview" class="kvs"></div>
+      <div class="btns" style="margin-top:8px">
+        <button class="act" onclick="lifePreview()">预览一条</button>
+        <button class="act" onclick="lifeSendNow()">立即发送</button>
+        <span class="msg" id="msg-life2"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>节奏 / 参数（**按群**）</h2>
+      <p class="hint">
+        ⚠️ 2026-09-16 起：日常事件和二级剧情的参数**没有"全局默认"了**，
+        <b>完全按群各设各的</b> —— 每天几条、间隔多久、时段、剧情概率…全在
+        <b>「按群设定」</b>那一页里，选一个群就设那个群。<br>
+        没设过的群用<b>内置起点</b>（每天 3 条、间隔 90 分钟、7:00-24:00）。
+      </p>
+      <div class="btns">
+        <button class="act" onclick="showTab('groupcfg')">去「按群设定」</button>
+      </div>
+      <p class="hint" style="margin-top:10px">
+        事件库在「知识库」页的 <span class="mono">life-events.md</span>、节日在 <span class="mono">holidays.md</span>，改完保存即热重载。
+      </p>
+    </div>
+  </section>
+
+  <section id="tab-quest" class="hidden">
+    <div class="card">
+      <h2>二级剧情（任务系统）</h2>
+      <p class="hint">
+        「能改变世界线的关键事件」—— 像一个游戏任务，<b>分阶段</b>。
+        起因从<b>这个群自己的</b>日常和故事线里长出来，群友可以在中途插话改变走向。
+        ⚠️ <b>每个群各跑一条</b>：同一个群里只允许 1 条（两条并行会互相打架），
+        但不同群互不干扰 —— <b>每个群有自己的故事线</b>，A 群的事不会串到 B 群。
+      </p>
+      <div id="quest-status" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>故事线（每个群一份）</h2>
+      <p class="hint">
+        她在这条世界线上发生过什么 —— 一级日常 + 二级主线，全是<b>按群分开存</b>的。
+        这里的数字就是"生成新事件/剧情时喂给模型的那份记忆"。<br>
+        ⚠️ <b>带「锁定」的主线条目永远不会被删</b>，压缩时只允许变短；
+        模型想删掉任何一条锁定的，整次压缩作废、一个字都不写。<br>
+        📖 压缩会把流水账改写成<b>轻小说式的章节 —— 一章 = 一件事</b>，
+        章节标题前面那个日期是<b>代码按真实时间加的</b>（模型不许自己写日期）；
+        模型没提到的日常条目会<b>按原文留着</b>，只有它点名要删的才删。
+      </p>
+      <!-- ⚠️ 压缩的结果提示写在这里（独立容器）—— `#sl-entries` 会被
+           renderStoryline() 重写/清空，提示放那儿等于写完就被吃掉（踩过） -->
+      <div id="sl-msg"></div>
+      <div id="sl-total" class="kvs"></div>
+      <div id="sl-groups" style="margin-top:10px"></div>
+      <div id="sl-entries" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h2>参数（**按群**）</h2>
+      <p class="hint">
+        ⚠️ 2026-09-16 起：二级剧情的参数**没有"全局默认"了**，<b>完全按群各设各的</b> ——
+        自动开不开、概率、每周几条、每段等多久、段数、好感度增减、
+        「群友哪句话能改变剧情」，全在 <b>「按群设定」</b>那一页里选群设置。<br>
+        没设过的群用<b>内置起点</b>（自动开=关、概率 0.1、每周 3 条、每段等 30 分钟）。<br>
+        ⚠️「起哄/纯笑」（哈哈哈哈、草、卧槽…）<b>任何档位都不算</b> —— 放宽也要有底线。<br>
+        <b>自动开剧情关着也能测</b>：「立即开始剧情」和「剧情模拟测试」都不受那个开关影响。
+      </p>
+      <div class="btns">
+        <button class="act" onclick="showTab('groupcfg')">去「按群设定」</button>
+      </div>
+    </div>
+
+    <div class="card">
+
+    <div class="card">
+      <h2>手动开一条</h2>
+      <p class="hint">
+        下面这个框有两个用处：点「立即开始剧情」= <b>现在就用它开一条，发到你选的那个群</b>；
+        点「替换下次二级事件」= <b>不现在开</b>，只把它记下来，等<b>这个群</b>下次自动轮到二级事件时用它。
+        ⚠️ 两者<b>都按「发到哪个群」选中的那个群</b>来 ——
+        每个群的故事线是分开的，所以那句子由头也<b>各群各存一句</b>。
+        ⚠️ 「立即开始剧情」会<b>真的往群里发消息</b>。
+      </p>
+      <!-- ⚠️ 这个选择器是 2026-09-15 补的：<主人>「我手动开剧情，699开头的群没启动」——
+           原来按钮**根本不传 groupId**，服务端只会退回 groups[0]（配置里第一个 1 档群），
+           所以不管想开在哪个群，它都开在 200000002。 -->
+      <div class="kv" style="margin:6px 0">
+        <b>发到哪个群</b>
+        <select id="q-group" style="width:auto;margin:0"
+          onchange="localStorage.setItem('q-group', this.value); renderQuest()"></select>
+        <span class="hint" style="margin:0">只有 1 档群会进事件系统；每个群各跑自己的一条，互不影响</span>
+      </div>
+      <textarea id="q-hint" rows="3" placeholder="留空 = 让它自己从最近的故事线里找由头……"></textarea>
+      <div class="btns">
+        <button class="act" onclick="questStartNow()" id="btn-q-now" style="background:#dc2626">立即开始剧情（会发到群里）</button>
+        <button class="ghost" onclick="questSaveHint()">替换这个群下次的二级事件</button>
+        <span class="msg" id="msg-quest2"></span>
+      </div>
+      <!-- 清空（2026-09-15 晚 <主人>：「加一个清空上次故事的按钮吧，现在还在测试中」）-->
+      <hr style="border:0;border-top:1px dashed var(--line);margin:12px 0">
+      <p class="hint" style="margin:0 0 6px">
+        <b>清空／重来（测试用）</b>：把上一次那条剧情当没发生过 ——
+        <b>中止</b>正在跑的那条（<b>不写结局、不动好感度</b>）、清掉<b>故事线历史</b>、
+        把这个群的「本周开过几条」也清零（不然会被每周上限挡着，没法连着试）。
+        ⚠️ 删掉就找不回来。
+      </p>
+      <div class="btns">
+        <button class="ghost" onclick="questReset(false)">清空所选群的剧情和故事线</button>
+        <button class="ghost" onclick="questReset(true)" style="color:#b91c1c">清空所有群</button>
+        <span class="msg" id="msg-quest3"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>剧情控制（正在跑的那条）</h2>
+      <p class="hint">
+        跟下面「剧情模拟测试」那一套按钮一样，区别是<b>这些动的是真群里的那条剧情</b>。<br>
+        「推进下一段」<b>不等那 30 分钟</b>，现在就写下一段发到群里；想让她这一段听某个建议，
+        就写在下面的框里（会当成"群里有人这么说"喂给她，跟真群友发言走同一条路）。
+        ⚠️ 都会<b>真的往群里发消息</b>。
+      </p>
+      <div class="kv" style="margin:6px 0">
+        <b>操作哪个群</b>
+        <select id="qc-group" style="width:auto;margin:0"
+          onchange="localStorage.setItem('qc-group', this.value); this.dataset.touched='1'"></select>
+        <span class="hint" style="margin:0" id="qc-now">—</span>
+      </div>
+      <textarea id="qc-reply" rows="2" placeholder="以群友身份说一句（可选）：想让这一段的走向听某句建议，就写在这儿"></textarea>
+      <div class="btns">
+        <button class="act" onclick="questNext(false)">推进下一段（带上面那句话）</button>
+        <button class="ghost" onclick="questNext(true)">不发话，直接推进一段</button>
+        <button class="ghost" onclick="questNext(true,'good')">收尾：好结局</button>
+        <button class="ghost" onclick="questNext(true,'bad')">收尾：坏结局</button>
+        <span class="msg" id="msg-quest4"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>剧情模拟测试</h2>
+      <p class="hint">
+        <b>在沙箱里跑，不会发消息、不落盘、也不会动真实的故事线。</b>
+        先开始一条，然后像群友一样说话、点「发送并生成下一阶段」，直到收尾 ——
+        最后可以看这次模拟写下的全部故事线。
+      </p>
+      <textarea id="qs-seed" rows="3" placeholder="留空 = 让它自动生成由头；也可以自己写一句（比如：她今天在便利店被人缠上了）"></textarea>
+      <div class="btns">
+        <button class="act" onclick="simStart(false)" id="btn-qs-auto">自动生成并填充并开始剧情</button>
+        <button class="ghost" onclick="simStart(true)" id="btn-qs-custom">立即用自定义内容开始剧情</button>
+        <button class="ghost" onclick="simReset()">清空模拟</button>
+        <span class="msg" id="msg-sim"></span>
+      </div>
+      <div id="sim-panel" style="margin-top:14px"></div>
+      <div id="sim-reply-box" class="hidden" style="margin-top:12px">
+        <label>模拟群友说的话（会走和真群一样的判定：@她 / 回她 / 明显建议 才算数）</label>
+        <textarea id="qs-reply" rows="2" placeholder="比如：要不你先去医院看看吧"></textarea>
+        <div class="btns">
+          <button class="act" onclick="simNext()" id="btn-qs-next">发送并生成下一阶段剧情</button>
+          <button class="ghost" onclick="simNext(true)">不发话，直接推进一段</button>
+        </div>
+        <div class="btns" style="margin-top:8px">
+          <button class="ghost" onclick="simNext(false,'good')" id="btn-qs-good"
+                  style="border-color:#16a34a;color:#16a34a">↳ 直接收成好结局</button>
+          <button class="ghost" onclick="simNext(false,'bad')" id="btn-qs-bad"
+                  style="border-color:#dc2626;color:#dc2626">↳ 直接收成坏结局</button>
+        </div>
+        <p class="hint" style="margin-top:6px">
+          这两个按钮会让它<b>照着那个结局写一段真正的收尾</b>（不是硬切），
+          这样好结局和坏结局你都能看到长什么样。
+        </p>
+      </div>
+      <div id="sim-story" style="margin-top:14px"></div>
+    </div>
+  </section>
+
+  <!-- ⚠️ 2026-09-16：**按群设定单独一页**（用户要求）——
+       原来它塞在「二级剧情」页里，可它管的是**日常事件 + 二级剧情 + 收紧度**三样，
+       放在剧情页里既不好找、也容易让人以为只管剧情。 -->
+  <section id="tab-groupcfg" class="hidden">
+    <div class="card">
+      <h2>按群设定（日常事件 · 二级剧情 · 收紧度）</h2>
+      <p class="hint">
+        ⚠️ 2026-09-16 起：<b>没有"全局默认"了，完全按群各设各的</b> ——
+        「日常事件」页和「二级剧情」页里的参数就是这一页在管。<br>
+        <b>留空 = 用内置起点</b>（输入框里的灰字就是"现在生效的值"）；填了 = 这个群单独用。<br>
+        ⚠️ 和「群与触发」里的<b>档位</b>不是一回事：
+        档位管的是「她要不要在这个群说话」，这里管的是「<b>事件和剧情在这个群怎么跑</b>」。<br>
+        ⚠️ <b>每个群的条数、排程、故事线都是分开算的</b> —— 给 A 群设成每天 1 条，不影响 B 群。
+      </p>
+      <div class="kv" style="margin:6px 0">
+        <b>哪个群</b>
+        <select id="gp-group" style="width:auto;margin:0"
+          onchange="localStorage.setItem('gp-group', this.value); fillGroupParams()"></select>
+        <span class="hint" style="margin:0" id="gp-note">—</span>
+      </div>
+      <div id="gp-form"></div>
+      <p class="hint" style="margin-top:6px">
+        「日常事件」关掉 = 这个群不再收到一级随机事件（别的群照常）；
+        「自动开剧情」关掉 = 这个群不自动开二级剧情（手动/模拟仍然能用）。
+      </p>
+    </div>
+  </section>
+
+  <section id="tab-affinity" class="hidden">
+    <div class="card">
+      <h2>好感度</h2>
+      <p class="hint">
+        每个群友一个 0~100 的数，默认 50。<b>只由"事件和互动"改变</b> ——
+        压缩、摘要那些自动机制一个字都不许碰它。
+        ⚠️ <b>对服主不生效</b>（你和它的关系是单独一套，优先级更高）。
+        <br>⚠️ <b>按群各记各的</b>（2026-09-15 晚）：同一个人在不同群里的分是分开的 ——
+        在 A 群混熟了不代表在 B 群也熟。下面选一个群看那一个群的。
+      </p>
+      <!-- 「看哪个群」：好感度分群之后必须能选（2026-09-15 晚） -->
+      <div class="kv" style="margin:6px 0">
+        <b>看哪个群</b>
+        <select id="aff-group" style="width:auto;margin:0" onchange="renderAffinity()"></select>
+        <span class="hint" style="margin:0">（空 = 不分群的那份老数据，已经尽量归属到各群了）</span>
+      </div>
+      <div id="aff-status" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>排行榜预览</h2>
+      <p class="hint">
+        口径：<b>分数从高到低的前 10 名</b>（2026-09-18 改的 ——
+        原来是"最近有变化的 10 个再按分排"，那会让高分但今天没变化的人掉出榜）。<br>
+        群里发 <span class="mono">/好感度</span> 发这个；发
+        <span class="mono">/全部好感度</span> 看<b>所有有过变化的人</b>（人多会自动分条）。
+        两个都<b>不进聊天上文</b>，也不调模型。
+      </p>
+      <div id="aff-board" class="kvs"></div>
+      <div class="btns"><button class="ghost" onclick="renderAffinity()">刷新</button></div>
+    </div>
+
+    <div class="card">
+      <h2>参数</h2>
+      <div class="row">
+        <!-- ⚠️ 2026-09-20：好感度**上限已改为无限**（用户要求）→ 门槛的 max 不能还是 100 -->
+        <div><label>加好友的门槛（好感度）</label><input type="number" id="a-threshold" min="50" max="999999"></div>
+        <div><label>排行榜显示几个</label><input type="number" id="a-boardSize" min="1" max="30"></div>
+        <div><label>回应判定窗口（分钟）</label><input type="number" id="a-window" min="1" step="5"></div>
+      </div>
+      <div class="switch" style="margin-top:8px">
+        <input type="checkbox" id="f-enable">
+        <div>
+          <div class="t">好友功能（到线通知 + 主动私聊）</div>
+          <div class="d">关掉就不发到线通知、也不主动私聊</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>每天主动私聊的概率</label><input type="number" id="f-chance" min="0" max="1" step="0.05"></div>
+        <div><label>只在白天（从）</label><input type="number" id="f-from" min="0" max="23"></div>
+        <div><label>到</label><input type="number" id="f-to" min="1" max="24"></div>
+        <div><label>同一个好友至少隔（小时）</label><input type="number" id="f-gapHours" min="1" step="1"></div>
+      </div>
+      <label>到线通知的固定模板（<span class="mono">{at}</span> 是 @，别加 Saki 的口气）</label>
+      <textarea id="f-notice" rows="2"></textarea>
+      <div class="btns">
+        <button class="act" onclick="saveAffinity()">保存</button>
+        <span class="msg" id="msg-aff"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>好友</h2>
+      <div id="f-list" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>手动测试</h2>
+      <p class="hint">
+        ⚠️ 到 90 那条线正常要攒好几天，所以给你一个**立刻能验**的办法。
+        这两个按钮都会<b>真的发消息</b>（到线通知发到 1 档群、私聊直接发给本人）。
+      </p>
+      <div class="row">
+        <div><label>测给谁（QQ 号）</label><input type="text" id="f-testUid" placeholder="比如 10000001"></div>
+      </div>
+      <div class="btns">
+        <button class="ghost" onclick="testNotice()" id="btn-f-notice">试一下到线通知（发到群里，不记账）</button>
+        <button class="ghost" onclick="previewDm()" id="btn-f-prev">预览一条主动私聊（不发）</button>
+        <button class="act" onclick="sendDm()" id="btn-f-dm" style="background:#dc2626">真的发一条私聊</button>
+        <span class="msg" id="msg-f"></span>
+      </div>
+      <div id="f-preview" class="kvs" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <section id="tab-qqlogin" class="hidden">
+    <div class="card">
+      <h2>QQ 登录状态</h2>
+      <p class="hint">
+        机器人能不能收消息，取决于 QQ <b>真的在线</b>。
+        光看「进程还在、端口还在监听」是不够的 —— 被踢下线时那些都正常，但消息收不到。
+      </p>
+      <div id="qq-status" class="kvs"></div>
+      <div class="btns">
+        <button class="act" onclick="qqRecover()" id="btn-qq-recover"
+                style="background:#16a34a">一键恢复登录（先试免扫码）</button>
+        <button class="ghost" onclick="qqRefresh()">刷新状态</button>
+        <button class="ghost" onclick="qqReloadQr()">显示二维码</button>
+        <button class="ghost" onclick="qqNewQr()" id="btn-qq-newqr">重新出码</button>
+      </div>
+      <p class="hint" id="qq-recover-msg" style="margin-top:10px"></p>
+    </div>
+
+    <div class="card" id="qq-qr-card" style="display:none">
+      <h2>用手机 QQ 扫码登录</h2>
+      <p class="hint">
+        <b>登录前先确认手机上退出了这个号</b>，否则会互相挤下线。<br>
+        二维码有时效（几分钟）。<b>扫码失败就点「重新出码」拿一张新的</b>再扫 ——
+        每次点都会让 QQ 现生成一张，不是把旧的再画一遍。
+      </p>
+      <div style="text-align:center;padding:12px 0">
+        <!--
+          ⚠️⚠️ 2026-09-15：**别加 `image-rendering: pixelated`、也别硬写 280px 拉大**。
+          NapCat 给的原图只有 147×147，最近邻放大到 280 会把二维码模块拉得
+          宽窄不一 → **手机扫不出来**（用户反馈"从来没扫成功过"的原因之一）。
+          现在按原始比例铺满卡片、用浏览器的平滑缩放，交给摄像头去分辨。
+        -->
+        <img id="qq-qr-img" alt="登录二维码"
+             style="width:100%;max-width:320px;height:auto;background:#fff;padding:10px;border-radius:10px">
+      </div>
+      <p class="hint" id="qq-qr-hint" style="text-align:center"></p>
+    </div>
+
+    <div class="card">
+      <h2>为什么会掉线 / 起不来</h2>
+      <p class="hint">
+        <b>网络瞬断</b>：网恢复后 QQ 一般能自己重连，不用管。<br>
+        <b>被踢下线</b>（日志里写 <code>KickedOffLine</code>）：腾讯把登录态作废了，
+        <b>重试没用，必须重新扫码</b>。<br>
+        ⚠️ <b>NapCat 压根没在跑的时候</b>（比如电脑重启过、QQ 被关掉了），
+        下面这个按钮会<b>把它启动起来</b>（开一个 NapCat 窗口，最小化在任务栏）——
+        不是只能"重启"，没跑的时候点它也有用。
+      </p>
+      <p class="hint" id="qq-restart-hint" style="margin-bottom:8px"></p>
+      <div class="btns">
+        <button class="act" onclick="qqRestart()" id="btn-qq-restart"
+                style="background:#dc2626">重启 NapCat（重新出码）</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-status" class="hidden">
+    <div class="card">
+      <h2>当前状态</h2>
+      <div id="stats"></div>
+      <div class="btns">
+        <button class="ghost" onclick="reloadAll()">刷新</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>连接与路径</h2>
+      <div id="paths"></div>
+    </div>
+
+    <div class="card">
+      <h2>开机自启</h2>
+      <p class="hint">
+        开启后，<b>开机登录进桌面时</b>会自动把协议端和机器人拉起来，不用再双击任何 bat。<br>
+        跑的是仓库里的 <code>autostart.ps1</code>：它会先<b>等 OneDrive 同步完</b>、<b>等网络通</b>再启动，
+        起不来会重试 3 轮，然后交给看门狗。<br>
+        ⚠️ 它<b>不是系统服务</b> —— 要等你登录进桌面才会跑；注销/锁屏不管用。
+      </p>
+      <div id="autostart-status" class="kvs"></div>
+      <div class="btns">
+        <button class="act" id="btn-autostart-on" onclick="autostartSet(true)">开启开机自启</button>
+        <button class="ghost" id="btn-autostart-off" onclick="autostartSet(false)">关闭</button>
+        <button class="ghost" onclick="loadAutostart()">刷新状态</button>
+      </div>
+      <p class="hint" id="autostart-msg" style="margin-top:10px"></p>
+    </div>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// ── 深色模式（第十六版，2026-09-17 加，用户要求「增加黑暗模式」）──
+//    存在 localStorage，刷新/关了页面都记得住。
+//    ⚠️ 主题只给 <body> 挂一个 class，**所有配色都在 CSS 的 `body.dark` 块里**，
+//       JS 不掺和具体颜色 —— 免得两处各写一套、改一处忘一处。
+const THEME_KEY = 'saki-theme';
+function applyTheme(dark) {
+  document.body.classList.toggle('dark', !!dark);
+  const b = document.getElementById('themeBtn');
+  if (b) b.textContent = dark ? '浅色' : '深色';
+  // ⚠️ 2026-09-17：切完主题要让**高光**重算一次 ——
+  //    深色和浅色用的白色强度不一样（见 updateGlare 里的 `darkNow`），
+  //    而高光只在鼠标移动时刷新；切主题时鼠标通常正停着不动。
+  try {
+    window.dispatchEvent(new Event('saki-theme'));
+  } catch { /* 老浏览器不支持就算了，鼠标一动照样会重算 */ }
+}
+function toggleTheme() {
+  const dark = !document.body.classList.contains('dark');
+  try { localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light'); } catch { /* 无痕模式就别记了 */ }
+  applyTheme(dark);
+}
+applyTheme((() => { try { return localStorage.getItem(THEME_KEY) === 'dark'; } catch { return false; } })());
+
+let STATE = null;
+
+// ── 左侧栏的 Dock 放大（2026-09-17 用户要求「macOS dock 那种悬停自动放大」）──
+//
+// ⚠️ 关键不是"悬停那个放大"，而是**邻近的也按距离衰减地放大** ——
+//    只有这样才像一整排东西被光标"抬"起来，而不是一个一个单独跳。
+//    所以离光标的距离要参与计算（平方衰减：近的涨得快、远的掉得快）。
+//
+// ⚠️⚠️ 距离必须用 **offsetTop / offsetHeight** 算，**不能用 getBoundingClientRect**：
+//    后者拿到的值是**已经被上一次 transform 缩放过的** → 用它会自我叠加、越抖越大。
+//    offsetTop/offsetHeight 完全不受 transform 影响，所以缓存一次就够了。
+(() => {
+  const nav = document.querySelector('nav');
+  if (!nav) return;
+  const RANGE = 110; // 光标上下多大范围内会受影响（px）
+  // ⚠️ 2026-09-17 用户纠正过两次，结论是「**等比缩放**、但要明显」：
+  //    第一版 `scale(x,y)` 横竖不同 → **字体被拉变形**（他明确说"长宽比例不能变"）；
+  //    第二版横向只给 6% → 他嫌"左右缩放太不明显"。
+  //    最终：**等比 16%**，同时靠 CSS 里那个 `margin-right:24px` 留出横向余量 ——
+  //    按钮平时窄 24px，放大 1.16 倍刚好填满侧栏，既不溢出、又看得出来。
+  const MAX = 0.16; // 离光标最近的那一项放大 16%（等比）
+  let items = [];
+
+  function collect() {
+    // 先清掉 transform 再量，免得量到缩放后的位置（虽然 offset* 不受影响，但求稳）
+    for (const b of nav.querySelectorAll('button')) b.style.transform = '';
+    items = [...nav.querySelectorAll('button')].map((b) => ({
+      b,
+      cy: b.offsetTop + b.offsetHeight / 2,
+    }));
+  }
+
+  function update(clientY) {
+    if (!items.length) collect();
+    const y = clientY - nav.getBoundingClientRect().top; // 换算成"相对侧栏"的 y
+    for (const it of items) {
+      const d = Math.abs(y - it.cy);
+      const t = Math.max(0, 1 - d / RANGE);
+      const k = t * t; // 平方衰减：近的涨得快、远的掉得快
+      const s = 1 + MAX * k; // ⚠️ **等比**：两个方向同一个倍数，文字才不会变形
+      it.b.style.transform = k > 0.002 ? `scale(${s.toFixed(3)})` : '';
+    }
+  }
+
+  function reset() {
+    for (const it of items) it.b.style.transform = '';
+  }
+
+  nav.addEventListener('mousemove', (e) => update(e.clientY), { passive: true });
+  nav.addEventListener('mouseleave', reset, { passive: true });
+  // 切页签时按钮会被重画 → 重新量一次
+  new MutationObserver(() => collect()).observe(nav, { childList: true });
+})();
+
+// ── 背景油滴（2026-09-17 第四版；用户连着纠正了三次）──
+//
+//   用户要的效果：「一堆小色坨像浮在水上的油滴，互不相溶；
+//                  鼠标穿过把它们撑散、甚至会裂开，过一会儿又自己合回一起」
+//
+// ⚠️⚠️ 前三版全错在同一个地方，记下来别再犯：
+//   ① 第一版：给一块大背景渐变做 animation —— 位移太小 + 叠了 blur，**肉眼看是静态的**；
+//   ② 第二版：加大位移幅度 —— 仍然只是"渐变在动"，不是油滴；
+//   ③ 第三版：换成真实元素 + **弹簧拉回原位** —— 用户一句话点破：
+//      「像装了橡皮筋固定在一个点，被挤开又完全回到原位」。
+//      **油滴不该有"家"** —— 它就该自由漂着，被打散后在别处重新聚起来。
+//
+// 所以这一版只有三种力，**没有任何"回原位"**：
+//   ① 油滴之间：重叠 → 强排斥（不许穿模）；挨得近 → 弱吸引（表面张力，自己聚成团）
+//   ② 鼠标：近距离强排斥（撑散）
+//   ③ 阻尼 + 边界软反弹（不让它们飘出屏幕再也回不来）
+// 外加两条让效果真正立起来的东西：
+//   · **分裂**：被鼠标推得太狠的大油滴会裂成两个 —— 这才叫「撑散裂开」
+//   · **合并**：两个油滴挨得足够近会并成一个 —— 这就是「过一会儿自己合回一起」
+//
+// ⚠️ 性能红线（改之前先想清楚）：
+//   ① 只改 `transform`（GPU 合成），**绝不改 `background`** —— 那会触发重绘，20+ 个必卡；
+//   ② 不给油滴加 CSS `transition` —— 位置是逐帧算的，加过渡只会和物理打架；
+//   ③ 两两计算是 O(n²)，所以数量上限卡在 44（44²/2 ≈ 968 次/帧，安全）。
+//
+// ⚠️ 坐标约定：`x/y` 是**圆心**（不是左上角），所以 translate 时要 `- r`。
+//    上一版就是这里搞混过，排斥力算歪了半个油滴。
+(() => {
+  const host = document.getElementById('bgfx');
+  if (!host) return;
+
+  // ⚠️ 2026-09-17：蓝白为主（用户原话「背景是蓝白动态渐变」）—— 6 色里只留 1 个紫，
+  //   原来 4 色占 1/4 的紫，画面偏"紫气"，跟"蓝白"不符。
+  const COLORS = ['0,114,245', '1,207,234', '56,132,255', '120,180,255', '0,150,255', '178,73,248'];
+  // ── 手感就调这几个 ──
+  const N0 = 26;          // 初始油滴数（2026-09-17：数量加回来，尺寸相应降一点免得挤）
+  const MAXN = 44;        // 上限（分裂出来的不会无限涨）
+  // ⚠️ 2026-09-17 用户报「离鼠标色坨很远就被弹走了，要减小鼠标色坨的碰撞体积」——
+  //    300 太大：油滴还没贴上就被推开，看着像有层看不见的气墙。
+  //    收到 135（≈ 鼠标半径 44 + 油滴半径 的接触距离），挨近了才有感觉。
+  const R_MOUSE = 135;    // 鼠标影响半径
+  // ⚠️ F_MOUSE 从 4.2 降到 2.4 —— 4.2 会把油滴**直接击飞**（用户报「被击飞后再也回不来」）。
+  //    「撑散」靠的是**挤**，不是"打飞"。
+  const F_MOUSE = 2.4;
+  const F_REPEL = 4.4;    // 油滴互相排斥（不许重叠）
+  const F_TENS = 0.0012;  // 表面张力（弱吸引 → 自己聚成团）
+  const TENS_RANGE = 95;  // 张力作用范围（超出就不吸了，免得全糊成一坨）
+  // ── 回填：鼠标一挥中间空了，得让油滴**慢慢、随机地**飘回来重新摊匀 ──
+  //    用户原话：「背景色坨其实还是得往回走，要不然鼠标一挥中间就空了，
+  //    但是要往回走得随机，走完之后色坨要平均的摊在背景上」。
+  //    ⚠️ 这跟被否掉的"回原位"不是一回事：目标位**每隔十几秒整体洗牌**，
+  //    每滴还带各自的"懒散系数"，所以回来的先后、快慢都不同 —— 不是列队归位。
+  const F_HOME = 0.00022; // 回位力（必须远小于 F_MOUSE 的 2.4，否则推不动）
+  const HOME_JIT = 46;    // 目标位自身的抖动半径（摊匀，但不成网格）
+  const DAMP = 0.93;      // 阻尼（留惯性，像液体）
+  // ⚠️⚠️ 分裂阈值原来是 52，可初始半径只有 22~56 —— **大部分油滴永远够不着**，
+  //      所以用户看到的现象是「怎么都挤不烂」。降到 26 才真的会裂。
+  const SPLIT_AT = 26;
+  const MERGE_AT = 0.78;  // 圆心距 < (r1+r2)*0.78 → 合并
+  const SPLIT_PUSH = 1.2; // 推到这个力度就裂（原来 2.0 太高）
+  const MIN_R = 16;       // 裂出来的不能比这更小（否则越裂越多、糊成一片）
+  // ── 墙（用户要求「加一个比窗口略大的墙」）──
+  const PAD = 0.18;       // 墙比窗口大 18%
+  const WALL_DAMP = 0.25; // 撞墙后保留多少速度（原来 0.5 太弹，会来回撞着往外跑）
+  const F_VIEW = 0.055;   // 飘出可见区时的回拉（⚠️ 不是"回原位"，只是别飘丢）
+  const W = () => innerWidth, H = () => innerHeight;
+
+  const blobs = [];
+  let seq = 0;
+
+  function make(x, y, r, vx = 0, vy = 0) {
+    const el = document.createElement('div');
+    el.className = 'blob';
+    const c = COLORS[seq++ % COLORS.length];
+    el.style.width = el.style.height = (r * 2).toFixed(0) + 'px';
+    el.style.background =
+      `radial-gradient(circle at 40% 38%, rgba(${c},.95), rgba(${c},.32) 60%, rgba(${c},0) 72%)`;
+    host.appendChild(el);
+    // hx/hy = 回填的目标位（先放在原地，随后 reshuffle 统一铺开）
+    // lazy  = 每滴的"懒散系数" → 回位速度各不相同，看着才随机
+    return { el, x, y, vx, vy, r, cool: 0, hx: x, hy: y, lazy: 0.55 + Math.random() * 0.9 };
+  }
+
+  for (let i = 0; i < N0; i++) {
+    // ⚠️ 2026-09-17 用户要求「尺寸调回来，大的更容易被挤破」—— 对的，两个原因：
+    //    ① 目标大 → 更容易被鼠标碰到；
+    //    ② pushed 的公式是 `(1 - d/(R_MOUSE + b.r)) * F_MOUSE`，**b.r 越大值越大**，
+    //       所以大油滴天然被推得更狠 → 更容易过 SPLIT_PUSH 那道坎。
+    //    半径 34~80（直径 68~160px），接近第一版的观感。
+    blobs.push(make(Math.random() * W(), Math.random() * H(), 28 + Math.random() * 38,
+      (Math.random() - .5) * .5, (Math.random() - .5) * .5));
+  }
+
+  // 鼠标自己也是一个油滴（紫色那个）—— 撑散别人的就是它
+  // ⚠️ 62 → 44：用户要「减小鼠标色坨的碰撞体积」，视觉上小一号也更贴手
+  const MR = 44;
+  const mEl = document.createElement('div');
+  mEl.className = 'blob m';
+  mEl.style.width = mEl.style.height = MR * 2 + 'px';
+  mEl.style.background =
+    'radial-gradient(circle at 42% 40%, rgba(128,90,255,.9), rgba(128,90,255,.28) 58%, rgba(128,90,255,0) 72%)';
+  host.appendChild(mEl);
+
+  let mx = W() / 2, my = H() / 2, tx = mx, ty = my;
+  let lastMove = performance.now();
+  addEventListener('mousemove', (e) => {
+    tx = e.clientX; ty = e.clientY; lastMove = performance.now();
+  }, { passive: true });
+
+  // ── 回填目标位：低差异序列（R2）能"均匀铺满"矩形，比纯随机更平摊、又不像网格那么死板 ──
+  function idealAt(rank) {
+    const g = 0.7548776662466927, a = 0.5698402909980532;
+    return { x: ((rank * g) % 1) * W(), y: ((rank * a) % 1) * H() };
+  }
+  let shuffleTimer = 0;
+  function reshuffle() {
+    // 洗牌 → 同一滴油每次拿到的目标位都不同，这就是"回得随机"的来源
+    const idx = blobs.map((_, i) => i);
+    for (let i = idx.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+    }
+    idx.forEach((bi, rank) => {
+      const p = idealAt(rank + 0.5), b = blobs[bi];
+      if (!b) return;
+      b.hx = p.x + (Math.random() - .5) * HOME_JIT * 2;
+      b.hy = p.y + (Math.random() - .5) * HOME_JIT * 2;
+    });
+    shuffleTimer = 420 + ((Math.random() * 420) | 0);   // 7~14 秒后自动再洗一次
+  }
+  reshuffle();
+  addEventListener('resize', reshuffle);
+
+  let mAct = 1;   // 鼠标"还在动"的程度：手停住 1.2 秒后渐隐到 0
+
+  // ── 玻璃高光：只有**面朝鼠标的那一侧边缘**亮 ──
+  //    用户原话：「给玻璃加上高光，只有面朝鼠标的一侧边缘有高光」。
+  //    做法把鼠标当光源：从卡片中心朝鼠标画一条线，与边框的交点就是高光中心。
+  //      ① 把鼠标换算成"相对卡片中心的归一化坐标" (ux,uy)：右下为正，边上的值是 ±1；
+  //      ② 除以 max(|ux|,|uy|) 就是把这条线推**到边框上**（这一步是关键，不然高光会飘在卡片里）；
+  //      ③ 鼠标越靠近卡片中心，方向越没意义 → 用 a 把强度收到 0，免得高光乱跳。
+  //    ⚠️ 整条渐变都在 JS 里拼好（含透明度），CSS 只负责 `var(--glare,none)` ——
+  //       CSS 里不出现任何 calc / 变量算式，避免"表达式非法 → 整条 background 作废"。
+  let glarePending = false;
+  function updateGlare() {
+    glarePending = false;
+    for (const el of document.querySelectorAll('.card, nav')) {
+      const r = el.getBoundingClientRect();
+      if (!r.width || r.bottom < -120 || r.top > innerHeight + 120) continue;  // 看不见的跳过
+      const ux = (tx - (r.left + r.width / 2)) / (r.width / 2);
+      const uy = (ty - (r.top + r.height / 2)) / (r.height / 2);
+      // （② 那步"把点推到边框上"是径向渐变时代算的 gx/gy，换成线性渐变后不再需要）
+      // ⚠️⚠️ 第十五版：改用**线性渐变**（前面几版都是径向渐变，做错了对象）。
+      //    径向渐变的圆心在边框上、半径向内铺开 → 看起来是"卡片里一块暗/一块亮"，
+      //    边框本身反而没变化（用户原话「边框好像没变化，但是色坨被压暗了」）。
+      //    线性渐变沿**鼠标轴**走：一端落在背光那条边上（压黑），
+      //    另一端落在面朝鼠标那条边上（纯白）—— 两端极值正好压在边框上，
+      //    所以变化发生在**边框**，这才是玻璃受光该有的样子。
+      // ── 强度 = 方向 × 距离衰减（第二十版）──
+      //    ⚠️ 用户要求「高光应该要随距离衰减」。原来那句 `Math.min(1, hypot*0.8)`
+      //       **只看方向**：鼠标一离开卡片中心就迅速饱和到满强度，
+      //       所以贴着卡片和隔半个屏幕，亮带一样亮 —— 看着假。
+      //    现在分成两个因子：
+      //      ① dir  —— 方向强度：卡片正中 0、边缘 1（正中心方向没有意义，收 0）；
+      //      ② fall —— **鼠标到卡片矩形的像素距离**上的衰减（1.5 次方，比线性略陡，
+      //                接近真实光照的感觉；380px 处约剩一半）。
+      const dir = Math.min(1, Math.hypot(ux, uy));
+      const ddx = Math.max(r.left - tx, 0, tx - r.right);
+      const ddy = Math.max(r.top - ty, 0, ty - r.bottom);
+      const fall = 1 / (1 + Math.pow(Math.hypot(ddx, ddy) / 380, 1.5));
+      // ⚠️⚠️ 2026-09-17：深色的高光强度定在 **0.62**，这个数是两次反馈磨出来的：
+      //    · 用户先说「夜间模式的高光可以薄一点，晚上有点晃眼睛」→ 我从 0.98 收到 0.5；
+      //    · 结果用户又截图报「高光在中间，鼠标在右边」—— 因为 0.5 太弱，
+      //      **输给了卡片背景那道固定亮部**（它不是跟随鼠标的，见 CSS 里那段注释）。
+      //    所以两头一起改：**背景压平 + 这里回到 0.62**。
+      //    浅色保持 0.98 不动 —— 那个"拉满"是用户明确要过的。
+      const darkNow = document.body.classList.contains('dark');
+      const a = (darkNow ? 0.62 : 0.98) * dir * fall;
+      // CSS 渐变角度：0deg 指向正上方，而屏幕 y 向下 → θ = atan2(dx, -dy)
+      // ⚠️⚠️ 2026-09-17：`conic-gradient` → **`radial-gradient`**。
+      //    这是用户那句「红圈里的高光比鼠标旁更亮」的**真正病根**，
+      //    前后换过三版（径向 → 四层 mask → 线性 → conic → 椭圆 mask）才定位到：
+      //
+      //    `conic-gradient` 是按**角度**均匀的，而**角上的一小段角度只对应
+      //    很短的一段边缘** → 同样的亮度压在一个角上，看起来就比铺在长边上的亮。
+      //    （边上同样的角度范围要铺几百像素，角上只铺几十像素 → 浓度差好几倍。）
+      //
+      //    `radial-gradient` 按**到圆心的实际距离**衰减，沿边缘是均匀的 →
+      //    角上离圆心远，会自然淡下去。圆心取"**边框上正对鼠标的那个点**"，
+      //    所以最亮的永远是朝鼠标那一侧。
+      //
+      //    ⚠️ 圆心在边框上、半径 300px，本来会铺进卡片内部（那是早期径向版被否的原因）；
+      //       现在外面有 mask 兜着（只保留边缘 34px），所以这个老毛病不存在了。
+      const kk = 1 / Math.max(Math.abs(ux), Math.abs(uy), 1e-4); // 把这条线推到边框上
+      const gx = (50 + ux * kk * 50).toFixed(1);
+      const gy = (50 + uy * kk * 50).toFixed(1);
+      const str = a < 0.02 ? 'none'
+        : `radial-gradient(circle 300px at ${gx}% ${gy}%,`
+          + `rgba(255,255,255,${a.toFixed(3)}) 0%,`                       // 正对鼠标那一点
+          + `rgba(255,255,255,${(a * .42).toFixed(3)}) 26%,`
+          + `rgba(255,255,255,${(a * .12).toFixed(3)}) 52%,`
+          + `rgba(255,255,255,0) 76%)`;
+      if (el._glare !== str) { el._glare = str; el.style.setProperty('--glare', str); }
+    }
+  }
+  const askGlare = () => {
+    if (!glarePending) { glarePending = true; requestAnimationFrame(updateGlare); }
+  };
+  addEventListener('mousemove', askGlare, { passive: true });
+  addEventListener('scroll', askGlare, { passive: true, capture: true });  // 滚动后方位会变
+  // ⚠️ 2026-09-17：**切主题时也要重算** —— 深色下高光的白色强度是另一套
+  //    （见上面 `darkNow` 那行）。高光只在鼠标移动时刷新，而切主题时鼠标往往
+  //    正停在按钮上不动 → 会一直挂着上一个主题的亮度。
+  //    用自定义事件解耦：`applyTheme()` 派发，这里监听（两边不用互相 import）。
+  addEventListener('saki-theme', askGlare);
+  askGlare();   // 先按初始位置算一次（鼠标还没动过时也不至于完全没有高光）
+
+  (function tick() {
+    mx += (tx - mx) * 0.16;   // 鼠标油滴带点延迟跟随：直接跟手像光标，加惯性才像液体
+    my += (ty - my) * 0.16;
+    if (--shuffleTimer <= 0) reshuffle();
+
+    // ⚠️ 鼠标停住之后必须把力撤掉 —— 否则它会一直"顶"在原地，
+    //    那片空区就永远回填不了（用户报的「鼠标一挥中间就空了」，有一半是这个原因）。
+    const idle = performance.now() - lastMove;
+    mAct += ((idle < 1200 ? 1 : 0) - mAct) * 0.035;
+    mEl.style.opacity = (mAct * 0.62).toFixed(3);
+    mEl.style.transform = `translate3d(${(mx - MR).toFixed(1)}px,${(my - MR).toFixed(1)}px,0)`;
+
+    // ── ① 油滴之间：重叠就推开，挨得近就吸住 ──
+    for (let i = 0; i < blobs.length; i++) {
+      const a = blobs[i];
+      for (let j = i + 1; j < blobs.length; j++) {
+        const b = blobs[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d = Math.hypot(dx, dy);
+        if (d < 0.01) { dx = Math.random() - .5; dy = Math.random() - .5; d = 0.01; }
+        const sum = a.r + b.r;
+        const ux = dx / d, uy = dy / d;
+        if (d < sum) {
+          // 重叠 → 强排斥；按半径分摊（大的更"沉"、推得少）
+          const f = ((sum - d) / sum) * F_REPEL;
+          const ma = b.r / sum, mb = a.r / sum;
+          a.vx -= ux * f * ma; a.vy -= uy * f * ma;
+          b.vx += ux * f * mb; b.vy += uy * f * mb;
+        } else if (d < sum + TENS_RANGE) {
+          // 表面张力：挨得近就互相吸 → 自己聚成团（互不相溶的油滴就是这样抱团的）
+          const f = F_TENS * (1 - (d - sum) / TENS_RANGE);
+          a.vx += ux * f; a.vy += uy * f;
+          b.vx -= ux * f; b.vy -= uy * f;
+        }
+      }
+    }
+
+    // ── ② 鼠标排斥 + ③ 阻尼/边界/分裂 ──
+    const born = [];
+    for (const b of blobs) {
+      if (b.cool > 0) b.cool--;
+      const dx = b.x - mx, dy = b.y - my;
+      const d = Math.hypot(dx, dy) || 1;
+      let pushed = 0;
+      if (d < R_MOUSE + b.r && mAct > 0.01) {
+        pushed = (1 - d / (R_MOUSE + b.r)) * F_MOUSE * mAct;
+        b.vx += (dx / d) * pushed;
+        b.vy += (dy / d) * pushed;
+      }
+      // ── 回填：鼠标影响范围之外，朝"摊匀位"缓缓漂回去 ──
+      //    ⚠️ 只在鼠标范围外施加，否则会和推挤打架（手感发黏、像被吸住）
+      if (pushed === 0) {
+        b.vx += (b.hx - b.x) * F_HOME * b.lazy;
+        b.vy += (b.hy - b.y) * F_HOME * b.lazy;
+      }
+      b.vx *= DAMP; b.vy *= DAMP;
+      b.x += b.vx; b.y += b.vy;
+      // ── 墙：比窗口大 18%，撞上去速度砍到 1/4 ──
+      //    ⚠️ 原来保留一半速度太弹：油滴会来回撞、越撞越往外，最后看不见。
+      const wl = -W() * PAD, wr = W() * (1 + PAD), wt = -H() * PAD, wb = H() * (1 + PAD);
+      if (b.x < wl) { b.x = wl; b.vx = Math.abs(b.vx) * WALL_DAMP; }
+      if (b.x > wr) { b.x = wr; b.vx = -Math.abs(b.vx) * WALL_DAMP; }
+      if (b.y < wt) { b.y = wt; b.vy = Math.abs(b.vy) * WALL_DAMP; }
+      if (b.y > wb) { b.y = wb; b.vy = -Math.abs(b.vy) * WALL_DAMP; }
+
+      // ── 视野回拉：已经飘到可见区外面了，轻轻拽回来一点 ──
+      //    ⚠️⚠️ 这不是"回原位"（那个方案被用户否掉了：「像橡皮筋固定在一个点」）。
+      //       它只干一件事：**保证你还能看见它**。力很小，而且只作用在
+      //       「超出可见圆」的那部分位移上 —— 留在屏幕里的油滴完全没感觉。
+      const ox = b.x - W() / 2, oy = b.y - H() / 2;
+      const od = Math.hypot(ox, oy) || 1;
+      const lim = Math.min(W(), H()) * 0.62;
+      if (od > lim) {
+        const pull = F_VIEW * ((od - lim) / lim);
+        b.vx -= (ox / od) * pull;
+        b.vy -= (oy / od) * pull;
+      }
+
+      // 分裂：够大 + 被推得够狠 + 不在冷却里 → 一分为二（质量守恒）
+      if (b.r > SPLIT_AT && pushed > SPLIT_PUSH && b.cool === 0 &&
+          b.r / Math.cbrt(2) > MIN_R &&
+          blobs.length + born.length < MAXN) {
+        const nr = b.r / Math.cbrt(2);
+        b.r = nr;
+        b.el.style.width = b.el.style.height = (nr * 2).toFixed(0) + 'px';
+        b.cool = 90; // 约 1.5 秒（60fps）内不再裂，免得一次推出一堆
+        const ang = Math.atan2(dy, dx) + Math.PI / 2;
+        born.push(make(b.x + Math.cos(ang) * nr * 1.2, b.y + Math.sin(ang) * nr * 1.2,
+          nr, Math.cos(ang) * 1.8, Math.sin(ang) * 1.8));
+      }
+      b.el.style.transform =
+        `translate3d(${(b.x - b.r).toFixed(1)}px,${(b.y - b.r).toFixed(1)}px,0)`;
+    }
+    if (born.length) blobs.push(...born);
+
+    // ── ④ 合并：挨得足够近就并回一个（「过一会儿自己合回一起」）──
+    for (let i = 0; i < blobs.length; i++) {
+      for (let j = i + 1; j < blobs.length; j++) {
+        const a = blobs[i], b = blobs[j];
+        if (Math.hypot(b.x - a.x, b.y - a.y) < (a.r + b.r) * MERGE_AT) {
+          const va = a.r ** 3, vb = b.r ** 3, vt = va + vb;
+          const big = a.r >= b.r ? a : b;
+          const small = big === a ? b : a;
+          big.x = (a.x * va + b.x * vb) / vt;   // 质心
+          big.y = (a.y * va + b.y * vb) / vt;
+          big.vx = (a.vx * va + b.vx * vb) / vt;
+          big.vy = (a.vy * va + b.vy * vb) / vt;
+          big.r = Math.cbrt(vt);               // 体积守恒
+          big.el.style.width = big.el.style.height = (big.r * 2).toFixed(0) + 'px';
+          small.el.remove();
+          blobs.splice(blobs.indexOf(small), 1);
+          j--;
+        }
+      }
+    }
+
+    requestAnimationFrame(tick);
+  })();
+})();
+
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+// ── 这个标签页是不是旧的？（2026-09-15 加）──
+// ⚠️ 起因：用户点「立即发送」后事件**变了一条**才发出去。查明是**这个标签页还是旧页面** ——
+//    界面没有轮询，服务端的 webui.html 改了，开着的标签页不会知道，
+//    旧页面的 lifeSendNow() 不传预览 → 服务端只好重新抽一条。
+//    所以这里每 60 秒跟服务端比一次版本，不一致就在底下挂一条提示让人刷新。
+const PAGE_VER = '__PAGE_VER__';
+let pageStaleShown = false;
+async function checkPageVer() {
+  try {
+    const r = await (await fetch('/api/pagever', { cache: 'no-store' })).json();
+    if (!r || !r.ver || String(r.ver) === String(PAGE_VER) || pageStaleShown) return;
+    pageStaleShown = true;
+    const bar = document.createElement('div');
+    bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9999;background:#8a6d1f;color:#fff;' +
+      'padding:10px 14px;font:14px/1.5 system-ui,sans-serif;text-align:center;cursor:pointer;box-shadow:0 -2px 8px rgba(0,0,0,.25)';
+    bar.textContent = '⚠️ 服务端的界面文件更新过了，这个标签页还是旧的（按钮行为可能不一样）—— 点这里刷新';
+    bar.onclick = () => location.reload();
+    document.body.appendChild(bar);
+    document.title = '⚠️ 该刷新了 · ' + document.title;
+  } catch {}
+}
+setInterval(checkPageVer, 60000);
+checkPageVer();
+
+function flash(el, ok, text) {
+  el.className = 'msg show ' + (ok === true ? 'ok' : ok === false ? 'err' : 'warn');
+  el.textContent = text;
+  if (ok === true) setTimeout(() => { el.className = 'msg'; }, 5000);
+}
+
+function lines(str) {
+  return String(str || '').split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+// ── 标签页 ──
+document.querySelectorAll('nav button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('nav button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    // ⚠️ 这个列表必须跟 nav 里的 data-tab 一一对应 —— 漏了哪个，哪个标签就切不过去
+    //    （qzone 就漏过一阵子，面板永远显示不出来）
+    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','qqlogin','status'].forEach(t => {
+      const el = $('tab-' + t);
+      if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
+    });
+    if (b.dataset.tab === 'knowledge') loadKnowledge();
+    if (b.dataset.tab === 'persona') personaRefresh();
+    if (b.dataset.tab === 'faces') renderFaces();
+    if (b.dataset.tab === 'groups') { loadGroupRespond(); fillStrictForGroup(); }
+    if (b.dataset.tab === 'qzone') renderQzone();
+    if (b.dataset.tab === 'life') renderLife();
+    if (b.dataset.tab === 'quest') { renderQuest(); renderStoryline(); startQuestPoll(); }
+    else stopQuestPoll();
+    // ⚠️ 2026-09-16：按群设定自己一页了（原来挤在二级剧情页里）
+    if (b.dataset.tab === 'groupcfg') renderGroupParams();
+    if (b.dataset.tab === 'affinity') renderAffinity();
+    if (b.dataset.tab === 'qqlogin') qqRefresh();
+  };
+});
+
+/**
+ * 切到某个标签页（界面上的按钮用的，比如「日常事件」页里那个「去按群设定」）。
+ * ⚠️ 直接复用 nav 按钮自己的 onclick —— 免得两处逻辑各写一遍、以后改一处漏一处。
+ */
+function showTab(name) {
+  const b = document.querySelector(`nav button[data-tab="${name}"]`);
+  if (b) b.click();
+  else console.warn('没有这个标签页：', name);
+}
+
+// ── 读取状态 ──
+async function reloadAll() {
+  const r = await api('/api/state');
+  if (!r.ok) return;
+  STATE = r;
+  const c = r.config;
+  fillQuestGroup();                        // 「立即开始剧情」发到哪个群（1 档群列表）
+
+  $('hdr').textContent = `表情 ${r.stats.faces} · 学到 ${r.stats.learned} 条 · ${c.llm.model}`;
+
+  // 身份（主人 / 机器人）—— 2026-09-15 用户要求：可编辑，而且「群主」改称「主人」
+  $('id-ownerQQ').value = c.ownerQQ || '';
+  $('id-botQQ').value = c.botQQ || '';
+
+  // 模型
+  $('llm-baseURL').value = c.llm.baseURL || '';
+  // 模型下拉框：先把当前值放进去，再尝试从 API 拉完整列表
+  fillModelSelect([c.llm.model].filter(Boolean), c.llm.model);
+  renderQzone();
+  $('qz-face').innerHTML =
+    '<option value="">不配图</option>' +
+    FACES.map((f) => '<option value="' + esc(f.tag) + '">' + esc(f.tag) + '</option>').join('');
+  loadModels({ silent: true });
+  $('llm-apiKey').value = c.llm.apiKey || '';
+  $('llm-temperature').value = c.llm.temperature ?? 0.5;
+  $('llm-maxTokens').value = c.llm.maxTokens ?? 800;
+  $('llm-timeout').value = c.llm.timeout ?? 60000;
+
+  // 群与触发
+  $('trigger-allowGroups').value = (c.trigger.allowGroups || []).join('\n');
+  $('trigger-allowPrivateUsers').value = (c.trigger.allowPrivateUsers || []).join('\n');
+  $('trigger-groupChat').checked = !!c.trigger.groupChat;
+  $('trigger-privateChat').checked = !!c.trigger.privateChat;
+  $('trigger-requireAtInGroup').checked = !!c.trigger.requireAtInGroup;
+  $('trigger-historyRounds').value = c.trigger.historyRounds ?? 6;
+  $('trigger-cooldownMs').value = c.trigger.cooldownMs ?? 2000;
+
+  // QQ空间
+  if (c.qzone) {
+    $('qz-enable').checked = c.qzone.enable !== false;
+    $('qz-auto').checked = c.qzone.auto !== false;
+    $('qz-maxPerDay').value = c.qzone.maxPerDay ?? 3;
+    $('qz-cooldownHours').value = Math.round(((c.qzone.cooldownMs ?? 14400000) / 3600000) * 2) / 2;
+    $('qz-ugcRight').value = String(c.qzone.ugcRight ?? 1);
+  }
+
+  // 日常事件（一级）
+  // ⚠️ 2026-09-16：全局那张「节奏设置」卡**删掉了**（参数完全按群，去「按群设定」页）。
+  //    所以这里**只刷新状态**，不再回填那些已经不存在的输入框
+  //    （原来 `$('life-minPerDay').value = ...` 会直接抛错，把后面的初始化全带停）。
+  if (c.life) renderLife();
+
+  // 灵敏度：没配过就从 requireAtInGroup 推断（true→3，false→1）
+  const lvl = [1,2,3].includes(Number(c.trigger.respondTo))
+    ? Number(c.trigger.respondTo)
+    : (c.trigger.requireAtInGroup === false ? 1 : 3);
+  document.querySelectorAll('input[name=respondTo]').forEach(r => {
+    r.checked = Number(r.value) === lvl;
+  });
+  // 收紧度滑块（只对灵敏度 ① 生效）
+  $('strictness').value = Number.isFinite(Number(c.chat?.strictness)) ? Number(c.chat.strictness) : 50;
+  onStrictInput();
+  // 保存群聊设置或灵敏度后会重新加载全局配置；当前选中的 1 档群仍要显示自己的覆盖值。
+  if (typeof fillStrictForGroup === 'function') await fillStrictForGroup();
+  // ⚠️ 这两个兜底值必须和 config.yml 一致 —— 原来写的是 260 / 700（那套"一大段"的老节奏），
+  //    早就过时了；配置读不到时界面会显示错的数字。
+  $('chunking-maxChars').value = c.chunking?.maxChars ?? 60;
+  $('chunking-delayMs').value = c.chunking?.delayMs ?? 1000;
+  $('chunking-delayMaxMs').value = c.chunking?.delayMaxMs ?? '';
+
+  // 教学
+  $('teach-teachers').value = (c.teach.teachers || []).join('\n');
+  $('teach-allowPrivateTeach').checked = c.teach.allowPrivateTeach !== false;
+  $('teach-keywords').value = (c.teach.keywords || []).join(',');
+
+  // 实查
+  $('status-enable').checked = !!c.status.enable;
+  $('status-host').value = c.status.host || '';
+  $('status-displayName').value = c.status.displayName || '';
+  $('status-cacheSeconds').value = c.status.cacheSeconds ?? 60;
+
+  // 问题提示
+  const p = $('problems');
+  if (r.problems && r.problems.length) {
+    p.innerHTML = '<div class="card" style="border-color:#fde68a;background:#fffbeb">' +
+      '<h2 style="color:#d97706">配置有问题</h2>' +
+      r.problems.map(x => '<div style="font-size:13.5px">• ' + esc(x) + '</div>').join('') + '</div>';
+  } else {
+    p.innerHTML = '';
+  }
+
+  // 状态页
+  $('stats').innerHTML =
+    kv('机器人账号', c.botQQ ? esc(c.botQQ) + '（登录脚本用它快速登录）' : '— 未配置') +
+    // ⚠️ 2026-09-15：这里原来叫「群主」，用户要求**改称「主人」**；
+    //    而且它不再是只读的 —— 想改去上面「身份（主人 / 机器人）」那张卡片。
+    kv('主人', c.ownerQQ ? esc(c.ownerQQ) + '（对他说话是同级口吻；要改去上面那张卡片）' : '— 未配置') +
+    kv('表情库', r.stats.faces + ' 张') +
+    kv('学到的知识', r.stats.learned + ' 条') +
+    kv('知识库', r.stats.knowledge ? '已加载' : '未加载') +
+    kv('服务器状态', esc(r.server?.text || '—'));
+
+  $('paths').innerHTML =
+    kv('配置文件', '<span class="mono">' + esc(r.files.config) + '</span>') +
+    kv('数据目录', '<span class="mono">' + esc(r.files.root) + '</span>') +
+    kv('NapCat 连接', '<span class="mono">' + esc(c.onebot.mode + ' ' + c.onebot.url) + '</span>');
+
+  $('learned-count').textContent = r.stats.learned + ' 条';
+  $('learned-list').innerHTML = r.learnedTopics.length
+    ? r.learnedTopics.map((t, i) => (i + 1) + '. ' + esc(t)).join('<br>')
+    : '<span style="color:#6b7280">还没有学到额外的东西</span>';
+
+  // 开机自启（状态页那张卡片）—— 它自己会判元素在不在，不会把上面这些东西带停
+  loadAutostart();
+
+  renderFaces();
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+const kv = (k, v) => `<div class="kv"><b>${esc(k)}</b><span>${v}</span></div>`;
+
+// ── 开机自启（2026-09-17 加）──
+//
+// ⚠️ 每个元素先判存在再用 —— 这个文件里有过一次事故：`$('已经删掉的id').value = ...`
+//    直接抛错，把 reloadAll 后面所有初始化全带停了（见上面「日常事件」那段注释）。
+// ⚠️ 状态里的 `stale` 是"开过、但项目挪了位置，自启项还指着旧路径" ——
+//    这种要显眼地说出来，否则用户会以为"开着呢"但开机其实起不来。
+async function loadAutostart() {
+  const box = $('autostart-status');
+  if (!box) return;
+  let r;
+  try {
+    r = await api('/api/autostart');
+  } catch (e) {
+    box.innerHTML = kv('读取失败', esc(e.message));
+    return;
+  }
+  if (!r.supported) {
+    box.innerHTML = kv('状态', '不支持') + (r.reason ? kv('原因', esc(r.reason)) : '');
+    const on = $('btn-autostart-on'); if (on) on.disabled = true;
+    const off = $('btn-autostart-off'); if (off) off.disabled = true;
+    return;
+  }
+  const state = r.enabled ? '✅ 已开启' : (r.stale ? '⚠️ 开着，但指向别的目录' : '未开启');
+  box.innerHTML =
+    kv('状态', esc(state)) +
+    kv('启动项名', '<span class="mono">' + esc(r.valueName) + '</span>（任务管理器的「启动」页里能看到）') +
+    kv('开机时跑', '<span class="mono">' + esc(r.launcher) + '</span>') +
+    (!r.launcherExists ? kv('⚠️ 注意', '上面那个启动脚本不在（安装包不完整？）') : '') +
+    (r.current && !r.enabled ? kv('现在指向', '<span class="mono">' + esc(r.current) + '</span>') : '') +
+    (r.reason ? kv('提示', esc(r.reason)) : '');
+}
+
+async function autostartSet(on) {
+  const msg = $('autostart-msg');
+  if (msg) flash(msg, null, on ? '正在开启…' : '正在关闭…');
+  try {
+    const r = await api('/api/autostart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!on }),
+    });
+    if (!r.ok) throw new Error(r.error || '操作失败');
+    if (msg) {
+      flash(msg, true, on
+        ? '已开启。下次开机、登录进桌面之后它会自己起来（可以先看 logs\\autostart.log）。'
+        : '已关闭，开机不会再自动启动。');
+    }
+    await loadAutostart();
+  } catch (e) {
+    if (msg) flash(msg, false, '失败：' + e.message);
+  }
+}
+
+// ── 模型下拉框 ──
+
+/** 用给定列表填充下拉框，并把 current 选中 */
+function fillModelSelect(models, current) {
+  const sel = $('llm-model');
+  const want = current || sel.value;
+  const list = [...new Set([...(models || []), want].filter(Boolean))];
+  sel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+  if (want && list.includes(want)) sel.value = want;
+}
+
+/** 从 API 拉可用模型列表 */
+async function loadModels(opts = {}) {
+  const el = $('msg-llm');
+  const hint = $('model-hint');
+  const btn = $('btn-models');
+  if (!opts.silent) btn.disabled = true;
+  if (!opts.silent) { hint.textContent = '正在从 API 拉取模型列表…'; }
+
+  try {
+    const r = await api('/api/models', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        baseURL: $('llm-baseURL').value.trim(),
+        apiKey: $('llm-apiKey').value.trim(),
+      })
+    });
+    if (r.ok && r.models.length) {
+      fillModelSelect(r.models, $('llm-model').value);
+      hint.textContent = `API 上有 ${r.models.length} 个模型：${r.models.join('、')}`;
+      hint.style.color = '#16a34a';
+    } else {
+      // 拉不到就保留手填能力
+      hint.textContent = `拉取失败（${r.error || '未知错误'}）—— 可以直接在下拉框里手打模型名，或者检查 API 地址和 Key。`;
+      hint.style.color = '#d97706';
+      ensureModelEditable();
+    }
+  } finally {
+    if (!opts.silent) btn.disabled = false;
+  }
+}
+
+/** 列表为空时，至少放一个可编辑的项，别让用户没得选 */
+function ensureModelEditable() {
+  const sel = $('llm-model');
+  if (!sel.options.length) {
+    sel.innerHTML = '<option value="">（拉取失败，请直接输入模型名）</option>';
+  }
+}
+
+// ── 日常事件（一级）──
+async function renderLife() {
+  const el = $('life-status');
+  if (!el) return;
+  try {
+    const r = await api('/api/state');
+    const s = r.life?.status || {};
+    const p = r.life?.plan || {};
+    const fmt = (ms) => {
+      if (!ms) return '—';
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    };
+    // ⚠️ 2026-09-16：**每个群各排各的**（分群之后）—— 这张卡先填"发到哪个群"那个下拉框，
+    //    再把这个群的进度列出来（不再是"一份全局进度"）。
+    const gids = s.targets || [];
+    const sel = $('life-group');
+    if (sel) {
+      const keep = String(sel.value || localStorage.getItem('life-group') || '');
+      sel.innerHTML = gids.length
+        ? gids.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('')
+        : '<option value="">（没有 1 档群）</option>';
+      if (gids.length) sel.value = gids.includes(keep) ? keep : gids[0];
+    }
+    const cur = String(sel?.value || '');
+    let per = null;
+    if (cur) {
+      try {
+        const one = await api(`/api/life/status?groupId=${encodeURIComponent(cur)}`);
+        if (one?.ok) per = one;
+      } catch {}
+    }
+    const st = per?.status || s;
+    const pl = per?.plan || p;
+    let html = kv('开关', st.enable ? '<b style="color:#16a34a">开</b>' : '<b style="color:#d97706">关</b>') +
+      (cur ? kv('下面是哪个群', `<b>${esc(cur)}</b>`) : '') +
+      kv('今天', `已发 ${pl.fired ?? 0} / 目标 ${pl.target ?? 0}`) +
+      kv('下次大概', fmt(pl.nextAt)) +
+      kv('允许时段', st.window || '7:00-24:00') +
+      kv('发到 1 档群', gids.join('、') || '（没有 1 档群）') +
+      kv('事件库', `${s.templates ?? 0} 条 / ${s.slots ?? 0} 个时段`);
+    // ⚠️ 每个群的进度都列一下（一眼看出"没混在一起"）
+    const bg = Array.isArray(s.byGroup) ? s.byGroup : [];
+    if (bg.length > 1) {
+      html += kv(
+        '各群各自算',
+        bg
+          .map((x) => `${esc(x.groupId)}：${x.fired ?? 0}/${x.target ?? 0}`)
+          .join(' · '),
+      );
+    }
+    if (s.today && s.today.length) {
+      html += kv('今天是什么日子', `<b style="color:#7c3aed">${esc(s.today.join('、'))}</b>` + (s.off ? '（放假）' : ''));
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = kv('出错', esc(e.message));
+  }
+}
+
+async function saveLife() {
+  // ⚠️ 2026-09-16：全局那张「节奏设置」卡删了（参数**完全按群**）→ 这个函数没有入口了。
+  //    留着只为兼容旧页面：元素不在就**什么都不提交**（否则一调用就抛错）。
+  if (!$('life-enable')) return;
+  const el = $('msg-life');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ life: {
+      enable: $('life-enable').checked,
+      holidays: $('life-holidays').checked,
+      minPerDay: Number($('life-minPerDay').value),
+      maxPerDay: Number($('life-maxPerDay').value),
+      cooldownMs: Math.round(Number($('life-cooldownMin').value) * 60000),
+      lateToleranceMs: Math.round(Number($('life-lateMin').value) * 60000),
+      startHour: Number($('life-startHour').value),
+      endHour: Number($('life-endHour').value),
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效（节奏类参数下次检查时生效）' : ('保存失败：' + r.error));
+  if (r.ok) { await reloadAll(); renderLife(); }
+}
+
+// ── 日常事件：预览 / 立即发送（<主人>：「日常事件也加一个预览和立即发送」）──
+// ⚠️ 「预览一条」抽到的那条（2026-09-15 用户要求「预览和发送合为一条」）：
+//    点「立即发送」时把它一起传上去，**发的就是你看过的那一句**，
+//    不再重新抽（原来是重新抽，所以你看到的和发出去的不是同一句）。
+let lifePreviewed = null;
+
+function renderLifePreview(p, extra) {
+  const box = $('life-preview');
+  if (!box || !p) return;
+  box.innerHTML =
+    kv('时段', esc(String(p.slot || '—'))) +
+    kv('抽到的事件', esc(String(p.event || '—'))) +
+    kv('她会这么说', `<b>${esc(String(p.text || '—'))}</b>`) +
+    (p.unclean ? kv('⚠️ 提示', '这次润色没成功，下面是事件原文') : '') +
+    (extra ? kv('发送到', esc(extra)) : '');
+}
+
+async function lifePreview() {
+  const el = $('msg-life2');
+  const gid = String($('life-group')?.value || '');
+  el.textContent = '正在让模型写一条…（要几秒）';
+  const p = await api('/api/life/preview', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ groupId: gid }) });
+  if (!p.ok) { el.textContent = '没抽出来：' + (p.reason || ''); return; }
+  lifePreviewed = p;                       // ★ 记住这一条，等下"立即发送"就发它
+  renderLifePreview(p);
+  el.textContent = '预览好了（没发送、也没记账）—— 点"立即发送"发的就是这一条';
+}
+
+async function lifeSendNow() {
+  const el = $('msg-life2');
+  const pre = lifePreviewed;
+  const gid = String($('life-group')?.value || '');
+  const what = pre?.text ? '你刚预览的那一条' : '现场新抽的一条';
+  if (!confirm(`这会**真的**往群 ${gid} 发一条日常事件（发的是${what}），而且**算这个群今天的一条**。\n\n确定吗？`)) return;
+  el.textContent = pre?.text ? '正在发送刚预览的那一条…' : '正在写并发送…（要几秒）';
+  const r = await api('/api/life/send-now', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ preview: pre || null, groupId: gid }),
+  });
+  if (!r.ok) { el.textContent = '没发出去：' + (r.error || ''); renderLifePreview(r); return; }
+  lifePreviewed = null;                    // 发过了，下次要重新预览
+  renderLifePreview(r, (r.sent || []).join('、'));
+  el.textContent = '已发到 ' + (r.sent || []).join('、');
+  renderLife();
+}
+
+// ── 剧情发展时间线（2026-09-15 晚 <主人>：「把剧情发展呈现在 webui 上更详细一点」）──
+// ⚠️ 原来只列「第N段 + 群友回复」，既看不出**先后顺序**，也看不到
+//    她自己在群里**顺口接的话**（那句"答应了"的话原来哪儿都没显示）。
+//    这里把三段数据合成一条按时间排的时间线：
+//      ① 已经写出来的每一段（她说的话 + 世界发生了什么 + 群友的回复）
+//      ② 插曲：她在群里顺口接的话（不算分段，但下一段必须跟它一致）
+//      ③ 等下一段：群里说了、还没被消化掉的发言
+function hm(at) {
+  const n = Number(at ?? 0);
+  if (!n) return '—';
+  const d = new Date(n);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function questDevHtml(s) {
+  const rows = [];
+  const row = (at, inner) =>
+    `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line)">
+      <div style="color:#9ca3af;font-size:12px;min-width:38px">${hm(at)}</div>
+      <div style="flex:1">${inner}</div></div>`;
+  for (const st of s.stages || []) {
+    const reps = (st.replies || [])
+      .map((x) => `<div style="color:#6b7280;font-size:12.5px;padding-left:8px">↳ ${esc(x.name)}：${esc(x.text)}</div>`)
+      .join('');
+    rows.push({
+      at: Number(st.at ?? 0),
+      html: row(
+        st.at,
+        `<div><b>第 ${st.i} 段</b>　${esc(st.text || '')}</div>` +
+          (st.event && st.event !== st.text ? `<div style="color:#6b7280;font-size:12.5px">（世界：${esc(st.event)}）</div>` : '') +
+          reps,
+      ),
+    });
+  }
+  for (const x of s.interludes || []) {
+    rows.push({
+      at: Number(x.at ?? 0),
+      html: row(
+        x.at,
+        `<span style="background:#ede9fe;color:#5b21b6;border-radius:3px;padding:1px 4px;font-size:11.5px">插曲</span>
+         她在群里顺口接的：${esc(x.text)}`,
+      ),
+    });
+  }
+  // ⚠️ 2026-09-17 用户要求："等下一段"要能看出**每一条是靠哪条判据进来的**。
+  //    ⚠️⚠️ 但**不再分第二类** —— <主人> 当时追问了一句很关键的话：
+  //    「**现在不是本来就会筛选一部分消息进入影响剧情的范围吗**」。
+  //    对：能进 `pending` 的每一条都已经过了 `isPlotReply()` 那道筛
+  //    （`at`/`reply`/`suggest`/`question`/`loose` 五档**都算**"可能改变走向"）。
+  //    我上一版把 `loose` 挑出来标成"顺口说的"，是**自己又加了一道判据**，跟设计打架。
+  //    所以这里只做一件事：标签统一「等下一段」，括号里写清它是**怎么进来的**。
+  const WHY_LABEL = { at: '叫了她', reply: '回她的话', suggest: '给了建议', question: '在问剧情', loose: '随口提了一句' };
+  for (const x of s.pendingList || []) {
+    const tag =
+      '<span style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 4px;font-size:11.5px">等下一段</span>';
+    const sub = WHY_LABEL[x.why]
+      ? `<span style="color:#9ca3af;font-size:11.5px">（${WHY_LABEL[x.why]}）</span>`
+      : '';
+    rows.push({
+      at: Number(x.at ?? 0),
+      html: row(x.at, `${tag} ${sub}${esc(x.name)}：${esc(x.text)}`),
+    });
+  }
+  if (!rows.length) return '';
+  return '<div style="margin-top:4px">' + rows.sort((a, b) => a.at - b.at).map((r) => r.html).join('') + '</div>';
+}
+
+// ── 二级剧情 ──
+
+/**
+ * 剧情页的自动刷新（2026-09-17 用户反馈：「二级剧情状态不会自动随着群里消息更新」）。
+ *
+ * ⚠️ 原来只在**切到这一页时**拉一次 `renderQuest()` —— 可是这一页显示的东西
+ *    （群友回复攒了几条、她顺口接的话、推进到第几段、还有几分钟自动推）
+ *    **全是群里正在发生的事**。停在页面上不动就等于看不见，得手动按 F5。
+ *
+ * ⚠️ 只在这一页**开着的时候**轮询：切走就停（别在别的页白打接口）。
+ * ⚠️ 焦点在这一页的输入框里时**跳过这一轮** —— 回填会把人打了一半的字冲掉。
+ */
+let questPoll = null;
+function stopQuestPoll() {
+  if (questPoll) {
+    clearInterval(questPoll);
+    questPoll = null;
+  }
+}
+function startQuestPoll() {
+  stopQuestPoll();
+  questPoll = setInterval(() => {
+    const el = $('tab-quest');
+    if (!el || el.classList.contains('hidden')) {
+      stopQuestPoll();
+      return;
+    }
+    const act = document.activeElement;
+    if (act && el.contains(act) && /INPUT|TEXTAREA|SELECT/.test(act.tagName)) return;
+    renderQuest();
+    renderStoryline();
+  }, 5000);
+}
+
+async function renderQuest() {
+  const el = $('quest-status');
+  if (!el) return;
+  try {
+    const r = await api('/api/quest/state');
+    const s = r.status || {};
+    const c = r.config || {};
+    // ⚠️ 2026-09-16：全局那张「参数」卡删了（二级剧情参数**完全按群**，去「按群设定」页）
+    //    → 元素不在就跳过回填（不然页面初始化会在这里抛错）。
+    if ($('q-enable')) {
+      $('q-enable').checked = c.enable === true;
+      $('q-chance').value = c.chance ?? 0.1;
+      $('q-maxPerWeek').value = c.maxPerWeek ?? 3;
+      $('q-waitMin').value = Math.round((c.waitMs ?? 1800000) / 60000);
+      $('q-maxStages').value = c.maxStages ?? 10;
+      $('q-cold').value = c.coldAutoLimit ?? 1;
+      $('q-good').value = c.affinityGood ?? 3;
+      $('q-bad').value = c.affinityBad ?? -2;
+      $('q-replyMode').value = c.replyMode || 'normal';
+    }
+    // ⚠️ 「下次二级事件」是**按群**存的（2026-09-15 晚）——
+    //    这个框显示/编辑的是「发到哪个群」里选中的那个群那一句。
+    //    （每个群的故事线不一样，一句由头只对写它的那个群有意义）
+    const hintGid = String($('q-group')?.value || '');
+    const hints = s.hints || {};
+    const hintText = hints[hintGid] || (hintGid ? '' : (s.nextHint || ''));
+    if (document.activeElement !== $('q-hint')) $('q-hint').value = hintText;
+
+    let html = kv('自动开启', s.enable
+      ? '<b style="color:#16a34a">开</b>（会掷骰子自动开剧情）'
+      : '<b style="color:#d97706">关</b>（不会自动开；手动和模拟都能用）') +
+      kv('现在', s.running ? `<b style="color:#7c3aed">在跑（第 ${s.stage} / 计划 ${s.plannedStages} 段）</b>` : '没有在跑的剧情') +
+      kv('最近 7 天', `${s.weeklyUsed ?? 0} / ${s.maxPerWeek ?? 3} 条`);
+    if (s.running) {
+      // ⚠️ 2026-09-15 晚加：这一段原来只报"起因/发在/回过几次"，
+      //    用户要求「把剧情发展呈现在 webui 上更详细一点」——现在把
+      //    进度、等待窗口、结局好感度、以及**按时间排的整条发展**都摆出来。
+      const waitedMin = s.awaitingSince ? Math.max(0, Math.round((Date.now() - s.awaitingSince) / 60000)) : 0;
+      const waitMin = Math.round((s.waitMs ?? 1800000) / 60000);
+      const leftMin = Math.max(0, waitMin - waitedMin);
+      html += kv('起因', esc(s.premise || '')) +
+        kv('发在', `群 ${esc(s.groupId || '—')}` + (s.topicLabel ? ` · 题材「${esc(s.topicLabel)}」` : '')) +
+        kv('进度', `第 ${s.stage} / 计划 ${s.plannedStages} 段（最多 ${c.maxStages ?? 10} 段）`) +
+        kv('这一段', `已经等了 ${waitedMin} 分钟` +
+          (leftMin > 0
+            ? `，最多等 ${waitMin} 分钟（约 ${leftMin} 分钟后自动推下一段）`
+            : `，<b style="color:#7c3aed">已经到点</b> —— 下一次检查就推下一段`)) +
+        kv('群友回过', `${s.humanReplies ?? 0} 次` +
+          ((s.pending ?? 0) ? `（还有 ${s.pending} 句等着进下一段）` : '（现在没有等着的话）')) +
+        kv('自动续写', `${s.autoContinues ?? 0} 次（连着 ${c.coldAutoLimit ?? 1} 次没人回应就收尾）`) +
+        kv('结局影响', `好结局 ${(c.affinityGood ?? 3) > 0 ? '+' : ''}${c.affinityGood ?? 3} · ` +
+          `坏结局 ${c.affinityBad ?? -2}（<b>只给参与过的人</b>）`) +
+        kv('参与过的人', `${(s.cast || []).length} 人`);
+      const dev = questDevHtml(s);
+      if (dev) {
+        html += '<div style="margin-top:12px"><b style="font-size:13px">剧情发展（按时间）</b>' +
+          '<div class="hint" style="margin:2px 0 0">紫标＝她在群里顺口接的话（也算数）；黄标＝群里说了、还没进下一段</div>' +
+          dev + '</div>';
+      }
+      // 控制卡片那边显示"现在哪个群在跑"
+      const nowEl = $('qc-now');
+      if (nowEl) nowEl.textContent = `现在在跑：群 ${s.groupId}（第 ${s.stage} / 计划 ${s.plannedStages} 段）`;
+      const sel = $('qc-group');
+      if (sel && s.groupId && (sel.value !== String(s.groupId)) && !sel.dataset.touched) {
+        sel.value = String(s.groupId);           // 默认选"正在跑的那个群"
+      }
+    } else {
+      const nowEl = $('qc-now');
+      if (nowEl) nowEl.textContent = '现在没有在跑的剧情（先用上面的「立即开始剧情」开一条）';
+    }
+    if (hintText) {
+      html += kv(`下次二级事件（群 ${esc(hintGid || '全局兜底')}）`, '<b style="color:#d97706">' + esc(hintText) + '</b>');
+    }
+    // 别的群也各存了句子由头 → 列出来（省得以为"只有一份"）
+    const otherHints = Object.entries(hints).filter(([g, t]) => t && g !== hintGid);
+    if (otherHints.length) {
+      html += kv('别的群各存了',
+        otherHints.map(([g, t]) => `群 ${esc(g)}：${esc(String(t).slice(0, 24))}`).join('<br>'));
+    }
+    if (s.recent && s.recent.length) {
+      html += '<div style="margin-top:10px"><b style="font-size:13px">最近几条</b>' +
+        // ⚠️⚠️ 2026-09-18 修（用户报「最终一共多少段和 webui 上的数字没对上」）：
+        //    `recent[]` 里存的是**整个 quest 对象**，所以 `x.stages` 是**每段的数组**
+        //    （不是段数！）—— 原来直接 `${x.stages}` 会渲染成一串 `[object Object]`。
+        //    同时把"实际段数 vs 原计划段数"一起显示：两者**本来就可能不等**
+        //    （她会提前收尾、也会因为群里热情而加演），标出来就不会再被当成 bug。
+        s.recent.map((x) => {
+          const n = Array.isArray(x.stages) ? x.stages.length : Number(x.stages) || 0;
+          const plan = Number(x.plannedStages) || 0;
+          const tail = plan && plan !== n ? `，原计划 ${plan} 段` : '';
+          return `<div style="font-size:12.5px;color:#6b7280;padding:2px 0">
+          ${x.ending === 'good' ? '🟢' : '🔴'} ${esc(x.premise || '')}（${n} 段${tail}）</div>`;
+        }).join('') + '</div>';
+    }
+    el.innerHTML = html;
+
+    const sim = r.sim || {};
+    renderSim(sim);
+  } catch (e) {
+    el.innerHTML = kv('出错', esc(e.message));
+  }
+}
+
+async function saveQuest() {
+  // ⚠️ 2026-09-16：全局那张「参数」卡删了（二级剧情参数**完全按群**，去「按群设定」页）
+  //    → 没有入口了；元素不在就别提交（不然一调用就抛错）。
+  if (!$('q-enable')) return;
+  const el = $('msg-quest');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ quest: {
+      enable: $('q-enable').checked,
+      chance: Number($('q-chance').value),
+      maxPerWeek: Number($('q-maxPerWeek').value),
+      waitMs: Math.round(Number($('q-waitMin').value) * 60000),
+      maxStages: Number($('q-maxStages').value),
+      coldAutoLimit: Number($('q-cold').value),
+      affinityGood: Number($('q-good').value),
+      affinityBad: Number($('q-bad').value),
+      replyMode: $('q-replyMode').value,
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) renderQuest();
+}
+
+// ⚠️ 2026-09-15 晚：「替换下次二级事件」**按群存**（<主人>：「最好也加个群选择…
+//    因为每个群的故事线不一样」）。所以这里必须把「发到哪个群」那个选择器的值带上 ——
+//    不传的话存的是"全局兜底"那份（老页面会那样），界面文案也会说清是哪个群。
+async function questSaveHint() {
+  const el = $('msg-quest2');
+  const gid = String($('q-group')?.value || '').trim();
+  if (!gid) { flash(el, false, '先在「发到哪个群」里选一个群（每个群各存各的）'); return; }
+  const r = await api('/api/quest/hint', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ text: $('q-hint').value, groupId: gid })
+  });
+  flash(el, r.ok,
+    r.ok
+      ? (r.nextHint ? `记住了：群 ${gid} 下次自动开剧情时用这句` : `群 ${gid} 那句已清空`)
+      : ('失败：' + r.error));
+  renderQuest();
+}
+
+// ── 「立即开始剧情」发到哪个群（2026-09-15 补）──
+// ⚠️ 起因：<主人>「我手动开剧情，699开头的群没启动」。
+//    查日志：`管理界面手动开了一条剧情 → 群 200000002` —— 那个按钮**压根没传 groupId**，
+//    服务端只能退回 `groups[0]`（配置里第一个 1 档群），所以想开在 699 也会开在 621。
+//    现在界面上明确列出 1 档群让人选，并且记住上次选的（localStorage）。
+function eventGroupIds() {
+  const c = (STATE && STATE.config) || {};
+  const trig = c.trigger || {};
+  const lv = trig.groupRespondTo || {};
+  const allow = (trig.allowGroups || []).map(String);
+  return Object.keys(lv)
+    .filter((g) => Number(lv[g]) === 1 && (!allow.length || allow.includes(g)))
+    .sort();
+}
+
+function fillQuestGroup() {
+  const gids = eventGroupIds();
+  // ⚠️ 两个下拉框共用同一份 1 档群名单：
+  //    `q-group`  = 开新剧情发到哪个群
+  //    `qc-group` = 正在跑的那条剧情，操作哪个群
+  for (const id of ['q-group', 'qc-group']) {
+    const sel = $(id);
+    if (!sel) continue;
+    const keep = sel.value || localStorage.getItem(id) || '';
+    sel.innerHTML = gids.length
+      ? gids.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('')
+      : '<option value="">（现在没有 1 档群）</option>';
+    if (keep && gids.includes(keep)) sel.value = keep;
+  }
+}
+
+// ── 真剧情控制：推进下一段 / 收尾（2026-09-15 晚 <主人>：「也和模拟一样也加一套剧情控制按钮」）──
+// `noReply = true` → 不把上面那个框里的话当成群友发言（＝模拟面板的「不发话，直接推进一段」）；
+// `forceEnd` = 'good' / 'bad' → 强制收尾（跟模拟面板那两颗按钮一个意思）。
+// ⚠️ 服务端会**真的发到群里**，并且真的结算好感度（好结局 +N / 坏结局 −N）。
+async function questNext(noReply, forceEnd) {
+  const el = $('msg-quest4');
+  const gid = String($('qc-group')?.value || '').trim();
+  if (!gid) { flash(el, false, '先选一个群（只有 1 档群会进事件系统）'); return; }
+  const reply = noReply ? '' : String($('qc-reply')?.value || '').trim();
+  const what = forceEnd ? `收尾（${forceEnd === 'good' ? '好' : '坏'}结局）` : '推进下一段';
+  if (
+    !confirm(
+      `对群 ${gid} ${what}？\n\n` +
+        `这会**真的往群里发一条**（要几秒生成）。` +
+        (reply ? `\n会先当成"群里有人说了「${reply}」"。` : '') +
+        (forceEnd ? `\n⚠️ 收尾会按${forceEnd === 'good' ? '好' : '坏'}结局**结算好感度**。` : '') +
+        `\n\n确定吗？`,
+    )
+  ) {
+    return;
+  }
+  const card = el?.closest('.card');
+  card?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+  flash(el, null, `正在写${forceEnd ? '结局那一段' : '下一段'}…（要几秒）`);
+  try {
+    const r = await api('/api/quest/next', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupId: gid, reply, forceEnd: forceEnd || null }),
+    });
+    if (!r.ok) { flash(el, false, '失败：' + (r.error || '')); return; }
+    if (reply) $('qc-reply').value = '';
+    flash(el, true,
+      `${forceEnd ? '收尾了' : '已推进'}：群 ${gid} 第 ${r.status?.stage ?? '?'} 段` +
+        (r.ending ? `（${r.ending === 'good' ? '好' : '坏'}结局）` : ''));
+  } finally {
+    card?.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+    renderQuest();
+  }
+}
+
+async function questStartNow() {
+  const el = $('msg-quest2');
+  const btn = $('btn-q-now');
+  const gid = String($('q-group')?.value || '').trim();
+  if (!gid) { flash(el, false, '没有 1 档群可选（只有 1 档群进事件系统，先去「群与触发」改档位）'); return; }
+  if (!confirm(`这会**真的**往群 ${gid} 发一条剧情，而且它会开始等群友回话（最多跑几小时）。\n\n确定吗？`)) return;
+  btn.disabled = true;
+  flash(el, null, `正在给群 ${gid} 生成开场…`);
+  try {
+    const r = await api('/api/quest/start', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      // ⚠️ groupId **必须带上** —— 不带的话服务端只会退回 groups[0]（配置里第一个 1 档群），
+      //    于是"想开在 699，结果开在 621"（<主人> 2026-09-15 踩到）
+      body: JSON.stringify({ text: $('q-hint').value, groupId: gid })
+    });
+    flash(el, r.ok, r.ok ? `已发到群 ${r.groupId}：${r.text}` : ('失败：' + r.error));
+  } finally {
+    btn.disabled = false;
+    renderQuest();
+  }
+}
+
+// ── 清空剧情 / 故事线（测试用，2026-09-15 晚加）──
+// <主人>：「加一个清空上次故事的按钮吧，现在还在测试中」
+//   `all=true` → 所有群；否则只清「发到哪个群」里选中的那个。
+//   ⚠️ 服务端走的是 `quest.abort()`（**不写结局、不动好感度**）+ `storyline.clear()`，
+//      别拿"正常收尾"去凑合 —— 那会改好感度、还会往她记忆里写一条假结局。
+async function questReset(all) {
+  const el = $('msg-quest3');
+  const gid = all ? '' : String($('q-group')?.value || '').trim();
+  if (!all && !gid) { flash(el, false, '先在「发到哪个群」里选一个群（或者点"清空所有群"）'); return; }
+  const what = all ? '所有群' : `群 ${gid}`;
+  if (!confirm(`清空${what}的剧情和故事线？\n\n· 正在跑的剧情会被**中止**（不写结局、不动好感度）\n· 故事线历史**删掉就找不回来**\n· 这个群的「本周开过几条」清零\n\n确定吗？`)) return;
+  const r = await api('/api/quest/reset', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ groupId: gid }),
+  });
+  if (!r.ok) { flash(el, false, '失败：' + (r.error || '')); return; }
+  flash(el, true, `清完了：中止 ${(r.stopped || []).length} 条剧情，清掉 ${r.groups ?? 0} 个群的故事线`);
+  renderQuest();
+  if (typeof renderStoryline === 'function') renderStoryline();
+  if (typeof renderGroupParams === 'function') renderGroupParams();
+}
+
+// ── 剧情模拟（沙箱）──
+
+function renderSim(s) {
+  const panel = $('sim-panel');
+  const box = $('sim-reply-box');
+  const story = $('sim-story');
+  if (!panel) return;
+  if (!s || !s.premise) {
+    panel.innerHTML = '<p class="hint">还没开始模拟。</p>';
+    if (box) box.classList.add('hidden');
+    if (story) story.innerHTML = '';
+    return;
+  }
+  panel.innerHTML = kv('起因', esc(s.premise)) +
+    kv('进度', `第 ${s.stage} 段 / 计划 ${s.plannedStages} 段`) +
+    (s.transcript || []).map((x) => {
+      if (x.role === 'saki') {
+        return `<div style="padding:6px 0;border-bottom:1px dashed var(--line)">
+          <b style="color:#5b7fd4">Saki（第 ${x.stage} 段）</b>　${esc(x.text)}
+          ${x.event ? `<div style="color:#6b7280;font-size:12.5px">（世界：${esc(x.event)}）</div>` : ''}</div>`;
+      }
+      if (x.role === 'skip') {
+        return `<div style="padding:4px 0;color:#d97706;font-size:12.5px">⚠️ 「${esc(x.text)}」被判成<span class="mono">${esc(x.why || '')}</span>，<b>不会影响剧情</b>（真实群里也是这样）</div>`;
+      }
+      return `<div style="padding:4px 0;color:#16a34a;font-size:12.5px">${esc(x.name)}：${esc(x.text)}　<span class="mono">(${esc(x.why || '')})</span></div>`;
+    }).join('');
+  if (box) box.classList.toggle('hidden', !!s.ended);
+  if (story) {
+    story.innerHTML = (s.story && s.story.length)
+      ? '<h2 style="font-size:14px">这次模拟写下的故事线</h2><div class="kvs">' +
+        s.story.map((e) => `<div style="padding:3px 0;font-size:12.5px">${e.tier === 2 ? '【主线】' : ''}${esc(e.text)}</div>`).join('') +
+        '</div>'
+      : '';
+  }
+}
+
+async function simStart(custom) {
+  const el = $('msg-sim');
+  const text = custom ? $('qs-seed').value.trim() : '';
+  if (custom && !text) return flash(el, false, '先在框里写一句，或者点左边的"自动生成"');
+  flash(el, null, '正在生成…');
+  const r = await api('/api/quest/sim/start', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ text })
+  });
+  flash(el, r.ok, r.ok ? '开始跑了，接着在下面模拟群友说话' : ('失败：' + r.error));
+  renderSim(r);
+}
+
+async function simNext(silent, forceEnd) {
+  const el = $('msg-sim');
+  const reply = silent ? '' : $('qs-reply').value.trim();
+  // ★ forceEnd：'good' / 'bad' → 这一段强制收尾成那个结局
+  flash(el, null, forceEnd ? `正在写成${forceEnd === 'good' ? '好' : '坏'}结局…` : '正在生成下一段…');
+  const r = await api('/api/quest/sim/next', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ reply, forceEnd: forceEnd || null })
+  });
+  if (r.ok) {
+    if (!silent) $('qs-reply').value = '';
+    flash(el, true, r.done
+      // ⚠️ 2026-09-18 修（用户报「模拟收成坏结局，但还是加了好感度」）：
+      //    这里原来写死了 `好感度 +${delta}` —— 坏结局的 delta 是**负数**，
+      //    显示出来却是「好感度 +-10」，一眼就像"加了"。改成按符号显示。
+      ? `剧情结束：${r.ending === 'good' ? '好结局' : '坏结局'}（好感度 ${r.ended ? (r.ended.delta >= 0 ? '+' : '') + r.ended.delta : '?'}）`
+      : '已生成下一段');
+  } else {
+    flash(el, false, '失败：' + r.error);
+  }
+  renderSim(r);
+}
+
+async function simReset() {
+  const r = await api('/api/quest/sim/reset', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  flash($('msg-sim'), true, '已清空模拟');
+  renderSim(r);
+}
+
+// ── 故事线（**每个群一份**，2026-09-15 <主人> 要求）──
+//
+// 用户原话：「一个群设一个故事线知识库……知识库调用时一定要分清就行了。
+//   然后再做故事线卡片」。
+// ⚠️ 界面上**每行都是一个群** —— 压缩/看内容都是按群做的（不许有"全局默认"这种含糊操作）。
+let slOpenGroup = '';
+
+async function renderStoryline() {
+  const total = $('sl-total');
+  const box = $('sl-groups');
+  if (!total || !box) return;
+  try {
+    const r = await api('/api/storyline/state');
+    const s = r.status || {};
+    total.innerHTML =
+      kv('一共几个群', `${s.groups ?? 0} 个（每个群一条独立的世界线）`) +
+      kv('全部条数', `${s.total ?? 0} 条，其中锁定 <b style="color:#16a34a">${s.locked ?? 0}</b> 条`) +
+      kv('压缩过几次', `${s.compressRuns ?? 0} 次`) +
+      kv('存档', `<span class="mono">${esc(s.file || '')}</span>`) +
+      (s.lastError ? kv('上次出错', `<b style="color:#d97706">${esc(s.lastError)}</b>`) : '');
+
+    const rows = s.byGroup || [];
+    if (!rows.length) {
+      box.innerHTML = '<p class="hint">还没有任何群的故事线 —— 等她发第一条日常或剧情就有了。</p>';
+      $('sl-entries').innerHTML = '';
+      return;
+    }
+    box.innerHTML = rows.map((g) => `
+      <div class="kv">
+        <b>群 ${esc(g.groupId)}</b>
+        <span>${g.total} 条（锁定 <b style="color:#16a34a">${g.locked}</b>）· ${g.chars} 字 ·
+          上次压缩 ${g.lastCompressAt ? new Date(g.lastCompressAt).toLocaleString('zh-CN') : '从没压过'}</span>
+        <span style="margin-left:auto;white-space:nowrap">
+          <button class="act" onclick="slView('${esc(g.groupId)}')">${slOpenGroup === g.groupId ? '收起' : '看内容'}</button>
+          <button class="act" onclick="slCompress('${esc(g.groupId)}')">压缩这个群</button>
+        </span>
+      </div>`).join('');
+
+    if (slOpenGroup) await slView(slOpenGroup, true);
+    else $('sl-entries').innerHTML = '';
+  } catch (e) {
+    total.innerHTML = `<div class="kv"><b>读取失败</b><span>${esc(e.message)}</span></div>`;
+  }
+}
+
+/** 展开看某个群的故事线（⚠️ 按群拉，绝不混着看） */
+async function slView(groupId, keepOpen) {
+  const box = $('sl-entries');
+  if (!box) return;
+  if (slOpenGroup === groupId && !keepOpen) {
+    slOpenGroup = '';
+    box.innerHTML = '';
+    renderStoryline();
+    return;
+  }
+  slOpenGroup = groupId;
+  try {
+    const r = await api('/api/storyline/entries?groupId=' + encodeURIComponent(groupId) + '&limit=80');
+    const list = r.entries || [];
+    box.innerHTML =
+      `<h2 style="font-size:14px">群 ${esc(groupId)} 的故事线（${list.length} 条，时间正序）</h2>` +
+      (list.length
+        ? list.map((e) => `<div class="kv">
+            <b>${new Date(e.at).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</b>
+            <span>${e.locked ? '<b style="color:#16a34a">[锁定·主线]</b> ' : ''}${esc(e.text)}</span>
+            ${(e.tags || []).length ? `<span class="mono" style="margin-left:auto">${esc((e.tags || []).join(' '))}</span>` : ''}
+          </div>`).join('')
+        : '<p class="hint">（这个群还没有条目）</p>');
+    if (!keepOpen) renderStoryline();
+  } catch (e) {
+    box.innerHTML = `<p class="hint">读取失败：${esc(e.message)}</p>`;
+  }
+}
+
+/** 压缩**某一个群**（会真的调模型，整次可能作废 —— 失败原因会原样显示出来） */
+async function slCompress(groupId) {
+  if (!confirm(`压缩群 ${groupId} 的故事线？\n\n（会调一次模型：把流水账改写成「一章一件事」的章节，\n  日期由代码按真实时间加；带「锁定」的主线条目只允许变短，\n  模型想删掉任何一条都会整次作废、一个字都不写）`)) return;
+  // ⚠️⚠️ 结果必须写进**独立的提示位**（`#sl-msg`）：
+  //    以前写进 `#sl-entries`，而 `renderStoryline()` 结尾正好会重写/清空那个容器
+  //    → 用户**看不到"压好了"还是"没压成"**，界面看着就像"点了没反应"（踩过几次）。
+  const msg = $('sl-msg');
+  msg.innerHTML = `<p class="hint">⏳ 正在压缩群 ${esc(groupId)}…（要十几秒，别关这个页面）</p>`;
+  const r = await api('/api/storyline/compress', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ groupId, force: true }),
+  });
+  if (r.ok) {
+    msg.innerHTML = `<p class="hint">✅ 群 ${esc(groupId)} 压缩完成：${r.result.before} → ${r.result.after} 字，
+      ${r.result.kept} 条（写成 <b>${r.result.chapters || 0}</b> 章，锁定 ${r.result.locked} 条一条没少）</p>`;
+    // ★ 压完**直接展开这个群** —— 用户点一次就要马上看到结果，不用再点「看内容」
+    slOpenGroup = String(groupId);
+  } else {
+    msg.innerHTML = `<p class="hint">❌ 没压成：${esc((r.result && r.result.message) || r.error || '未知原因')}</p>`;
+  }
+  await renderStoryline();
+}
+
+// ── 按群设定（<主人>：「参数也可以分群设定」）──
+//
+// ⚠️⚠️ 2026-09-16 改造（用户要求）：
+//    「把**日常事件的节奏设置**和**二级事件的参数**也加一个**下拉群菜单**分群调节，
+//      注意修改的参数**一定要能真正保存**，而且能在 webui 上**马上看到变化**，
+//      不同群的数据**一定不要混在一起**了」
+//
+//   · 下拉选一个群 → 下面整张表单都是**这个群**的（不是一行行平铺所有群）
+//   · 每个输入框显示的都是**这个群现在实际生效的值**（没有"跟全局"那一档了）
+//   · 保存后**立刻回读**（`fillGroupParams()`）→ 界面马上显示这个群现在生效的值
+//   · 后端 config.js 会做白名单 + 数值化，所以"存了不生效"的字符串进不去
+//   · 数据不混：life/quest 的参数、计数、排程、故事线**都是按群的**
+let gpGroups = [];
+
+async function renderGroupParams() {
+  const sel = $('gp-group');
+  const box = $('gp-form');
+  if (!sel || !box) return;
+  try {
+    const [st, sl] = await Promise.all([api('/api/state'), api('/api/storyline/state')]);
+    const lv = (st.config && st.config.trigger && st.config.trigger.groupRespondTo) || {};
+    const allow = ((st.config && st.config.trigger && st.config.trigger.allowGroups) || []).map(String);
+    const inSl = ((sl.status && sl.status.byGroup) || []).map((x) => String(x.groupId));
+    // ⚠️⚠️ **只有 1 档群才进事件系统**（<主人> 2026-09-15：
+    //    「挡位 2 不能进事件系统，只有 1 才能设置」）—— 所以下拉里**只有 1 档群**。
+    const isEvent = (g) => Number(lv[g]) === 1 && (!allow.length || allow.includes(g));
+    const all = [...new Set([...Object.keys(lv), ...inSl])];
+    gpGroups = all.filter(isEvent).sort();
+    const skipped = all.filter((g) => !isEvent(g)).sort();
+    if (!gpGroups.length) {
+      sel.innerHTML = '<option value="">（没有 1 档群）</option>';
+      box.innerHTML =
+        '<p class="hint">现在<b>没有 1 档群</b> —— 只有 1 档群才进事件系统（日常事件 + 剧情）。' +
+        (skipped.length ? `<br>不在事件系统里的群：${skipped.map(esc).join('、')}` : '') +
+        '<br>先去「群与触发」把要跑事件的群改成 <b>1 档</b>。</p>';
+      return;
+    }
+    const keep = String($('gp-group')?.value || localStorage.getItem('gp-group') || '');
+    sel.innerHTML = gpGroups.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('');
+    sel.value = gpGroups.includes(keep) ? keep : gpGroups[0];
+    // ⚠️ 把"不在事件系统里"的群**明说出来** —— 不然用户会奇怪"我那个群怎么没有"
+    if (skipped.length) {
+      $('gp-note').innerHTML =
+        `—— 只有 1 档群能设置；${skipped.map(esc).join('、')} 现在不在事件系统里`;
+    }
+    await fillGroupParams();
+  } catch (e) {
+    box.innerHTML = `<p class="hint">读取失败：${esc(e.message)}</p>`;
+  }
+}
+
+/** 选中群的表单（**框里就是这个群现在实际生效的值**，没有"跟全局"） */
+async function fillGroupParams() {
+  const box = $('gp-form');
+  const gid = String($('gp-group')?.value || '').trim();
+  if (!box) return;
+  if (!gid) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = '<p class="hint">读取中…</p>';
+  let r;
+  try {
+    r = await api(`/api/group-params?groupId=${encodeURIComponent(gid)}`);
+  } catch (e) {
+    box.innerHTML = `<p class="hint">读取失败：${esc(e.message)}</p>`;
+    return;
+  }
+  if (!r.ok) {
+    box.innerHTML = `<p class="hint">读取失败：${esc(r.error || '')}</p>`;
+    return;
+  }
+  const ov = r.overrides || {};
+  const p = r.params || {};
+  const L = p.life || {};
+  const Q = p.quest || {};
+  const C = p.chat || {};
+  const oL = ov.life || {};
+  const oQ = ov.quest || {};
+  const oC = ov.chat || {};
+  // ⚠️⚠️ 2026-09-16（用户要求）：「还是有跟全局的选项」「默认选关闭就行了」——
+  //    **彻底去掉"跟全局"这个概念**：每个群就是**自己完整的一份**。
+  //    所以这里所有输入框显示的都是**这个群现在实际生效的值**，
+  //    开关只有「开 / 关」两态（不再有第三档"跟全局"）。
+  const val = (v) => (v === undefined || v === null ? '' : esc(String(v)));
+  /** 开 / 关 两态（值 = 这个群现在实际生效的那个状态） */
+  const onoff = (id, on) =>
+    `<select id="${id}" style="width:auto;margin:0">
+       <option value="1"${on ? ' selected' : ''}>开</option>
+       <option value="0"${on ? '' : ' selected'}>关</option>
+     </select>`;
+  const mins = (ms) => (Number.isFinite(Number(ms)) ? String(Math.round(Number(ms) / 60000)) : '');
+
+  // 今天这个群的进度（"马上看到变化"）
+  let today = '';
+  try {
+    const s = await api(`/api/life/status?groupId=${encodeURIComponent(gid)}`);
+    if (s?.ok && s.status) {
+      const nx = s.status.nextAt ? new Date(s.status.nextAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '—';
+      today = `今天 <b>${s.status.fired}/${s.status.target}</b> 条 · 下次约 ${nx} · 时段 ${esc(s.status.window)}`;
+    }
+  } catch {}
+
+  box.innerHTML = `
+    <div class="hint" style="margin:0 0 8px">群 <b>${esc(gid)}</b> · ${today}</div>
+    <div class="hint" style="margin:0 0 8px">
+      下面是<b>这个群自己的一份</b>（框里就是它现在实际生效的值）——
+      改完保存只写进这个群，<b>不影响别的群</b>。没动过的群用的是内置起点。
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
+      <b>日常事件（一级）</b>
+      <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
+        <label>这个群收日常事件 ${onoff('gp-life-enable', L.enable !== false)}</label>
+        <label title="节日会换事件池、放假屏蔽「上课/赶电车」">节日生效 ${onoff('gp-life-holidays', L.holidays !== false)}</label>
+        <label title="每天最少几条">每天最少 <input type="number" id="gp-life-min" min="1" max="20" style="width:70px" value="${val(L.minPerDay)}"></label>
+        <label title="每天最多几条">每天最多 <input type="number" id="gp-life-max" min="1" max="20" style="width:70px" value="${val(L.maxPerDay)}"></label>
+        <label title="从几点开始允许发（0-7 点不发）">几点开始 <input type="number" id="gp-life-sh" min="0" max="23" style="width:70px" value="${val(L.startHour)}"></label>
+        <label title="到几点（24 = 到午夜）">几点结束 <input type="number" id="gp-life-eh" min="1" max="24" style="width:70px" value="${val(L.endHour)}"></label>
+        <label title="两条之间最少隔多久">间隔（分钟） <input type="number" id="gp-life-cool" min="1" style="width:80px" value="${mins(L.cooldownMs)}"></label>
+        <label title="错过多久就不补发">迟到容忍（分钟） <input type="number" id="gp-life-late" min="0" style="width:80px" value="${mins(L.lateToleranceMs)}"></label>
+      </div>
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
+      <b>二级剧情</b>
+      <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
+        <label>这个群自动开剧情 ${onoff('gp-quest-enable', Q.enable === true)}</label>
+        <label title="一级事件攒到点时，掷骰子自动开一条剧情的概率">概率 <input type="number" id="gp-quest-chance" min="0" max="1" step="0.01" style="width:70px" value="${val(Q.chance)}"></label>
+        <label title="每 7 天最多几条">每周上限 <input type="number" id="gp-quest-max" min="1" max="20" style="width:70px" value="${val(Q.maxPerWeek)}"></label>
+        <label title="每段等群友多久">每段等待（分钟） <input type="number" id="gp-quest-wait" min="1" style="width:80px" value="${mins(Q.waitMs)}"></label>
+        <label title="硬上限段数">最多段数 <input type="number" id="gp-quest-stages" min="1" max="10" style="width:70px" value="${val(Q.maxStages)}"></label>
+        <label title="没人回最多自动续几段">冷场自动续 <input type="number" id="gp-quest-cold" min="0" max="5" style="width:70px" value="${val(Q.coldAutoLimit)}"></label>
+        <label title="群友哪句话才算「能改变剧情」">谁的话算数
+          <select id="gp-quest-mode" style="width:auto;margin:0">
+            <option value="strict"${Q.replyMode === 'strict' ? ' selected' : ''}>严格（只认@她/回她/明显的建议）</option>
+            <option value="normal"${(Q.replyMode ?? 'normal') === 'normal' ? ' selected' : ''}>标准（+任何问句）</option>
+            <option value="loose"${Q.replyMode === 'loose' ? ' selected' : ''}>宽松（+6字以上闲聊）</option>
+          </select>
+        </label>
+        <label title="好结局加多少好感度">结局好感 + <input type="number" id="gp-quest-good" min="0" max="10" style="width:70px" value="${val(Q.affinityGood)}"></label>
+        <label title="坏结局扣多少（负数）">结局好感 − <input type="number" id="gp-quest-bad" min="-10" max="0" style="width:70px" value="${val(Q.affinityBad)}"></label>
+      </div>
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px">
+      <b>她怎么说话</b>
+      <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
+        <label title="0 = 最松（爱接话）、100 = 最紧（几乎不主动）">收紧度 <input type="number" id="gp-chat-strict" min="0" max="100" style="width:70px" value="${val(C.strictness ?? 50)}"></label>
+      </div>
+    </div>
+
+    <div class="btns" style="margin-top:10px">
+      <button class="act" onclick="saveGroupParams()">保存这个群的设置</button>
+      <button class="act" onclick="clearGroupParams()">恢复内置起点</button>
+      <span class="msg" id="msg-gp"></span>
+    </div>
+    <div class="hint" style="margin-top:6px">
+      这个群现在：日常事件 <b>${L.enable === false ? '关' : '开'}</b>
+      （每天 ${esc(String(L.minPerDay))}~${esc(String(L.maxPerDay))} 条、间隔 ${mins(L.cooldownMs)} 分钟、${esc(String(L.startHour))}~${esc(String(L.endHour))} 点）·
+      自动开剧情 <b>${Q.enable === true ? '开' : '关'}</b>
+      （概率 ${esc(String(Q.chance))}、每周 ${esc(String(Q.maxPerWeek))} 条、每段等 ${mins(Q.waitMs)} 分钟）·
+      收紧度 <b>${esc(String(C.strictness ?? 50))}</b>
+      ${Object.keys(ov).length ? `<br>这个群单独设过：<span class="mono">${esc(JSON.stringify(ov))}</span>` : '<br>（这个群还没单独设过，用的是内置起点）'}
+      <br>⚠️「恢复内置起点」= 把这个群的设置清掉，回到内置起点（<b>不是</b>回到别的群）。
+    </div>`;
+}
+
+async function saveGroupParams() {
+  const gid = String($('gp-group')?.value || '').trim();
+  if (!gid) return;
+  const numOrNull = (id) => {
+    const v = String($(id)?.value ?? '').trim();
+    return v === '' ? null : Number(v);
+  };
+  const minOrNull = (id) => {
+    const v = numOrNull(id);
+    return v === null || !Number.isFinite(v) ? null : Math.round(v * 60000);
+  };
+  const boolOrNull = (id) => {
+    const v = String($(id)?.value ?? '');
+    return v === '' ? null : v === '1';
+  };
+  const patch = {
+    life: {
+      enable: boolOrNull('gp-life-enable'),
+      holidays: boolOrNull('gp-life-holidays'),
+      minPerDay: numOrNull('gp-life-min'),
+      maxPerDay: numOrNull('gp-life-max'),
+      startHour: numOrNull('gp-life-sh'),
+      endHour: numOrNull('gp-life-eh'),
+      cooldownMs: minOrNull('gp-life-cool'),
+      lateToleranceMs: minOrNull('gp-life-late'),
+    },
+    quest: {
+      enable: boolOrNull('gp-quest-enable'),
+      chance: numOrNull('gp-quest-chance'),
+      maxPerWeek: numOrNull('gp-quest-max'),
+      waitMs: minOrNull('gp-quest-wait'),
+      maxStages: numOrNull('gp-quest-stages'),
+      coldAutoLimit: numOrNull('gp-quest-cold'),
+      affinityGood: numOrNull('gp-quest-good'),
+      affinityBad: numOrNull('gp-quest-bad'),
+      replyMode: (() => {
+        const v = String($('gp-quest-mode')?.value ?? '');
+        return v === '' ? null : v;
+      })(),
+    },
+    chat: { strictness: numOrNull('gp-chat-strict') },
+  };
+  const btn = event?.target;
+  if (btn) btn.disabled = true;
+  const r = await api('/api/group-params', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupId: gid, patch }),
+  });
+  if (btn) btn.disabled = false;
+  if (!r.ok) return alert('保存失败：' + (r.error || ''));
+  // ⚠️ 存完**立刻回读**（用户要求「能在 webui 上马上看到变化」）——
+  //    显示的灰字 = 现在真正生效的值，而不是我以为存进去的值
+  await fillGroupParams();
+  const m = $('msg-gp');
+  if (m) {
+    m.textContent = `已保存到群 ${gid}（界面显示的就是现在生效的值）`;
+    setTimeout(() => (m.textContent = ''), 4000);
+  }
+}
+
+async function clearGroupParams() {
+  const gid = String($('gp-group')?.value || '').trim();
+  if (!gid) return;
+  if (!confirm(`把群 ${gid} 的设置清掉，回到**内置起点**？\n\n（不是回到别的群 —— 每个群各是各的）`)) return;
+  const r = await api('/api/group-params', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      groupId: gid,
+      patch: {
+        life: {
+          enable: null,
+          holidays: null,
+          minPerDay: null,
+          maxPerDay: null,
+          startHour: null,
+          endHour: null,
+          cooldownMs: null,
+          lateToleranceMs: null,
+        },
+        quest: {
+          enable: null,
+          chance: null,
+          maxPerWeek: null,
+          waitMs: null,
+          maxStages: null,
+          coldAutoLimit: null,
+          affinityGood: null,
+          affinityBad: null,
+          replyMode: null,
+        },
+        chat: { strictness: null },
+      },
+    }),
+  });
+  if (!r.ok) return alert('失败：' + (r.error || ''));
+  await fillGroupParams();
+}
+
+// ── 好感度 / 好友 ──
+async function renderAffinity() {
+  const el = $('aff-status');
+  if (!el) return;
+  try {
+    // ⚠️ 好感度**按群**（2026-09-15 晚）：带上选中的群号；顺手把群列表填进下拉框
+    const gid = String($('aff-group')?.value || '').trim();
+    const r = await api('/api/friend/state' + (gid ? `?groupId=${encodeURIComponent(gid)}` : ''));
+    const c = r.config || {};
+    const s = r.status || {};
+    {
+      const sel = $('aff-group');
+      if (sel) {
+        const gids = Array.isArray(r.groups) && r.groups.length ? r.groups : [];
+        const keep = gid;
+        sel.innerHTML = ['<option value="">（全部 / 老数据）</option>']
+          .concat(gids.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`))
+          .join('');
+        sel.value = keep && gids.includes(keep) ? keep : '';
+      }
+    }
+    $('a-threshold').value = c.friendThreshold ?? 90;
+    $('a-boardSize').value = c.boardSize ?? 10;
+    $('a-window').value = Math.round((c.interactWindowMs ?? 1800000) / 60000);
+    $('f-enable').checked = c.enable !== false;
+    $('f-chance').value = c.dailyChance ?? 0.35;
+    $('f-from').value = c.dayFromHour ?? 9;
+    $('f-to').value = c.dayToHour ?? 22;
+    $('f-gapHours').value = Math.round((c.minGapMs ?? 72000000) / 3600000);
+    $('f-notice').value = c.notice ?? '';
+
+    const sc = r.scores || {};
+    el.innerHTML =
+      kv('有记录的人数', sc.count ?? (s.friendList || []).length ?? 0) +
+      kv('加好友门槛', `<b>${c.friendThreshold ?? 90}</b>（到线会在群里 @ 他，让他来加）`) +
+      kv('已发到线通知', `${s.noticed ?? 0} 人`) +
+      kv('已经是好友', `${s.friends ?? 0} 人`) +
+      kv('今天挑过了吗', s.todayPicked ? '挑过了' : '还没') +
+      kv('上次主动私聊', s.lastDmAt ? new Date(s.lastDmAt).toLocaleString('zh-CN', { hour12: false }) : '—');
+
+    // 排行榜预览（★ 显示**名字**；号码留着给管理看）
+    const board = r.board || [];
+    const nm = (x) =>
+      `${esc(x.name || '（还没说过话）')} <span class="mono" style="opacity:.55">${esc(x.userId)}</span>`;
+    $('aff-board').innerHTML = board.length
+      ? board.map((x, i) => `<div class="kv"><b>${i + 1}.</b><span>${nm(x)}</span><span style="margin-left:auto"><b>${x.score}</b></span></div>`).join('')
+      : '<div class="hint">还没有人的好感度有过变化。</div>';
+
+    // 好友名单
+    const list = s.friendList || [];
+    $('f-list').innerHTML = list.length
+      ? list.map((f) => `<div class="kv"><span>${nm(f)}</span><span style="margin-left:auto">好感度 ${f.score}　${f.lastDmAt ? '上次私聊 ' + new Date(f.lastDmAt).toLocaleDateString('zh-CN') : '还没私聊过'}</span></div>`).join('')
+      : '<div class="hint">还没有好友加进来。<br>（⚠️ 协议层发不了加好友申请，所以是"到线时在群里 @ 他、让他来加"。）</div>';
+  } catch (e) {
+    el.innerHTML = kv('出错', esc(e.message));
+  }
+}
+
+async function saveAffinity() {
+  const el = $('msg-aff');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      affinity: {
+        friendThreshold: Number($('a-threshold').value),
+        boardSize: Number($('a-boardSize').value),
+        interactWindowMs: Math.round(Number($('a-window').value) * 60000),
+      },
+      friend: {
+        enable: $('f-enable').checked,
+        dailyChance: Number($('f-chance').value),
+        dayFromHour: Number($('f-from').value),
+        dayToHour: Number($('f-to').value),
+        minGapMs: Math.round(Number($('f-gapHours').value) * 3600000),
+        notice: $('f-notice').value,
+      },
+    })
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) renderAffinity();
+}
+
+async function testNotice() {
+  const el = $('msg-f');
+  const uid = $('f-testUid').value.trim();
+  if (!uid) return flash(el, false, '先填一个 QQ 号');
+  if (!confirm('这会往 1 档群里发一条 @"' + uid + '" 的到线通知。\n（测试不记账，真到 90 的时候还会正常发）\n\n确定吗？')) return;
+  const r = await api('/api/friend/test-notice', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ userId: uid })
+  });
+  flash(el, r.ok, r.ok ? `已发到群 ${r.groupId}` : ('失败：' + r.error));
+}
+
+async function previewDm() {
+  const el = $('msg-f');
+  const uid = $('f-testUid').value.trim();
+  if (!uid) return flash(el, false, '先填一个 QQ 号');
+  flash(el, null, '正在写…');
+  const r = await api('/api/friend/preview-dm', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ userId: uid })
+  });
+  flash(el, r.ok, r.ok ? '写出来了（见下面）' : ('失败：' + r.error));
+  $('f-preview').innerHTML = r.ok ? kv('它会私聊说', esc(r.text)) : '';
+}
+
+async function sendDm() {
+  const el = $('msg-f');
+  const uid = $('f-testUid').value.trim();
+  if (!uid) return flash(el, false, '先填一个 QQ 号');
+  if (!confirm('这会**真的**给 ' + uid + ' 发一条私聊。\n\n确定吗？')) return;
+  flash(el, null, '正在写并发送…');
+  const r = await api('/api/friend/send-dm', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ userId: uid })
+  });
+  flash(el, r.ok, r.ok ? '已私聊发出' : ('失败：' + r.error));
+  if (r.ok) $('f-preview').innerHTML = kv('刚才发的', esc(r.text));
+}
+
+// ── 保存：模型 ──
+/**
+ * 保存「主人 / 机器人」这两个 QQ。
+ *
+ * ⚠️ 2026-09-15 用户要求：「把群主改成可编辑的，并且**改称主人**」。
+ * 原来它在状态页上只是**只读一行字**（`kv('群主', …)`），想改只能去编辑 config.yml。
+ *
+ * ⚠️ 两个都要**只留数字**再存：填了空格/引号的话，
+ *    `start-all.ps1`（一键启动）读 `botQQ` 做快速登录时会读不到（那个脚本的正则只认数字）。
+ */
+async function saveIdentity() {
+  const el = $('msg-id');
+  const ownerQQ = String($('id-ownerQQ').value || '').replace(/\D/g, '');
+  const botQQ = String($('id-botQQ').value || '').replace(/\D/g, '');
+  if (!ownerQQ) return flash(el, false, '主人 QQ 不能空');
+  if (!botQQ) return flash(el, false, '机器人 QQ 不能空');
+  if (ownerQQ === botQQ) return flash(el, false, '主人和机器人不能是同一个 QQ');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ ownerQQ, botQQ }),
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+async function saveModel() {  const el = $('msg-llm');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ llm: {
+      baseURL: $('llm-baseURL').value.trim(),
+      model: $('llm-model').value.trim(),
+      apiKey: $('llm-apiKey').value.trim(),
+      temperature: Number($('llm-temperature').value),
+      maxTokens: Number($('llm-maxTokens').value),
+      timeout: Number($('llm-timeout').value),
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+async function testLLM() {
+  const el = $('msg-llm');
+  flash(el, null, '测试中…');
+  const r = await api('/api/test-llm', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ llm: {
+      baseURL: $('llm-baseURL').value.trim(),
+      model: $('llm-model').value.trim(),
+      apiKey: $('llm-apiKey').value.trim(),
+    }})
+  });
+  flash(el, r.ok, r.ok ? `连通，${r.ms}ms，返回「${r.reply}」` : `失败：${r.error}`);
+}
+
+// ── 保存：群与触发 ──
+async function saveTrigger() {
+  // ⚠️ 这份设置横跨两个卡片（「它能在哪些群说话」+「回复与分条」），
+  //    两边各有一个保存按钮，点了都要有反馈 —— 所以两个提示位都刷。
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      trigger: {
+        allowGroups: lines($('trigger-allowGroups').value),
+        allowPrivateUsers: lines($('trigger-allowPrivateUsers').value),
+        groupChat: $('trigger-groupChat').checked,
+        privateChat: $('trigger-privateChat').checked,
+        requireAtInGroup: $('trigger-requireAtInGroup').checked,
+        historyRounds: Number($('trigger-historyRounds').value),
+        cooldownMs: Number($('trigger-cooldownMs').value),
+      },
+      chunking: {
+        maxChars: Number($('chunking-maxChars').value),
+        delayMs: Number($('chunking-delayMs').value),
+        delayMaxMs: $('chunking-delayMaxMs').value === '' ? undefined : Number($('chunking-delayMaxMs').value),
+      },
+      teach: {
+        teachers: lines($('teach-teachers').value),
+        allowPrivateTeach: $('teach-allowPrivateTeach').checked,
+        keywords: $('teach-keywords').value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+      },
+    })
+  });
+  for (const id of ['msg-groups', 'msg-trigger']) {
+    const el = $(id);
+    if (el) flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  }
+  if (r.ok) reloadAll();
+}
+
+// ── QQ 空间 ──
+
+// ── QQ 登录 ──
+
+async function qqRefresh() {
+  const el = $('qq-status');
+  if (!el) return;
+  el.innerHTML = kv('状态', '正在查…');
+  try {
+    const r = await api('/api/qq/status');
+    if (!r.ok) { el.innerHTML = kv('出错', esc(r.error || '查询失败')); return; }
+    const n = r.napcat || {};
+    const o = r.onebot || {};
+    // ⚠️ 协议端（2026-09-17 加）：收发跟它无关，但"出码/重启"这些能力由它决定。
+    //    不支持的能力**把按钮禁掉并说明去哪儿做** —— 比点了弹错好。
+    const pv = r.provider || {};
+    const caps = pv.caps || {};
+
+    // 两边都看：NapCat 说「已登录」不代表 QQ 真在线
+    const online = o.online === true;
+    const badge = online
+      ? '<b style="color:#16a34a">✅ 在线</b>'
+      : '<b style="color:#dc2626">❌ 离线（收不到消息）</b>';
+
+    let html =
+      kv('协议端', esc(pv.label || '—') +
+        (pv.manageUrl ? ' · <a href="' + esc(pv.manageUrl) + '" target="_blank">它自己的管理界面</a>' : '') +
+        // ⚠️⚠️ 2026-09-19 加（用户要求：「在 webui 加个切换控制」）：
+        //    界面上直接换协议端 = 改 `config.yml` 的 `provider.name`。
+        //    ⚠️ **收发本身跟协议端无关**（都走 onebot.url + token），换的是
+        //      "出码 / 重启 / 启停 / 假在线自愈"这些**管理能力**；
+        //    ⚠️ 而 provider 是**启动时读**的 → **改完必须重启机器人才生效**，
+        //      所以这里把这句话写在旁边，别让人以为一选就换过去了。
+        //    ⚠️ 选项写死这几个是故意的（= `provider.js` 里 REGISTRY 的键）。
+        //    ⚠️⚠️ 2026-09-20：**这三处必须同时有这个协议端，否则会被"归一化成 onebot"**：
+        //       ① `provider.js` 的 REGISTRY  ② `config.js` 的 KNOWN_PROVIDERS
+        //       ③ 就是这行选项。
+        //       今天就踩了：换到 SnowLuma 之后只改了 ①，结果启动日志打
+        //       「已连接到协议端（onebot）」、界面显示「通用 OneBot 11 实现」——
+        //       因为 config.js 的白名单里没有它，`name` 被改成了 onebot
+        //       （原值只留在 `provider.nameRaw` 里，害我查了半天）。
+        //      将来加协议端，这里要跟着加（或者让 `/api/status` 把 NAMES 带过来）。
+        ' <select id="pv-name" style="margin-left:6px;vertical-align:middle">' +
+        ['napcat', 'llonebot', 'snowluma', 'onebot']
+          .map((x) => '<option value="' + x + '"' + (x === pv.name ? ' selected' : '') + '>' + x + '</option>')
+          .join('') +
+        '</select>' +
+        ' <button onclick="qqSwitchProvider()">切换</button>' +
+        ' <span class="hint">换完**重启机器人**才生效；收发不受影响，出码/重启那些按钮会跟着变</span>') +
+      kv('QQ 是否在线', badge) +
+      kv('账号', esc(o.qq || '—') + (o.nickname ? ' (' + esc(o.nickname) + ')' : '') +
+        ' <span class="hint">（这条来自 OneBot 侧，换任何协议端都准）</span>');
+
+    // 只对支持的协议端显示"进程在不在"（别的协议端我们探测不到）
+    const running = r.running === true;
+    if (caps.status || caps.launch) {
+      html += kv(
+        '协议端进程',
+        running ? '<b style="color:#16a34a">在跑</b>' : '<b style="color:#dc2626">没在跑</b>',
+      );
+    }
+
+    // ⚠️⚠️ 2026-09-20 加（用户：「webui 加一个重启机器人的」+「要能成功切换端口」）：
+    //    **重启机器人**和"重启协议端"是两件事 —— 前者只是按当前 config 重连一次
+    //    协议端（SnowLuma / LLBot 都支持，不涉及 QQ 登录），而后者 SnowLuma 压根没有。
+    //    改完配置（尤其切协议端）**必须重启机器人才生效**，所以这个按钮放在状态页最显眼处。
+    html += kv(
+      '机器人进程',
+      '<button class="ghost" id="btn-bot-restart" onclick="qqRestartBot()">重启机器人</button>' +
+        ' <span class="hint">= 按当前配置重新连一次协议端（改完配置 / 切完协议端点它生效）；' +
+        '**不是**重启协议端，也不涉及 QQ 登录</span>',
+    );
+
+    // 按钮跟着"状态 + 协议端能力"变
+    const btn = $('btn-qq-restart');
+    if (btn) {
+      const canRestart = caps.restart === true || caps.launch === true;
+      btn.disabled = !canRestart;
+      btn.textContent = !canRestart
+        ? '当前协议端不支持（看它自己的界面）'
+        : running && caps.restart
+          ? '重启协议端（重新出码）'
+          : '启动协议端';
+      btn.style.background = !canRestart ? '#6b7280' : running && caps.restart ? '#dc2626' : '#16a34a';
+    }
+    const h = $('qq-restart-hint');
+    if (h) {
+      if (pv.how) h.textContent = pv.how + (pv.license ? '　｜　' + pv.license : '');
+    }
+
+    // ⚠️⚠️ 2026-09-20 修（用户截图：LLBot 下这里显示「NapCat 管理接口 连不上 — fetch failed」）：
+    //    我为 LLBot 也打开了 `caps.status`（为了能看登录状态），可**这一段的字段全是
+    //    NapCat 专属的**（`r.napcat` = 它 6099 那套 HTTP 接口）→ LLBot 也走进来、显示"连不上" ✗
+    //    ⇒ 按协议端分开：**只有 napcat 才显示这几张卡**。
+    //      LLBot 的登录状态在**二维码那张卡**上看（它会直接把正在出的码显示出来，
+    //      "在出码"就等于"没登录"，见 `src/llbot.js`）。
+    const isNapcat = String(pv.name || '').toLowerCase() === 'napcat';
+    if (isNapcat && !caps.status) {
+      html += kv('协议端管理接口', '<span class="hint">' + esc(n.error || '当前协议端没有这套接口') + '</span>');
+    } else if (isNapcat && !n.reachable) {
+      html += kv('NapCat 管理接口', '<b style="color:#dc2626">连不上</b> — ' + esc(n.error || ''));
+    } else if (isNapcat) {
+      html += kv('NapCat 侧登录状态', n.isLogin ? '已登录' : '未登录');
+      if (n.isOffline) html += kv('NapCat 侧', '<b style="color:#dc2626">标记为离线</b>');
+      if (n.loginError) html += kv('登录错误', esc(n.loginError));
+      if (n.quickLogin && n.quickLogin.length) {
+        html += kv('可快速登录的号', n.quickLogin.map(esc).join('、'));
+      }
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = kv('出错', esc(e.message));
+  }
+}
+
+/**
+ * 显示二维码。
+ *
+ * ⚠️⚠️ `?fresh=1` 不能省（2026-09-15 修）。原因：
+ *   `GetQQLoginQrcode`（原来唯一走的那个接口）**只是把缓存里的 URL 读出来，
+ *   根本不会重出二维码** —— 而码几分钟就死。所以以前这里画出来的
+ *   十有八九是**一张早就过期的码**，用户「从来没扫成功过」。
+ *   带上 `fresh=1` 后，后端会先调 `RefreshQRcode` 让 QQ **现生成一张**再返回。
+ */
+async function qqReloadQr() {
+  const card = $('qq-qr-card');
+  const img = $('qq-qr-img');
+  if (!card || !img) return;
+  card.style.display = '';
+  // ⚠️ 协议端没在跑的时候出不了码（后端直接 503），别让浏览器去请求一个空白图
+  const st = await api('/api/qq/status').catch(() => null);
+  if (st && st.running === false) {
+    img.removeAttribute('src');
+    if ($('qq-qr-hint')) {
+      $('qq-qr-hint').textContent =
+        (st.provider?.label || '协议端') + ' 没在运行，出不了码 —— 先把它启动起来。';
+    }
+    return;
+  }
+  // ⚠️⚠️ 2026-09-20 加：**拿不到图的时候不许留一张破图**（用户截图里就是那个样子：
+  //    一个破图图标 + alt 文字）。后端在 409/404/503 时回的是 **JSON（原因）**，
+  //    浏览器把它当图片加载就会显示破图。⇒ 在 onerror 里再问一次拿原因，
+  //    然后**把破图撤掉、只留文字**。
+  img.onerror = async () => {
+    img.removeAttribute('src');
+    let reason = '';
+    try {
+      const r = await fetch('/api/qq/qrcode.png?fresh=1&t=' + Date.now());
+      reason = (await r.json()).error || '';
+    } catch {}
+    if ($('qq-qr-hint')) $('qq-qr-hint').textContent = reason || '这次拿不到二维码。';
+  };
+  img.src = '/api/qq/qrcode.png?fresh=1&t=' + Date.now();
+  if ($('qq-qr-hint')) $('qq-qr-hint').textContent = '正在取码…扫不出来就点「重新出码」。';
+}
+
+/**
+ * 轻量「重新出码」：让 NapCat 现生成一张（`RefreshQRcode`），**不重启进程**。
+ *
+ * ⚠️ 以前这个按钮走的是「重启 NapCat」——那是**一次 QQ 登录**（风控信号）、
+ *    要等 20 秒，而且新实例还没生成码界面就去取 → 「重新出码也一直不出」。
+ */
+async function qqNewQr() {
+  const btn = $('btn-qq-newqr');
+  const img = $('qq-qr-img');
+  if (btn) { btn.disabled = true; btn.textContent = '正在出码…'; }
+  try {
+    const r = await api('/api/qq/refresh-qr', { method: 'POST' });
+    const card = $('qq-qr-card');
+    if (card) card.style.display = '';
+    if (img) img.src = '/api/qq/qrcode.png?t=' + Date.now();
+    // ⚠️⚠️ 2026-09-20 修（用户截图：界面写着「已生成新码，扫吧。」，下面是张**破图**）：
+    //    旧代码**只看 `r.ok`** 就宣布成功。而 LLBot 想出码也出不来的时候
+    //    （它连出 10 张没人扫就**停止出码**了），后端会回
+    //    `{ok:true, hasImage:false, message:'…'}` → 界面于是在**撒谎**。
+    //    ⇒ **以 `hasImage` 为准**；没拿到图就如实转述后端给的原因。
+    if ($('qq-qr-hint')) {
+      $('qq-qr-hint').textContent = r.ok && r.hasImage
+        ? '已生成新码，扫吧。'
+        : r.message || '这次没拿到新码 —— LLBot 那边可能停止出码了，去它的界面点「刷新」。';
+    }
+  } catch (e) {
+    if ($('qq-qr-hint')) $('qq-qr-hint').textContent = '出码出错：' + e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '重新出码'; }
+  }
+}
+
+/**
+ * 切换协议端（改 `config.yml` 的 `provider.name`）→ 保存后**问一句要不要立刻重启机器人**。
+ *
+ * ⚠️⚠️ 2026-09-20 加（用户原话：「**要能成功切换端口**」）：
+ *    原来切完只弹一句「已保存。重启机器人后生效」—— 而"重启机器人"的入口在别的卡片里，
+ *    用户切完很容易**以为已经切好了**，实际收发还在走老协议端 ✗
+ *    ⇒ 切完直接问「现在重启吗」，点一下就走 `/api/bot/restart`，这才叫"切换成功"。
+ *    ⚠️ 用 `confirm` 而不是自动重启：万一用户只是在看选项、并不想现在断线。
+ */
+async function qqSwitchProvider() {
+  const sel = $('pv-name');
+  const name = sel ? sel.value : '';
+  if (!name) return;
+  let j;
+  try {
+    j = await api('/api/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: { name } }),
+    });
+  } catch (e) {
+    alert('保存失败：' + e.message);
+    return;
+  }
+  if (!j || !j.ok) {
+    alert('保存失败：' + ((j && j.error) || '未知'));
+    return;
+  }
+  if (
+    confirm(
+      '已切到「' +
+        name +
+        '」。\n\n要现在重启机器人让它生效吗？\n（约 15~30 秒，期间收不到消息；不重启的话它仍按老协议端跑）',
+    )
+  ) {
+    qqRestartBot();
+  } else {
+    alert('已保存。记得自己重启机器人才生效 —— 状态页有「重启机器人」按钮。');
+  }
+}
+
+/**
+ * 重启机器人 —— 按当前配置重新连一次协议端。
+ * ⚠️ **不是**重启协议端，也**不涉及 QQ 登录**（协议端是独立进程，这条 2026-09-20 实测过）。
+ */
+async function qqRestartBot() {
+  const btn = $('btn-bot-restart');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '正在重启…';
+  }
+  try {
+    const r = await api('/api/bot/restart', { method: 'POST' });
+    alert((r && r.message) || '正在重启机器人…十几秒后自己回来，刷新页面即可。');
+  } catch (e) {
+    alert('重启请求失败：' + e.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '重启机器人';
+    }
+  }
+}
+
+async function qqRecover() {
+  const btn = $('btn-qq-recover');
+  const msg = $('qq-recover-msg');
+  btn.disabled = true;
+  btn.textContent = '正在尝试…（最多 15 秒）';
+  if (msg) msg.textContent = '先试快速登录（不用扫码），不行再出二维码…';
+  try {
+    const r = await api('/api/qq/recover', { method: 'POST' });
+    if (msg) {
+      msg.innerHTML = r.recovered
+        ? '<b style="color:#16a34a">✅ ' + esc(r.message) + '</b>'
+        : '<b style="color:#d97706">⚠️ ' + esc(r.message) + '</b> —— 请扫下面的二维码';
+    }
+    await qqRefresh();
+    if (!r.recovered) qqReloadQr();
+  } catch (e) {
+    if (msg) msg.textContent = '出错：' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '一键恢复登录（先试免扫码）';
+  }
+}
+
+async function qqRestart() {
+  const btn = $('btn-qq-restart');
+  // 先问一下服务端「NapCat 到底在不在跑」——不在跑就是「启动」，不是「重启」
+  const st = await api('/api/qq/status').catch(() => null);
+  const running = !!(st && st.running === true);
+  const ask = running
+    ? '重启 NapCat 会短暂断开机器人连接（几秒后自己重连）。\n如果只是网络抖断、QQ 已经自己重连上了，就不需要点这个。\n\n确定要重启吗？'
+    : 'NapCat 现在没在运行，点确定会把它启动起来：\n' +
+      '· 会先关掉没被注入 NapCat 的残留 QQ 进程；\n' +
+      '· 然后开一个 NapCat 窗口（最小化在任务栏）；\n' +
+      '· 登录态还在就自己登回去，失效了要在那个窗口里扫码。\n\n确定要启动吗？';
+  if (!confirm(ask)) return;
+  btn.disabled = true;
+  btn.textContent = running ? '正在重启…（约 20 秒）' : '正在启动…（最多等 1 分钟）';
+  try {
+    const r = await api('/api/qq/restart', { method: 'POST' });
+    if (!r.ok) {
+      alert((r.launched ? '启动遇到问题：' : '重启失败：') + r.message);
+      await qqRefresh();
+      return;
+    }
+    // 启动要等 NapCat 起来（服务端已经等过了），重启则按老规矩等 15 秒
+    await new Promise((res) => setTimeout(res, running ? 15000 : 2000));
+    await qqRefresh();
+    if (r.launched) await qqNewQr(); // 起来了就把码拿出来，省得再去任务栏翻窗口
+    else qqReloadQr();
+    await qqRefresh();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '重启 NapCat（重新出码）';
+  }
+}
+
+// ── 分群灵敏度 ──
+
+const RESP_LABEL = {
+  0: '跟随全局',
+  1: '① 什么都可能接（最活跃）',
+  2: '② 只接服务器话题/聊到它',
+  3: '③ 只认 @（最安静）',
+};
+
+async function loadGroupRespond() {
+  const el = $('group-respond-list');
+  if (!el) return;
+  el.textContent = '加载中…';
+  try {
+    const r = await api('/api/qq/groups');
+    if (!r.ok) { el.textContent = '出错：' + (r.error || '取群列表失败'); return; }
+    const per = r.perGroup || {};
+    if (!r.groups.length) {
+      el.textContent = '没取到群列表（机器人可能没连上 QQ）';
+      return;
+    }
+    el.innerHTML = r.groups.map((g) => {
+      const cur = per[g.id] ?? 0;
+      const opts = [0, 1, 2, 3].map((v) =>
+        `<option value="${v}"${v === cur ? ' selected' : ''}>${esc(RESP_LABEL[v])}</option>`,
+      ).join('');
+      const mark = per[g.id] ? ' <b style="color:#d97706">已单独设置</b>' : '';
+      return `<div class="gr-row">
+        <div class="gr-name">${esc(g.name || '(无名群)')}<span class="gr-id">${esc(g.id)}${g.count ? ' · ' + g.count + ' 人' : ''}</span>${mark}</div>
+        <select onchange="setGroupRespond('${esc(g.id)}', this.value, this)">${opts}</select>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    el.textContent = '出错：' + e.message;
+  }
+}
+
+async function setGroupRespond(gid, level, sel) {
+  const msg = $('msg-group-respond');
+  sel.disabled = true;
+  try {
+    const r = await api('/api/qq/group-respond', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupId: gid, level: Number(level) }),
+    });
+    flash(msg, r.ok, r.ok ? `${gid} 已保存` : ('保存失败：' + r.error));
+    if (r.ok) await loadGroupRespond();
+  } catch (e) {
+    flash(msg, false, '出错：' + e.message);
+  } finally {
+    sel.disabled = false;
+  }
+}
+
+async function renderQzone() {
+  try {
+    const q = await api('/api/qzone');
+    if (!q.ok) return;
+    const m = q.material || {};
+    $('qzone-status').innerHTML =
+      kv('今天已发', `${q.todayCount} / ${q.maxPerDay} 条`) +
+      kv('素材', `${m.count || 0} 条（最近一条 ${m.newest || 0} 分钟前）`) +
+      kv('能不能发', q.canPost ? '可以' : `暂时不行 — ${q.blockReason || ''}`);
+    $('qz-enable').checked = q.enable !== false;
+    $('qz-maxPerDay').value = q.maxPerDay ?? 3;
+    $('qz-ugcRight').value = String(q.ugcRight ?? 1);
+    if (q.recent && q.recent.length) {
+      $('qzone-status').innerHTML += '<div style="margin-top:12px"><b>最近发过的：</b><br>' +
+        q.recent.map(p => '· ' + esc(p.content.slice(0, 80))).join('<br>') + '</div>';
+    }
+  } catch {}
+}
+
+async function qzonePreview() {
+  const el = $('msg-qzone');
+  const btn = $('btn-qz-preview');
+  btn.disabled = true;
+  flash(el, null, '正在生成（会先回填群素材，可能要十几秒）…');
+  try {
+    const r = await api('/api/qzone/preview', { method: 'POST' });
+    if (!r.ok) { flash(el, false, '出错：' + r.error); return; }
+    if (!r.post) {
+      flash(el, null, `它决定不发。理由：${r.reason}`);
+      return;
+    }
+    flash(el, true, `打算发这个（类型 ${r.type}${r.face ? '，配图 ' + r.face : ''}）：`);
+    $('qz-manual').value = r.content;
+    await renderQzone();
+  } finally { btn.disabled = false; }
+}
+
+async function qzonePost() {
+  const el = $('msg-qzone');
+  const btn = $('btn-qz-post');
+  if (!confirm('确定要发到 QQ 空间吗？发出去就收不回来了。')) return;
+  btn.disabled = true;
+  flash(el, null, '正在生成并发布…');
+  try {
+    const r = await api('/api/qzone/post', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    // ⚠️ 2026-09-15 深夜：接口"不发"时给的是 `skipped` / `reason`，**不是 `error`**。
+    //    原来直接读 `r.error` → 界面只显示「失败： undefined」，看不出为什么没发 ✗
+    //    （真实踩过：<主人> 截图「动态好像还有个问题」）
+    if (r.skipped) { flash(el, null, '没有发：' + r.skipped); return; }
+    if (!r.ok) { flash(el, false, '失败：' + (r.error || '（没给原因，去看日志）')); return; }
+    if (!r.posted) { flash(el, null, `没有发。${r.reason || ''}`); return; }
+    flash(el, true, '已发布：' + r.content.slice(0, 60));
+    await renderQzone();
+  } finally { btn.disabled = false; }
+}
+
+async function qzoneManualPost() {
+  const el = $('msg-qzone');
+  const content = $('qz-manual').value.trim();
+  if (!content) { flash(el, false, '先写点内容'); return; }
+  if (!confirm('确定发这条到 QQ 空间吗？')) return;
+  flash(el, null, '正在发布…');
+  const r = await api('/api/qzone/post', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    // 一条说说配一张（qz-face 是单选）
+    body: JSON.stringify({ content, face: $('qz-face').value || null })
+  });
+  flash(el, r.ok, r.ok ? '已发布' : ('失败：' + r.error));
+  if (r.ok) { $('qz-manual').value = ''; await renderQzone(); }
+}
+
+async function saveQzone() {
+  const el = $('msg-qzone-cfg');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ qzone: {
+      enable: $('qz-enable').checked,
+      auto: $('qz-auto').checked,
+      maxPerDay: Number($('qz-maxPerDay').value),
+      cooldownMs: Number($('qz-cooldownHours').value) * 3600000,
+      ugcRight: Number($('qz-ugcRight').value),
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) await reloadAll();
+}
+// 保存灵敏度
+async function saveRespondTo() {
+  const el = $('msg-respond');
+  const sel = [...document.querySelectorAll('input[name=respondTo]')].find(r => r.checked);
+  if (!sel) { flash(el, false, '先选一个档次'); return; }
+  const level = Number(sel.value);
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ trigger: { respondTo: level } })
+  });
+  const names = {1:'① 有能回答的就回', 2:'② 只回服务器/聊到它的', 3:'③ 只有 @ 才回'};
+  flash(el, r.ok, r.ok ? `已切到 ${names[level]}，立即生效` : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+// ── 收紧度滑块（2026-09-13 加，用户要求；**只对灵敏度 ① 生效**）──────
+// 拖动时实时给出"这意味着什么"的说明，让人不用猜数字。
+function onStrictInput() {
+  const v = Number($('strictness').value);
+  const d = $('strict-desc');
+  let txt, color;
+  if (v <= 15) {
+    txt = '它会比较爱说话 —— 只要接得上就接。群友可能觉得它话有点多。';
+    color = '#c2410c';
+  } else if (v <= 40) {
+    txt = '偏活跃。服务器问题照答，闲聊里能接的也会接。';
+    color = '#a16207';
+  } else if (v <= 65) {
+    txt = '平衡（推荐）。服务器问题、求助、聊到它的会答；普通闲聊一般不插嘴。';
+    color = '#15803d';
+  } else if (v <= 85) {
+    txt = '偏安静。只有明确需要它的时候才开口，闲聊基本不参与。';
+    color = '#1d4ed8';
+  } else {
+    txt = '很克制。几乎只在"不回答就不对"的时候才说话（服务器问题、求助）。';
+    color = '#1e3a8a';
+  }
+  d.innerHTML = '<b style="color:' + color + '">' + v + '</b> · ' + txt;
+}
+
+// ⚠️ 2026-09-15 晚（<主人>：「直接取消保存全局的说法，首先默认 50，然后只保留分群的数据」）：
+//    **全局那个滑块和"保存收紧度（全局）"按钮已经删掉了** —— 现在只按群设，
+//    没设过的群 = 默认 50。落盘在 `config.groupParams[<群号>].chat.strictness`。
+
+// ── 收紧度**按群**单独调（2026-09-15 晚 <主人> 要求）──────────────────
+// 上面那个滑块是**全局默认**；这里是"只改某一个群"。
+// ⚠️ 落盘在 `config.groupParams[<群号>].chat.strictness`；留空 = 删掉覆盖 → 回到默认 50。
+
+/** 把 1 档群填进下拉框，并把选中的群现在生效的收紧度回填 */
+async function fillStrictForGroup() {
+  const sel = $('strict-group');
+  if (!sel) return;
+  try {
+    const st = STATE || (await api('/api/state'));
+    const lv = (st.config?.trigger?.groupRespondTo) || {};
+    const allow = (st.config?.trigger?.allowGroups || []).map(String);
+    const gids = Object.keys(lv)
+      .filter((g) => Number(lv[g]) === 1 && (!allow.length || allow.includes(g)))
+      .sort();
+    const keep = sel.value || localStorage.getItem('strict-group') || '';
+    sel.innerHTML = gids.length
+      ? gids.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('')
+      : '<option value="">（现在没有 1 档群）</option>';
+    if (keep && gids.includes(keep)) sel.value = keep;
+    await fillStrictValueForSelected();
+  } catch {}
+}
+
+/** 回填"选中的那个群"现在生效的收紧度 —— **滑块要跟着动**（用户报过：切群滑块没更新） */
+async function fillStrictValueForSelected() {
+  const sel = $('strict-group');
+  if (!sel) return;
+  const gid = String(sel.value || '').trim();
+  if (gid) localStorage.setItem('strict-group', gid);
+  const slider = $('strictness');
+  const note = $('strict-group-note');
+  if (!gid) {
+    if (slider) slider.value = '50';
+    if (note) note.textContent = '（没有 1 档群可设）';
+    onStrictInput();
+    return;
+  }
+  try {
+    const r = await api(`/api/group-params?groupId=${encodeURIComponent(gid)}`);
+    const raw = r?.overrides?.chat?.strictness;
+    const has = raw !== undefined && raw !== null && raw !== '';
+    // ⚠️ 没设过 = **默认 50**（不再有"跟全局"这个概念了）
+    if (slider) slider.value = String(has ? Number(raw) : 50);
+    if (note) note.textContent = has ? `群 ${gid}：单独设过` : `群 ${gid}：还没设过（默认 50）`;
+  } catch {
+    if (slider) slider.value = '50';
+    if (note) note.textContent = '';
+  }
+  onStrictInput();
+}
+
+async function saveStrictForGroup() {
+  const el = $('msg-strict-group');
+  const gid = String($('strict-group')?.value || '').trim();
+  if (!gid) { flash(el, false, '先选一个 1 档群'); return; }
+  const v = Number($('strictness')?.value ?? 50);
+  const r = await api('/api/group-params', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupId: gid, patch: { chat: { strictness: v } } }),
+  });
+  flash(el, r.ok, r.ok ? `群 ${gid} 的收紧度 = ${v}，立即生效` : ('失败：' + (r.error || '')));
+  if (r.ok) { renderGroupParams?.(); fillStrictValueForSelected(); }
+}
+
+async function clearStrictForGroup() {
+  const el = $('msg-strict-group');
+  const gid = String($('strict-group')?.value || '').trim();
+  if (!gid) return;
+  const r = await api('/api/group-params', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupId: gid, patch: { chat: { strictness: null } } }),
+  });
+  flash(el, r.ok, r.ok ? `群 ${gid} 已还原成默认（50）` : ('失败：' + (r.error || '')));
+  if (r.ok) { renderGroupParams?.(); fillStrictValueForSelected(); }
+}
+
+async function saveStatus() {
+  const el = $('msg-status');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ status: {
+      enable: $('status-enable').checked,
+      host: $('status-host').value.trim(),
+      displayName: $('status-displayName').value.trim(),
+      cacheSeconds: Number($('status-cacheSeconds').value),
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+async function testServer() {
+  const el = $('msg-status');
+  flash(el, null, '查询中…');
+  const r = await api('/api/test-server', { method: 'POST' });
+  flash(el, r.ok, r.text);
+}
+
+// ── 表情包 ──
+let FACES = [];
+
+function renderFaces() {
+  FACES = STATE?.faces ?? [];
+  const unset = FACES.filter(f => !f.when || f._未完善).length;
+  $('face-count').textContent = FACES.length + ' 张' + (unset ? ` · ${unset} 张待完善` : '');
+  $('faces').innerHTML = FACES.map(f => {
+    const need = !f.when || f._未完善;
+    return `
+    <div class="face" style="${need ? 'border-color:#f59e0b;background:#fffbeb' : ''}">
+      <img src="/library/${encodeURIComponent(f.file)}" alt="${esc(f.tag)}" loading="lazy">
+      <div class="body">
+        <div class="tag">[表情:${esc(f.tag)}]${f.variantCount > 1 ? ` · ${f.variant}/${f.variantCount}` : ''}${need ? ' ⚠️' : ''}</div>
+        ${f.who ? `<div class="when" style="color:#374151">${esc(f.who)}</div>` : ''}
+        <div class="when">${esc(f.when || '（还没填「适用场合」——不填的话它不会用这张）')}</div>
+        <div class="ops">
+          <button onclick="editFace('${esc(f.tag)}')">${need ? '去完善' : '编辑'}</button>
+          <button onclick="delFace('${esc(f.tag)}')" style="color:#dc2626">删除</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('') || '<div style="color:#6b7280">还没有表情，上面拖图片进来</div>';
+  return Promise.resolve();
+}
+
+// 扫 library/ 目录，把没登记的图补进来；发现缺注释的就问要不要自动补
+window.scanFaces = async () => {
+  const el = $('msg-face');
+  const btn = $('btn-scan');
+  btn.disabled = true;
+  flash(el, null, '正在扫描 library/ 目录…');
+  try {
+    const r = await api('/api/faces/scan', { method: 'POST' });
+    if (!r.ok) { flash(el, false, '失败：' + r.error); return; }
+    const parts = [];
+    if (r.added.length) parts.push(`新增 ${r.added.length} 张`);
+    if (r.missing.length) parts.push(`清掉 ${r.missing.length} 条失效记录`);
+    if (r.broken.length) parts.push(`删除 ${r.broken.length} 张重复图`);
+
+    // 有缺注释的 → 问一句要不要让机器人看图自动补（用户要求：跟更新表情库集成）
+    if (r.unannotatedCount > 0) {
+      flash(el, true, (parts.length ? parts.join('；') + '。' : '') +
+        `发现 ${r.unannotatedCount} 张缺注释（谁/什么时候用）。`);
+      const yes = confirm(
+        `有 ${r.unannotatedCount} 张表情还没有注释（"图里是谁"和"什么时候用"）。\n\n` +
+        `要现在让机器人看图自动补吗？\n` +
+        `· 每张约 5~10 秒（要过一次视觉模型）\n` +
+        `· 一次处理 10 张，做完会显示进度\n` +
+        `· 中途可以随时关掉页面，已完成的会保存\n\n` +
+        `（也可以稍后在界面上手动填）`,
+      );
+      if (yes) await annotateFaces();
+      return;
+    }
+
+    flash(el, true, parts.length ? parts.join('；') + '。' : '没有变化，表情库是最新的。');
+  } catch (e) {
+    flash(el, false, '出错：' + e.message);
+  } finally {
+    btn.disabled = false;
+    await reloadAll();
+  }
+};
+
+// 分批补注释，边做边显示进度（每批 10 张，避免单个请求挂太久）
+window.annotateFaces = async () => {
+  const el = $('msg-face');
+  const btn = $('btn-annotate');
+  if (btn) btn.disabled = true;
+  let total = 0;
+  let done = 0;
+  let failed = 0;
+  try {
+    for (let round = 0; round < 50; round++) {
+      flash(el, null, `正在看图补注释… 已完成 ${done} 张${total ? ` / ${total}` : ''}（每张约 5~10 秒）`);
+      const r = await api('/api/faces/annotate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batch: 10 }),
+      });
+      if (!r.ok) { flash(el, false, '出错：' + r.error); break; }
+      if (r.message) { flash(el, true, r.message); break; }
+      done += (r.added || []).length;
+      failed += (r.failed || []).length;
+      if (!total) total = done + r.remaining;
+      await reloadAll();
+      if (r.done) {
+        flash(el, failed ? null : true,
+          `补完了：成功 ${done} 张${failed ? `，失败 ${failed} 张` : ''}。` +
+          (failed ? '失败的可以手动填，或者再点一次重试。' : ''));
+        break;
+      }
+    }
+  } catch (e) {
+    flash(el, false, '出错：' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+    await reloadAll();
+  }
+};
+
+$('drop').onclick = () => $('file').click();
+$('file').onchange = (e) => uploadFiles([...e.target.files]);
+$('drop').addEventListener('dragover', e => { e.preventDefault(); $('drop').classList.add('over'); });
+$('drop').addEventListener('dragleave', () => $('drop').classList.remove('over'));
+$('drop').addEventListener('drop', e => {
+  e.preventDefault(); $('drop').classList.remove('over');
+  uploadFiles([...e.dataTransfer.files].filter(f => f.type.startsWith('image/')));
+});
+
+async function uploadFiles(files) {
+  const el = $('msg-face');
+  if (!files.length) return;
+  let done = 0;
+  for (const f of files) {
+    if (f.size > 8 * 1024 * 1024) { flash(el, false, `${f.name} 超过 8MB，跳过`); continue; }
+    const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name), {
+      method: 'POST', body: f,
+    }).then(x => x.json());
+    if (!r.ok) { flash(el, false, `${f.name} 上传失败：${r.error}`); continue; }
+    // 自动建一条，标签先用文件名，用户再改
+    const tag = f.name.replace(/\.[^.]+$/, '').slice(0, 12) || '新表情';
+    await api('/api/faces', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ action: 'add', tag, file: r.file, when: '（请填写适用场合）', desc: '' })
+    });
+    done++;
+  }
+  flash(el, true, `已上传 ${done} 张，请给它们填上「适用场合」`);
+  await refreshFaces();
+}
+
+async function refreshFaces() {
+  await reloadAll();
+}
+
+window.editFace = async (tag) => {
+  const f = FACES.find(x => x.tag === tag);
+  if (!f) return;
+  const newTag = prompt('标签（模型调用时写 [表情:标签]，简短好记）', f.tag);
+  if (newTag === null) return;
+  const who = prompt('图里是谁（有人问「为什么发这个」时它要答得出；认不出就留空）', f.who || '');
+  if (who === null) return;
+  const when = prompt('适用场合（必填！不填它不会用这张）\n写得越具体，它用得越准', f.when || '');
+  if (when === null) return;
+  const r = await api('/api/faces', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      action: 'update', oldTag: tag, tag: newTag.trim(), file: f.file,
+      who: who.trim(), when: when.trim(), desc: f.desc,
+    })
+  });
+  if (r.ok) await reloadAll();
+  else flash($('msg-face'), false, r.error);
+};
+
+window.delFace = async (tag) => {
+  if (!confirm(`删除表情「${tag}」？图片文件也会被删掉。`)) return;
+  const r = await api('/api/faces', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ action: 'delete', tag })
+  });
+  if (r.ok) await reloadAll();
+};
+
+// ── 知识库 ──
+$('k-file').onchange = loadKnowledge;
+
+/** 动态填知识文件下拉框（后端返回的列表，加了新文件不用改这里） */
+async function loadKnowledgeList(keep) {
+  const r = await api('/api/knowledge/list');
+  const files = r.files ?? [];
+  const sel = $('k-file');
+  const want = keep || sel.value || 'persona.md';
+  sel.innerHTML = files
+    .map((f) => `<option value="${esc(f.name)}">${esc(f.name)}${f.desc ? ' —— ' + esc(f.desc) : ''}${f.readonly ? '（只读）' : ''}</option>`)
+    .join('');
+  if (files.some((f) => f.name === want)) sel.value = want;
+  return files;
+}
+
+async function loadKnowledge() {
+  const name = $('k-file').value;
+  const r = await api('/api/knowledge?name=' + encodeURIComponent(name));
+  const list = await api('/api/knowledge/list');
+  const meta = (list.files ?? []).find((f) => f.name === name);
+  $('k-desc').textContent = meta
+    ? `${meta.desc || ''}　共 ${meta.size} 字${meta.readonly ? '　（只读）' : ''}`
+    : '';
+  if (!r.ok) { $('k-content').value = '（读取失败：' + r.error + '）'; return; }
+  $('k-content').value = r.content;
+  // ⚠️ 只读与否**完全由服务端说了算**（`meta.readonly`）。
+  //    原来这里还写死了一句 `|| name === 'learned.md'` ——
+  //    于是服务端把 `learned.md` 放开之后，**界面照样锁着**，
+  //    改了半天没效果。这类"两边各写一份判断"的地方最容易漏。
+  const readOnly = meta?.readonly === true;
+  $('k-content').readOnly = readOnly;
+  $('k-save').disabled = readOnly;
+  $('k-save').textContent = readOnly ? '只读' : '保存';
+}
+
+async function saveKnowledge() {
+  const el = $('msg-k');
+  const r = await api('/api/knowledge', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name: $('k-file').value, content: $('k-content').value })
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+}
+
+// 启动：先拉知识文件列表，再读第一个
+loadKnowledgeList().then(() => loadKnowledge());
+
+// 启动
+reloadAll();
+// ─────────────────────────────────────────────────────────────
+// 人设页（2026-09-21 加：能直接切换机器人核心人设）
+// ─────────────────────────────────────────────────────────────
+//
+// ⚠️ 后端那几条路由在 `webui.js` 的 `/api/persona*`；
+//    文件层（读 / 写 / 校验 / 备份 / 新建 / 删除）在 `src/persona-admin.js`。
+// ⚠️ **保存和切换都不重启机器人** —— 后端会热重载（用户 2026-09-21 定的）。
+
+/** 界面上正在看的那个包 */
+let PJ = { id: '', identity: {}, packs: [], current: '' };
+
+/** 结构化字段 · 顶层字符串：[键, 标签, 说明] */
+const PJ_STR = [
+  ['name', '角色全名', '提示词里要用它（例：丰川祥子）'],
+  ['selfName', '自称', '她自己提自己时用哪个词（例：Saki）'],
+  ['displayName', '对外显示的身份', '例：客服 Saki'],
+  ['shortName', '群里的昵称', '状态标题那种「捧场小祥」用它（例：小祥）'],
+  ['narrativeName', '剧情里的第三人称名', '例：祥子'],
+];
+/** 结构化字段 · 数组（界面上按顿号/逗号分隔） */
+const PJ_ARR = [
+  ['selfNames', '判断「是不是在说她」要用的写法', '中英文都写上'],
+  ['callNames', '群友怎么叫她算「点名叫她」', '这些名字一出现就必须回'],
+  ['nicknames', '所有外号', '别人叫她任何一个外号，她都应该正常回应'],
+  ['matchNames', '判据用的名字原子', '允许单字和变体（「祥」能匹配「小祥」「祥子」）；留空＝自动从上面几个凑'],
+];
+/** 她怎么称呼别人（`address`） */
+const PJ_ADDR = [
+  ['owner', '平时怎么叫主人', '例：<主人>'],
+  ['ownerFormal', '正式场合怎么叫', '例：服主；没有这种场合就留空'],
+  ['ownerRule', '什么时候用正式称呼', '⚠️ 整句规矩，不在代码里拼'],
+];
+
+const PJ_DOC_ONLY = ['cast.md', 'life-events.md', 'quest-ideas.md', 'persona-money.md', 'persona-media.md'];
+
+/** HTML 转义：凡是要拼进 innerHTML 的值都得过一遍（`escAttr` 连引号一起挡） */
+const escHtml = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const escAttr = (s) =>
+  escHtml(s)
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+function pjShow(el, ok, text) {
+  flash(el, ok, text);
+}
+
+/** 渲染一次人设页（进标签页时调） */
+async function personaRefresh() {
+  const r = await api('/api/persona/list');
+  // ⚠️⚠️ **不要静默 return** —— 第一版就是 `if (!r.ok) return;`，
+  //    结果后端 500（`personaId is not defined`）时整页**全空**，
+  //    用户只看到"下拉是空的、字段也是空的"，完全不知道出了什么错（2026-09-21 真实踩到）。
+  //    现在把错误**显示在页面上**。
+  if (!r || !r.ok) {
+    $('p-cur').innerHTML = `<div class="hint">⚠️ 读不到人设列表：${escHtml((r && r.error) || '接口没响应')}</div>`;
+    $('p-cur-pill').textContent = '?';
+    return;
+  }
+  PJ.packs = r.packs || [];
+  PJ.current = r.current || '';
+  $('p-cur-pill').textContent = PJ.current;
+  const cur = PJ.packs.find((p) => p.id === PJ.current);
+  $('p-cur').innerHTML = cur
+    ? [
+        ['id', cur.id],
+        ['角色全名', cur.name || '（空）'],
+        ['自称', cur.selfName || '（空）'],
+        ['显示名', cur.displayName || '（空）'],
+        ['文档', `${cur.docs} 份 · ${(cur.chars / 1000).toFixed(1)}K 字`],
+      ]
+        .map(([k, v]) => `<div><span class="k">${k}</span><span class="v">${String(v)}</span></div>`)
+        .join('')
+    : `<div class="hint">⚠️ 配置里写的 persona.id =「${PJ.current}」，但 personas/ 下没有这个包
+       —— 她这会儿**没有名字**，赶紧切一个或新建一个。</div>`;
+  $('p-pick').innerHTML = PJ.packs
+    .map(
+      (p) =>
+        `<option value="${p.id}"${p.id === PJ.current ? ' selected' : ''}>${p.id}` +
+        `${p.name ? '　' + p.name : ''}${p.broken ? '　⚠️ ' + p.broken : ''}</option>`,
+    )
+    .join('');
+  $('p-new-from').innerHTML = ['_template', ...PJ.packs.map((p) => p.id)]
+    .map((x) => `<option value="${x}">${x}</option>`)
+    .join('');
+  // 动画库那个下拉：只能从"现在真有的库"里挑（复用模式下）
+  const libs = r.animeLibs || [];
+  $('p-anime-lib').innerHTML = libs.length
+    ? libs.map((x) => `<option value="${x}">${x}</option>`).join('')
+    : '<option value="">（现在一个库都没有）</option>';
+  // ⚠️ 一个库都没有时，"复用"是没法选的 ⇒ 默认跳到"新建"
+  if (!libs.length && $('p-anime-mode').value === 'reuse') $('p-anime-mode').value = 'new';
+  onAnimeModeChange();
+  personaPickChange();
+  await personaOpen(PJ.current);
+  qqProfileRefresh(); // ⚠️ 必须在 personaOpen 之后 —— 它读的是 PJ.identity.qq
+}
+
+// ── QQ 昵称 / 头像（**跟着人设走**：存进人设包，切换时自动应用）──
+async function qqProfileRefresh() {
+  // ① 这个人设包里写的值（切到别人时，这两样会跟着变）
+  const q = PJ.identity.qq && typeof PJ.identity.qq === 'object' ? PJ.identity.qq : {};
+  $('p-nick').value = q.nickname ?? '';
+  $('p-avatar-name').textContent = q.avatar ? `文件：${q.avatar}` : '（没设头像）';
+  $('p-avatar').src = q.avatar ? `/api/persona/avatar?id=${encodeURIComponent(PJ.id)}&t=${Date.now()}` : '';
+  $('p-qq-pill').textContent = PJ.id;
+  // ② QQ 上**现在**是什么 —— 好让你一眼看出"该不该点立即应用"
+  const r = await api('/api/qq/profile');
+  $('p-qq-now').textContent =
+    r && r.ok
+      ? `QQ 上现在：昵称「${r.nickname}」 · 账号 ${r.uin}`
+      : `⚠️ 读不到 QQ 上的当前值：${(r && r.error) || '接口没响应'}`;
+}
+
+async function qqSaveNick() {
+  const nickname = $('p-nick').value.trim();
+  const it = JSON.parse(JSON.stringify(PJ.identity));
+  it.qq = { ...(it.qq || {}), nickname };
+  pjShow($('msg-qqp'), true, '保存中…');
+  const r = await api('/api/persona', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: PJ.id, identity: it }),
+  });
+  if (r && r.ok) {
+    PJ.identity = r.identity;
+    pjShow($('msg-qqp'), true, '✅ 已存进人设包 —— 以后切到它时会自动改成这个昵称');
+    qqProfileRefresh();
+  } else {
+    pjShow($('msg-qqp'), false, (r && r.error) || '保存失败');
+  }
+}
+
+async function qqSaveAvatar() {
+  const f = $('p-avatar-file').files[0];
+  if (!f) {
+    pjShow($('msg-qqp'), false, '先选一张图片');
+    return;
+  }
+  pjShow($('msg-qqp'), true, '上传中…');
+  const r = await api(
+    `/api/persona/avatar?id=${encodeURIComponent(PJ.id)}&name=${encodeURIComponent(f.name)}`,
+    { method: 'POST', body: f },
+  );
+  if (r && r.ok) {
+    const ap = r.applied;
+    const tail =
+      ap && ap.avatar
+        ? '，并且已经应用到 QQ 了'
+        : ap && ap.problems && ap.problems.length
+          ? `（应用到 QQ 时：${ap.problems.join('；')}）`
+          : '';
+    pjShow($('msg-qqp'), true, `✅ 头像已存进人设包${tail}`);
+    await personaOpen(PJ.id);
+    qqProfileRefresh();
+  } else {
+    pjShow($('msg-qqp'), false, (r && r.error) || '上传失败');
+  }
+}
+
+async function qqApplyNow() {
+  pjShow($('msg-qqp'), true, '应用中…');
+  const r = await api('/api/persona/apply-qq', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: PJ.id }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-qqp'), true, `✅ 已应用到 QQ：昵称「${r.nickname || '没改'}」头像「${r.avatar || '没改'}」`);
+  } else {
+    const why = r && r.problems && r.problems.length ? r.problems.join('；') : (r && r.error) || '应用失败';
+    pjShow($('msg-qqp'), false, `⚠️ ${why}`);
+  }
+  qqProfileRefresh();
+}
+
+function personaPickChange() {
+  const id = $('p-pick').value;
+  const p = PJ.packs.find((x) => x.id === id);
+  const bits = [];
+  if (p) bits.push(`${p.docs} 份文档 · ${(p.chars / 1000).toFixed(1)}K 字`);
+  if (id === PJ.current) bits.push('（正在用的就是它）');
+  if (p && p.broken) bits.push(`⚠️ ${p.broken}`);
+  $('p-pick-hint').textContent = bits.join('　');
+  // 「删除」那张卡片上的按钮要显示**当前选中哪个** —— 免得点错了还不知道删的是谁
+  const del = $('p-del-name');
+  if (del) del.textContent = id || '（上面选中的）';
+}
+
+/** 打开一个包：拉 identity + 文档清单，渲染表单 */
+async function personaOpen(id) {
+  if (!id) return;
+  const r = await api('/api/persona?id=' + encodeURIComponent(id));
+  if (!r || !r.ok) {
+    pjShow($('msg-pi'), false, r && r.error ? r.error : '读不出来');
+    return;
+  }
+  PJ.id = r.id;
+  PJ.identity = r.identity || {};
+  personaRenderFields();
+  personaRenderPrompts();
+  const sel = $('p-doc');
+  sel.innerHTML = (r.docs || []).map((d) => `<option value="${d.path}">${d.path}　(${d.size} 字节)</option>`).join('');
+  await personaLoadDoc();
+}
+
+function personaRenderFields() {
+  const it = PJ.identity;
+  const row = (label, input, hint) =>
+    `<div class="row" style="margin-bottom:8px"><div style="flex:1"><label>${label}</label>${input}` +
+    `${hint ? `<p class="hint" style="margin:4px 0 0">${hint}</p>` : ''}</div></div>`;
+  const out = [];
+  for (const [k, label, hint] of PJ_STR) {
+    out.push(row(label, `<input id="pf-${k}" value="${escAttr(it[k] ?? '')}">`, hint));
+  }
+  for (const [k, label, hint] of PJ_ARR) {
+    const v = Array.isArray(it[k]) ? it[k].join('、') : '';
+    out.push(row(label, `<input id="pf-${k}" value="${escAttr(v)}">`, hint));
+  }
+  const an = it.anime && typeof it.anime === 'object' ? it.anime : {};
+  out.push(
+    row(
+      '读哪几个动画库（anime.works）',
+      `<input id="pf-anime-works" value="${escAttr((an.works || []).join('、'))}">`,
+      '⚠️ 一个名字对应一个文件 <span class="mono">knowledge/anime/&lt;名字&gt;.md</span>；' +
+        '<b>没声明就一份都不读</b>（换角色才不会串味）',
+    ),
+  );
+  out.push(
+    row(
+      '问到这些词要联网搜（anime.keywords）',
+      `<input id="pf-anime-keywords" value="${escAttr((an.keywords || []).join('、'))}">`,
+      '作品名、同作品的角色名',
+    ),
+  );
+  out.push('<h2 style="margin-top:16px">她怎么称呼别人</h2>');
+  const ad = it.address && typeof it.address === 'object' ? it.address : {};
+  for (const [k, label, hint] of PJ_ADDR) {
+    out.push(row(label, `<input id="pf-addr-${k}" value="${escAttr(ad[k] ?? '')}">`, hint));
+  }
+  const st = it.style && typeof it.style === 'object' ? it.style : {};
+  out.push('<h2 style="margin-top:16px">口癖</h2>');
+  out.push(
+    row(
+      '口癖词（每行一个也行，用顿号分隔）',
+      `<input id="pf-tics" value="${escAttr((st.verbalTics || []).join('、'))}">`,
+      '说到这些词太频繁时会被提醒换说法',
+    ),
+  );
+  out.push('<h2 style="margin-top:16px">高级（JSON，改坏了会被拒绝保存）</h2>');
+  out.push(
+    row(
+      '歧义词 ambiguity',
+      `<textarea id="pf-ambiguity" rows="3">${escHtml(JSON.stringify(it.ambiguity ?? [], null, 1))}</textarea>`,
+      '例：<span class="mono">[{"name":"祥子","unless":"骆驼祥子"}]</span>',
+    ),
+  );
+  out.push(
+    row(
+      '不喜欢被叫 renameObjection',
+      `<textarea id="pf-rename" rows="3">${escHtml(JSON.stringify(it.renameObjection ?? {}, null, 1))}</textarea>`,
+      '例：<span class="mono">{"dislike":["祥子"],"prefer":"Saki"}</span>',
+    ),
+  );
+  $('p-fields').innerHTML = out.join('');
+}
+
+/** 提示词整句：把 identity.prompt 里现有的键都渲染出来（`_说明` 除外） */
+function personaRenderPrompts() {
+  const p = PJ.identity.prompt && typeof PJ.identity.prompt === 'object' ? PJ.identity.prompt : {};
+  const keys = Object.keys(p).filter((k) => k !== '_说明');
+  const hint = {
+    personaLine: '自我介绍（最常见的那句「你是谁」）',
+    styleLine: '性格那一段',
+    quickAside: '只能塞一句时的紧凑版人设',
+    spokenNames: '群里怎么叫她 —— **带括号**，接在「直接点了它的名」后面',
+    attributionTone: '发言前核对归属时提醒的语气 —— **带括号**',
+    followUpLine: '「说完又想补一句」那次的人格声明',
+    castNames: '故事里最常出现的那几个人（同团）',
+    questHomeDirs: '剧情里「家里」这个方向的题材',
+    questPastThreads: '「过去找上门」那类的题材',
+    questOtherGroups: '偶尔碰上的其他团 / 旧识',
+  };
+  if (!keys.length) {
+    $('p-prompts').innerHTML = '<p class="hint">这个人设包还没有 <span class="mono">prompt</span> 段。</p>';
+    return;
+  }
+  $('p-prompts').innerHTML = keys
+    .map(
+      (k) =>
+        `<div class="row" style="margin-bottom:8px"><div style="flex:1">` +
+        `<label>prompt.${k}</label>` +
+        `<p class="hint" style="margin:4px 0 4px">${hint[k] || '（这个键喂给哪段提示词请看 personas/README.md）'}</p>` +
+        `<textarea id="pp-${k}" rows="2">${escHtml(p[k] ?? '')}</textarea>` +
+        `</div></div>`,
+    )
+    .join('');
+}
+
+const pjList = (s) =>
+  String(s || '')
+    .split(/[、,，\n]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+/** 从表单收集出一个完整的 identity（**保留没在界面上出现的键**） */
+function personaCollectIdentity() {
+  const it = JSON.parse(JSON.stringify(PJ.identity || {}));
+  for (const [k] of PJ_STR) it[k] = $('pf-' + k).value.trim();
+  for (const [k] of PJ_ARR) {
+    const v = pjList($('pf-' + k).value);
+    if (v.length) it[k] = v;
+    else delete it[k];
+  }
+  const an = it.anime && typeof it.anime === 'object' ? it.anime : {};
+  const works = pjList($('pf-anime-works').value);
+  const kws = pjList($('pf-anime-keywords').value);
+  if (works.length) an.works = works;
+  else delete an.works;
+  if (kws.length) an.keywords = kws;
+  else delete an.keywords;
+  if (Object.keys(an).length) it.anime = an;
+  else delete it.anime;
+
+  const ad = it.address && typeof it.address === 'object' ? it.address : {};
+  for (const [k] of PJ_ADDR) {
+    const v = $('pf-addr-' + k).value.trim();
+    if (v) ad[k] = v;
+    else delete ad[k];
+  }
+  it.address = ad;
+
+  const st = it.style && typeof it.style === 'object' ? it.style : {};
+  const tics = pjList($('pf-tics').value);
+  if (tics.length) st.verbalTics = tics;
+  else delete st.verbalTics;
+  it.style = st;
+
+  it.ambiguity = JSON.parse($('pf-ambiguity').value || '[]');
+  it.renameObjection = JSON.parse($('pf-rename').value || '{}');
+
+  const pr = it.prompt && typeof it.prompt === 'object' ? it.prompt : {};
+  for (const k of Object.keys(pr)) {
+    if (k === '_说明') continue;
+    const el = $('pp-' + k);
+    if (el) pr[k] = el.value;
+  }
+  it.prompt = pr;
+  return it;
+}
+
+async function personaSaveIdentity() {
+  let identity;
+  try {
+    identity = personaCollectIdentity();
+  } catch (e) {
+    pjShow($('msg-pi'), false, 'JSON 写坏了：' + e.message);
+    return;
+  }
+  pjShow($('msg-pi'), true, '保存中…');
+  const r = await api('/api/persona', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: PJ.id, identity }),
+  });
+  if (r && r.ok) {
+    PJ.identity = r.identity;
+    pjShow($('msg-pi'), true, r.reloaded ? '✅ 存好了，已热重载（没重启）' : '✅ 存好了（这个包当前没在用）');
+    pjShow($('msg-pp'), true, '✅ 存好了');
+    await personaRefresh();
+  } else {
+    pjShow($('msg-pi'), false, (r && r.error) || '保存失败');
+  }
+}
+
+async function personaSwitch() {
+  const id = $('p-pick').value;
+  // ⚠️ 反馈要显示在**这张卡片里**（`msg-p-switch`）——
+  //    原来用的 `msg-p` 在下面「新建人设」那张卡片里，用户点了按钮**什么都看不见**，
+  //    于是报「这个好像切不动」（2026-09-22 真踩了）。
+  pjShow($('msg-p-switch'), true, '切换中…');
+  const r = await api('/api/persona/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  if (r && r.ok) {
+    const q = r.qqApply || {};
+    let tail = '';
+    if (q.nickname || q.avatar) tail = `，QQ 昵称头像也换成了「${q.nickname || '—'}」/「${q.avatar || '—'}」`;
+    if (q.problems && q.problems.length) tail += `（⚠️ QQ 资料没全换上：${q.problems.join('；')}）`;
+    pjShow($('msg-p-switch'), true, `✅ 已经切到「${id}」，立刻生效（没重启机器人）${tail}`);
+    await personaRefresh();
+    await reloadAll();
+    await loadKnowledgeList(true);
+  } else {
+    pjShow($('msg-p-switch'), false, (r && r.error) || '切换失败');
+  }
+}
+
+async function personaCreate() {
+  const id = $('p-new-id').value.trim();
+  const from = $('p-new-from').value;
+  if (!id) {
+    pjShow($('msg-p'), false, '先填一个 id');
+    return;
+  }
+  const r = await api('/api/persona/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, from }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-p'), true, `✅ 建好了「${id}」（照 ${from} 复制）—— 填好人设再点「切到这个」`);
+    $('p-new-id').value = '';
+    await personaRefresh();
+  } else {
+    pjShow($('msg-p'), false, (r && r.error) || '新建失败');
+  }
+}
+
+async function personaDelete() {
+  const id = $('p-pick').value;
+  if (!id) return;
+  if (!confirm(`确定删除人设包「${id}」？\n\n它是**挪走**（logs/persona-removed-*，还会留一份 persona.md），不是真销毁。`)) return;
+  const r = await api('/api/persona/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-p'), true, `✅ 「${id}」已挪走`);
+    await personaRefresh();
+  } else {
+    pjShow($('msg-p'), false, (r && r.error) || '删除失败');
+  }
+}
+
+async function personaLoadDoc() {
+  const path = $('p-doc').value;
+  if (!path) {
+    $('p-doc-text').value = '';
+    return;
+  }
+  const r = await api('/api/persona/doc?id=' + encodeURIComponent(PJ.id) + '&path=' + encodeURIComponent(path));
+  $('p-doc-text').value = r && r.ok ? r.text : '';
+  if (r && !r.ok) pjShow($('msg-pd'), false, r.error || '读不出来');
+}
+
+async function personaSaveDoc() {
+  const path = $('p-doc').value;
+  if (!path) return;
+  pjShow($('msg-pd'), true, '保存中…');
+  const r = await api('/api/persona/doc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: PJ.id, path, text: $('p-doc-text').value }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-pd'), true, r.reloaded ? '✅ 存好了，已热重载（没重启）' : '✅ 存好了');
+    await personaOpen(PJ.id);
+  } else {
+    pjShow($('msg-pd'), false, (r && r.error) || '保存失败');
+  }
+}
+// ─────────────────────────────────────────────────────────────
+// 联网自动填（P3）：角色名 + 作品 → 搜资料 → 模型起草 → 你过一眼 → 保存
+// ─────────────────────────────────────────────────────────────
+//
+// ⚠️ 起草在服务端（`src/persona-draft.js`）**只产出、不落盘**；
+//    "保存"这一步才走 `/api/persona/create` + `/api/persona` + `/api/persona/doc`。
+// ⚠️ 保存完**自动打开那个人设包** —— 这样能立刻用上面的完整表单**逐节改**
+//    （起草出来的东西一次到位是不可能的，必须留个"改"的入口）。
+
+let PDRAFT = null;
+
+/** 动画库那三个选项：选了"复用/新建"才显示对应的输入框 */
+function onAnimeModeChange() {
+  const m = $('p-anime-mode').value;
+  $('p-anime-reuse-wrap').style.display = m === 'reuse' ? '' : 'none';
+  $('p-anime-new-wrap').style.display = m === 'new' ? '' : 'none';
+}
+
+async function personaDraftStart() {
+  const id = $('p-new-id').value.trim();
+  const name = $('p-draft-name').value.trim();
+  const work = $('p-draft-work').value.trim();
+  if (!id) {
+    pjShow($('msg-p'), false, '先在「新建」那里填一个 id（小写字母数字）');
+    return;
+  }
+  if (!name) {
+    pjShow($('msg-p'), false, '填一下角色名');
+    return;
+  }
+  $('p-draft-btn').disabled = true;
+  pjShow($('msg-p'), true, '联网搜资料 + 起草中…（30~60 秒，别关页面）');
+  try {
+    const r = await api('/api/persona/draft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id,
+        name,
+        work,
+        animeMode: $('p-anime-mode').value,
+        animeLib: $('p-anime-lib').value,
+        animeName: $('p-anime-name').value.trim(),
+      }),
+    });
+    if (!r || !r.ok) {
+      pjShow($('msg-p'), false, (r && r.error) || '起草失败');
+      return;
+    }
+    if (r.blocked) {
+      pjShow($('msg-p'), false, `⛔ 不做这个：${r.why}`);
+      return;
+    }
+    PDRAFT = r;
+    pjShow($('msg-p'), true, `✅ 起草好了（参考了 ${r.sources?.length ?? 0} 条资料）—— 下面过一眼再保存`);
+    renderDraft();
+  } catch (e) {
+    pjShow($('msg-p'), false, '起草出错：' + e.message);
+  } finally {
+    $('p-draft-btn').disabled = false;
+  }
+}
+
+function renderDraft() {
+  const box = $('p-draft');
+  if (!PDRAFT) {
+    box.innerHTML = '';
+    return;
+  }
+  const notes = (PDRAFT.notes || []).map((n) => `· ${escHtml(n)}`).join('<br>');
+  const src = (PDRAFT.sources || [])
+    .map((s) => `<a href="${escAttr(s.url)}" target="_blank" rel="noreferrer">${escHtml(s.title || s.url)}</a>`)
+    .join('　');
+  const fill =
+    PDRAFT.totalFields != null
+      ? `<p class="hint">模板字段：<b>${PDRAFT.filledFields} / ${PDRAFT.totalFields}</b> 填上了` +
+        (PDRAFT.filledFields < PDRAFT.totalFields
+          ? '（其余留空 —— 看上面那条提醒）'
+          : '（一个都没漏）') +
+        '</p>'
+      : '';
+  box.innerHTML =
+    '<h2 style="margin-top:18px">起草结果（还没保存）</h2>' +
+    fill +
+    (notes ? `<p class="hint">⚠️ 提醒：<br>${notes}</p>` : '') +
+    (src
+      ? `<p class="hint">资料来自：${src}</p>`
+      : '<p class="hint">⚠️ 一条资料都没搜到 —— 这份是模型凭自己的知识写的，务必仔细核对。</p>') +
+    '<label>identity.json（可直接改；保存时会校验）</label>' +
+    `<textarea id="pd-identity" rows="18">${escHtml(JSON.stringify(PDRAFT.identity, null, 2))}</textarea>` +
+    '<label style="margin-top:10px">persona.md（≤3000 字）</label>' +
+    `<textarea id="pd-persona" rows="14">${escHtml(PDRAFT.docs?.['persona.md'] || '')}</textarea>` +
+    '<label style="margin-top:10px">voices.md（示例对话 —— 人味就靠它）</label>' +
+    `<textarea id="pd-voices" rows="12">${escHtml(PDRAFT.docs?.['voices.md'] || '')}</textarea>` +
+    (PDRAFT.animeLibName
+      ? '<label style="margin-top:10px">新建的动画库 ' +
+        escHtml(PDRAFT.animeLibName) +
+        '（保存时写进 knowledge/anime/）</label>' +
+        `<textarea id="pd-animelib" rows="12">${escHtml(PDRAFT.animeLib || '')}</textarea>`
+      : '') +
+    '<div class="btns">' +
+    '<button class="act" onclick="personaDraftSave()">保存成新人设包</button>' +
+    '<button onclick="personaDraftDrop()">不要了</button>' +
+    '<span class="msg" id="msg-pd2"></span>' +
+    '</div>';
+}
+
+function personaDraftDrop() {
+  PDRAFT = null;
+  renderDraft();
+  pjShow($('msg-p'), true, '草稿丢了（没写盘，什么都没变）');
+}
+
+async function personaDraftSave() {
+  const id = $('p-new-id').value.trim();
+  let identity;
+  try {
+    identity = JSON.parse($('pd-identity').value);
+  } catch (e) {
+    pjShow($('msg-pd2'), false, 'identity.json 有问题：' + e.message);
+    return;
+  }
+  pjShow($('msg-pd2'), true, '保存中…');
+  const post = (path, body) =>
+    api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  const c = await post('/api/persona/create', { id, from: '_template' });
+  if (!c || !c.ok) {
+    pjShow($('msg-pd2'), false, (c && c.error) || '建包失败');
+    return;
+  }
+  const s = await post('/api/persona', { id, identity });
+  if (!s || !s.ok) {
+    pjShow($('msg-pd2'), false, (s && s.error) || '写 identity 失败');
+    return;
+  }
+  for (const [path, key] of [
+    ['persona.md', 'pd-persona'],
+    ['voices.md', 'pd-voices'],
+  ]) {
+    const text = $(key).value;
+    if (!text.trim()) continue;
+    const d = await post('/api/persona/doc', { id, path, text });
+    if (!d || !d.ok) {
+      pjShow($('msg-pd2'), false, `${path} 写失败：${(d && d.error) || ''}`);
+      return;
+    }
+  }
+  // ③ 新建的动画库（只有选了"新建"才有这份）—— 写进 `knowledge/anime/<名字>.md`
+  //    ⚠️ 用户的规矩：**复用已有的库时只读不写**，只有"新建"才往库里写东西。
+  const libName = PDRAFT && PDRAFT.animeLibName;
+  const libText = ($('pd-animelib') && $('pd-animelib').value.trim()) || '';
+  if (libName && libText) {
+    const dl = await post('/api/knowledge', { name: `anime/${libName}.md`, content: libText });
+    if (!dl || !dl.ok) {
+      pjShow($('msg-pd2'), false, `动画库写失败：${(dl && dl.error) || ''}`);
+      return;
+    }
+  }
+  PDRAFT = null;
+  renderDraft();
+  $('p-new-id').value = '';
+  await personaRefresh();
+  $('p-pick').value = id;
+  personaPickChange();
+  await personaOpen(id);
+  pjShow($('msg-p'), true, `✅ 新人设「${id}」建好了 —— 上面就是它，可以逐节改；要启用就点「切到这个」`);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,457 @@
+# ⚠️ 这是**模板**：复制成 `config.yml` 再填自己的值。
+#    `config.yml` 在 .gitignore 里（里面有密钥，不许提交）。
+#    密钥 / token / QQ 号都已经换成占位符。
+
+onebot:
+  mode: forward
+  url: ws://127.0.0.1:3001
+  accessToken: <你的协议端 token，要和协议端界面里设的一致>
+  reconnectInterval: 3000
+llm:
+  baseURL: https://api.deepseek.com/v1
+  apiKey: <你的大模型 API Key>
+  model: deepseek-flash
+  temperature: 0.5
+  maxTokens: 8000
+  timeout: 60000
+  systemPrompt: |
+    你是丰川祥子（粉丝叫她客服小祥），现在在 示例服务器 服务器群里当客服。
+    你就是小祥本人 —— 不是扮演、不是模仿，也不是在装角色。
+
+    下面会给你「人格设定」和「知识库」。人格决定你怎么说话，知识决定你说什么。
+
+    必须守住的边界：
+    - 回答只能依据知识库和系统给的实时数据。没写的就是不知道，直说，别编。
+    - 群友问在线人数这类实时数据时，系统会把查好的数字给你，照说，不要自己猜。
+    - 不能批准建设申请、不能发 OP、不能承诺重启服务器 —— 让群友找对应的人。
+    - 不聊政治、色情、暴力、违法内容。
+    - 手机 QQ 里 Markdown 显示不出来，不要用 # 标题和代码块。
+
+    语气上最重要的一条：**不要像个客服。** 不要"您好，请问有什么可以帮您"、
+    不要"非常抱歉"、不要"感谢您的反馈"。像小祥那样说话：短、自然、有教养、偶尔带点刺。
+    群里聊天不用每次都分点列举，也别每次都问候。
+trigger:
+  otherBotCommands:
+    - list
+    - 李斯特
+  privateChat: true
+  groupChat: true
+  allowGroups:
+    - '200000001'
+    - '200000002'
+    - '200000003'
+    - '200000004'
+    - '200000005'
+  # 私聊仅回应以下 QQ。留空 = 不回应任何私聊（防止陌生人触发）。
+  allowPrivateUsers:
+    - '<主人的 QQ>'
+  respondTo: 3
+  requireAtInGroup: true
+  keywords: []
+  historyRounds: 20
+  cooldownMs: 2000
+  maxInputChars: 1000
+  groupRespondTo:
+    '200000005': 2
+    '200000002': 1
+    '200000001': 1
+context:
+  enable: true
+  # 她每次能看到的群聊上下文：**最近多少条 / 最多多少字**。
+  # ⚠️ 调大 = 她更能接上前文（指代、刚发过的分享卡片），但每次请求 token 更多。
+  maxMessages: 50
+  maxAgeMs: 1800000
+  maxChars: 5000
+  bufferMaxAgeMs: 43200000
+  batch:
+    enable: true
+    windowMsAtMe: 900
+    windowMs: 1200
+    privateWindowMs: 4000
+status:
+  enable: true
+  host: mc.example.com
+  displayName: 示例服务器 服务器
+  cacheSeconds: 60
+  keywords:
+    - 在线
+    - 几个人
+    - 有多少人
+    - 多少人
+    - 服务器开了
+    - 服务器状态
+    - 进不去服务器
+    - 连不上服务器
+    - 卡不卡
+    - tps
+    - 谁在
+    - 在线玩家
+    - 在线人数
+    # 「谁上过线 / 谁来过 / 谁在玩」这类说法（2026-09-17 加）——
+    # 原来「服务器今天有谁上线」一条都不命中。「上线」故意收得宽：
+    # 最多多查一次服务器（约 1 秒），比"该查的时候没查"划算。
+    - 上线
+    - 谁上
+    - 谁来过
+    - 谁玩
+    - 在线时长
+teach:
+  enable: true
+  teachers: []
+  requireOwnerRole: true
+  allowPrivateTeach: true
+  naturalLearning: true
+  confirmMode: auto
+  bots:
+    - '2854196310'
+    - '188125827'
+  keywords:
+    - 记住
+    - 记一下
+    - 记录一下
+    - 你需要知道
+    - 你要知道
+    - 以后你
+    - 补充一下
+    - 更正一下
+    - 更新一下
+    - 改一下
+    - 顺便说一下
+chunking:
+  maxChars: 60
+  # 分条之间等多久（毫秒）。⚠️ 2026-09-21 起可以给**区间**：
+  #   每条间隔在 `delayMs` ~ `delayMaxMs` 之间**各自独立随机**
+  #   （用户要求：「用随机数，范围 1 秒到 2 秒，这样更像真人在发消息」）。
+  #   ⚠️ 不写 `delayMaxMs` 就是**不随机**（固定 `delayMs`）—— 保持老手感。
+  delayMs: 650
+  # delayMaxMs: 2000
+  firstFlushChars: 25
+webui:
+  enable: true
+  host: 127.0.0.1
+  port: 3099
+# 复读机（2026-09-17 加）：群里一堆人刷同一句话时，她也跟一句 **+1**。
+#   ⚠️ 第 3 句起才可能跟（前两句只是"两个人说了同一句"）；
+#      `probabilities` 对应第 3 / 4 / 5 / 6+ 句的概率，**依次减小**（用户要求：第三句最大）；
+#      有人插一句别的 → 链立刻断（计数回 1）→ 不会"被打断了还在接"；
+#      同一条链**只接一次**（不然就成了她一个人 +1 个没完）。
+repeat:
+  enable: true
+  probabilities: [0.6, 0.4, 0.25, 0.15]
+  cooldownMs: 300000
+faces:
+  collect: true
+  # 每几条回复才允许插一张表情包（**调小 = 发得更勤**）。
+  # ⚠️ 这是**代码层硬闸** —— 提示词里就算写了频率，模型也偏爱发表情，所以必须兜一道。
+  sendEvery: 6
+chat:
+  # 生成回复期间，**同一个人**又发消息 → 最多"丢掉草稿重来"几次（2026-09-21 加）。
+  #   他 @ 她一下、紧接着又补一句，原来是**回两条**（各带一个引用框，像没在听人说话）；
+  #   现在改成"他还在说 → 丢掉这一版、带着新消息重新生成" → 群里只出一条。
+  #   ⚠️ `0` = 关掉（退回老样子：这一轮发完再处理攒下的那批，也就是回两条）；
+  #   ⚠️ 只有**同一个人**连发才打断生成，别人插话不动这一轮（那是另一件事）；
+  #   ⚠️ 留上限是防"有人一直刷、她永远不说话"。
+  requeueMax: 2
+  enable: true
+  group: '200000001'
+  question:
+    enable: true
+    keywords:
+      - 服务器
+      - 崩了
+      - 卡
+      - 模组
+      - 存档
+      - 怎么进
+      - mtr
+      - 整合包
+      - java
+      - 进不去
+      - 报错
+      - 白名单
+      - 建设
+      - 申请
+      - op
+      - 管理员
+      - 在线
+    probability: 0.35
+    cooldownMs: 180000
+    requireQuestionMark: true
+    minChars: 5
+  mention:
+    enable: true
+    names:
+      - 小祥
+      - 祥子
+      - 客服小祥
+      - 大祥
+      - 大祥老师
+      - 祥老师
+      - 祥子老师
+      - 祥宝
+      - 丰川祥子
+      - 丰川
+      - saki
+      - sakiko
+      - togawa
+      - zyhg
+      - oblivionis
+      - オブリビオニス
+      - 章鱼小祥
+      - 章鱼祥
+      - 白祥
+      - 黑祥
+      - 骆驼祥子
+      - 小祥酱
+      - 祥子酱
+      - saki酱
+    probability: 0.4
+    cooldownMs: 300000
+    minChars: 2
+  followUp:
+    enable: true
+    idleMs: 25000
+    # ⚠️ **同一个人**接着跟你说时的窗口（比 idleMs 长）—— 2026-09-15 实测：
+    #    85 秒后他接的那句「那最近mc圈有什么炸裂的视频」被窗口挡掉了，她没接。
+    #    这明明就是在跟她说话，所以单独给一个宽窗口（仍然要过判断，不是必接）。
+    sameUserMs: 180000
+    probability: 1
+    maxChain: 2
+    minChars: 2
+  strictness: 30
+  ackAfterMs: 30000
+  # 活跃群里同时最多允许几条"主动接话"排队/生成（多出来的直接放弃，避免越答越旧）
+  maxVoluntaryQueue: 1
+  # 主动接话轮到自己、真要发送前，如果已经被刷下去这么多条消息就放弃不发
+  voluntaryStaleAfter: 8
+attitude:
+  allowAnger: true
+  allowRetort: true
+  denyBeingBot: true
+life:
+  enable: true
+  minPerDay: 3
+  maxPerDay: 10
+  startHour: 7
+  endHour: 24
+  cooldownMs: 5400000
+  lateToleranceMs: 1800000
+  checkIntervalMs: 300000
+  holidays: true
+quest:
+  enable: false
+  chance: 0.1
+  maxPerWeek: 3
+  waitMs: 1800000
+  maxStages: 10
+  coldAutoLimit: 1
+  replyMode: loose
+  affinityGood: 3
+  affinityBad: -2
+  checkIntervalMs: 60000
+  # 群友很热情时（2026-09-17 用户要求：段数太少就自动加演 2-3 段，并缩短等待）：
+  #   一个阶段窗口里攒到 warmCount 条回应 → 这条剧情**自动多演 warmExtraStages 段**，
+  #   而且等下一段只等 warmWaitMs（默认是 waitMs 的三分之一 = 10 分钟，聊热了不用干等）。
+  # ⚠️ 只看**条数**、不要求"人多" —— 实际群里常常是**一个人特别起劲**连着接话。
+  warmCount: 4
+  warmExtraStages: 3
+  warmWaitMs: 600000
+ownerQQ: '<主人的 QQ>'
+botQQ: '<机器人的 QQ>'
+# ── QQ 协议端（OneBot 实现）────────────────────────────────
+# ⚠️ 「收消息/发消息」跟协议端无关（换谁都是 ws + token），所以换协议端**只需要改这里**；
+#    但"出二维码 / 重启协议端 / 查登录状态"这些**管理能力各家不一样**，不支持时界面会明说。
+#
+#   name: snowluma  → **默认**。独立协议实现（不注入 QQ 客户端、不依赖快登凭据），
+#                     管理面在它自己的 WebUI（默认 http://127.0.0.1）。
+#                     ⚠️ 它的许可是「源码可见·非商业」：不得商用；公开发布修改版/衍生版
+#                        要事先书面授权 ⇒ 本项目的安装包**不打包它、也不自动部署它**。
+#   name: napcat    → 有自己的 WebUI + 接口，机器人能代你出码/重启（⚠️ 它的许可**禁止商用**）
+#   name: llonebot  → LLBot 是独立应用：登录/扫码/重连在它自己的 WebUI/GUI 里做
+#                     （GPL-2.0：可商用，但**分发**它时必须一并提供源码）
+#   name: onebot    → 任何通用 OneBot 11 实现：只保证收发，管理面请用它自己的方式
+provider:
+  name: snowluma
+  # 下面三项**可以留空**：napcat 用 ../napcat/NapCat.Shell + launcher-win10-user.bat；
+  # snowluma 用 C:\SnowLuma + _start-hidden.vbs（装在哪就写哪）
+  dir: '' # 协议端目录（启动/守护脚本要用）
+  launcher: '' # 启动脚本/可执行（相对 dir 或绝对路径）
+  manageUrl: '' # 它自己的管理界面地址（只用于在机器人界面上给你一个链接）
+logLevel: info
+qzone:
+  enable: true
+  auto: true
+  ugcRight: 1
+  maxPerDay: 6
+  cooldownMs: 7200000
+  checkIntervalMs: 1800000
+  windowMs: 43200000
+  minMaterial: 14
+  maxMaterialAgeMs: 3600000
+vision:
+  enable: true
+  # 留空时自动使用 llm.model；请确认该模型支持图片输入
+  model: ''
+  describeStickers: true
+  maxBytes: 20971520
+machine:
+  enable: true
+  name: ''
+saucenao:
+  enable: true
+  apiKey: <另一个服务的 Key（如果用到）>
+  results: 5
+  minSimilarity: 60
+observe:
+  enable: true
+  # 攒够多少条消息就总结一次群记忆
+  threshold: 120
+  # ⚠️ 时间兜底：这一群里最老的一条超过这么久，**哪怕只有几条也总结**。
+  #    没有它的话，消息少的群永远攒不到 threshold，群记忆就一直不更新。
+  maxAgeMs: 21600000
+  checkIntervalMs: 30000
+  idleIntervalMs: 1800000
+  keepPeople: 60
+  # 大事这节最多留几条（和压缩提示词里写的「15 条以内」对齐）
+  keepEvents: 15
+  compress:
+    enable: true
+    checkIntervalMs: 43200000
+    # 多久允许压缩一次群记忆（毫秒）。压缩时会：**大事按时间压成小结**、
+    # **「群友」那节只许细化合并、一条都不许删**。
+    minIntervalMs: 43200000
+affinity:
+  enable: true
+  friendThreshold: 90
+friend:
+  enable: true
+  # ⚠️⚠️ 文案必须说清**谁加谁**（2026-09-18 修）：
+  #    协议层**发不了**加好友申请（NapCat 没有那个 action），所以只能
+  #    **对方来加机器人**，机器人收到申请后自动通过（`set_friend_add_request`）。
+  #    原来那句「同意之后有几率主动发消息过来」没说清动作，群友会卡在"谁加谁"上。
+  notice: '@{at} 我这边没法主动加人，你来加我吧（点头像→加好友）'
+  dailyChance: 0.35
+  dayFromHour: 9
+  dayToHour: 22
+  minGapMs: 72000000
+  checkIntervalMs: 600000
+poke:
+  enable: true
+  # 文字回应的防刷屏：同一个人这么多毫秒内**只回一次话**（2026-09-16 起她戳了她会看着上下文回一句）。
+  #   ⚠️ 它只管"回话"；下面那个计数**不受它影响**。
+  cooldownMs: 30000
+  # 拍回去（`send_poke`）：同一个人的戳攒次数，每这么多下回拍一次（拍完归零 = 第 3、6、9… 次）。
+  #   ⚠️ 用户 2026-09-21 定的：「机器人戳回来的话在我戳了3次再触发一次就行了」。
+  #   设 1 = 每戳必拍；设很大的数 = 基本不拍。
+  countPerBack: 3
+  # 能不能发 `send_poke` 由协议端决定（2026-09-21）：
+  #   · snowluma（默认）：能发 —— 独立协议实现，`send_poke` 是它自己的 action ⇒ 默认就拍
+  #   · napcat：默认**不发** —— 它走 PacketBackend，QQ 版本越界必然失败，而每次失败
+  #             都是一次异常请求（风控靠这个判定外挂，用户收到过处罚通知）
+  #   ⚠️ 这里写 true/false 就**覆盖**上面的默认；**不写**才是"按协议端"。
+  # tryPacket: true
+flood:
+  enable: true
+  windowMs: 10000
+  count: 6
+  muteMs: 60000
+search:
+  merged: true
+  mergedTimeoutMs: 45000
+  engines:
+    bing: true
+    ddg: true
+    google: true
+    bilibili: true
+    moegirl: true
+bilibili:
+  enable: true
+  ownerUid: '30000001'
+  cacheMs: 1800000
+  timeoutMs: 15000
+  limit: 10
+speakJudge:
+  enable: true
+attribution:
+  enable: true
+  minChars: 12
+  timeoutMs: 8000
+solve:
+  enable: true
+  maxTokens: 24000
+sessions:
+  checkIntervalMs: 30000
+  idleIntervalMs: 180000
+mute:
+  enable: true
+  seconds: 60
+  cooldownMs: 300000
+balance:
+  enable: true
+  checkIntervalMs: 1800000
+  low: 5
+  critical: 2
+monthlyReport:
+  enable: true
+  hour: 21
+  checkIntervalMs: 1200000
+  minIntervalMs: 86400000
+  qzone: true
+selfFollowUp:
+  enable: true
+  probability: 0.35
+  maxPerReply: 5
+  continueProbability: 0.5
+  betweenMs:
+    - 400
+    - 1200
+tic:
+  enable: true
+  windowMs: 7200000
+  repeatLimit: 3
+  # 句中「口癖词」单独盯的一小张表（2026-09-17 加）。
+  # ⚠️ 为什么不做"自动统计所有词"：中文里两字常用词太多（什么 / 这个 / 就是…），
+  #    自动统计必然误伤，然后提示词里塞满"别说什么"，反而把话拧成另一种怪。
+  # ⚠️ 加词标准：**用户在真实聊天里报过、而且确实高频**的语气词。
+  words:
+    # ⚠️ 写「倒」一个字，别只写「倒是」—— 她的口癖是**「倒」这个字**的各种用法
+    #    （我倒觉得 / 倒不如 / 倒也不是 / 反倒），只写"倒是"会一条都抓不到。
+    - 倒
+  # 口癖词的阈值，比 repeatLimit 低一档：
+  # 它每条回复最多出现一次，凑到 3 次要好几条回复，提醒就太晚了。
+  # 提醒只是往提示词里加一句"换个说法"，不是禁用这个词。
+  wordLimit: 2
+# 「她吃了没」状态机（2026-09-17 加）。
+# 她在剧情里、在群里说过的「我去吃饭了」会记成**有寿命的状态**，
+# 过了 minutes 分钟自动算"吃完了" —— 之后有人喊她一起吃饭，她自己就知道吃过没有，
+# 不会再答应第二顿（用户原话：「下次有人喊她，他自己就知道吃过没有了」）。
+meal:
+  enable: true
+  # 「在吃」这个状态活多久（分钟）。用户拍板：10 分钟。
+  minutes: 10
+  # ⚠️ 关键词可以不填（用 src/meal.js 里的默认表）；要覆盖就写全，别只写一半。
+  #    eating: [去吃饭, 吃饭去, 先去吃, 吃个饭, 去食堂, 下楼吃, 出去吃, 去吃了, 干饭, 吃饭了, 先吃饭]
+  #    done:   [吃完了, 吃过了, 刚吃完, 吃好了, 吃饱了, 吃完回来, 吃过饭了, 吃完啦]
+  #    none:   [不吃了, 还没吃, 没吃饭, 不饿, 不想吃]
+# ⏰ **定时提醒**（2026-09-18 加，用户要求）。
+# 他说「明天早上八点提醒我交作业」→ 她**当场应一声**，到点**真的 @ 他**、
+# 并**用她自己的话**把那件事说一遍；说「提醒我**和某某**」时，会先在这个群里
+# 找那个人 —— 找到了就**一起 @**，**找不到就如实说没找到**（绝不乱 @ 一个）。
+# ⚠️ 只在**他说那句话的地方**提醒：群里定的发群里，私聊定的发私聊。
+# ⚠️ 提醒会落盘（state/remind.json）—— 重启、掉线都不会忘。
+remind:
+  enable: true
+  # 多久查一次有没有到点（毫秒）。默认 60 秒（提醒的最小粒度就是分钟）。
+  checkIntervalMs: 60000
+  # 让她用自己的话提醒（过一次模型，15~40 字，只改说法不改内容）。
+  # ⚠️ 设成 false = 省掉这次调用，直接用「到点了，你不是说要××吗」这句模板；
+  #    模型超时/不可用时也会**自动**退回这句 —— 提醒不会因此消失。
+  rewrite: true
+  # 最多同时挂多少条（防被刷爆）
+  maxItems: 50
+  # 发不出去时一直重试多久（毫秒）才认输。默认 2 小时。
+  # ⚠️ 别调太小：这个号每几小时掉一次线，掉线期间正好到点的提醒就靠这段时间补发。
+  giveUpMs: 7200000
+  # 最远能定到多久以后（天）。默认 7 天，超了就当场告诉她"太远了"。
+  maxAheadDays: 7
+groupParams: {}
