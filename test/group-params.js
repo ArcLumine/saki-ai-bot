@@ -53,6 +53,8 @@ const makeCfg = (extra = []) => [
   '  maxPerWeek: 3',
   '  waitMs: 1800000',
   '  replyMode: normal',
+  'chat:',
+  '  strictness: 0', // 旧全局值故意留着：分群没覆盖时也不能再继承它
   'trigger:',
   '  allowGroups:',
   `    - "${GA}"`,
@@ -118,6 +120,11 @@ console.log('\n【1】★ 两套参数各读各的（`paramsFor` 是唯一入口
   check(paramsFor('quest', GB).replyMode === 'normal', 'B 群没覆盖 → 继承全局');
   // ⚠️ 模块自己的读法（不是我在测试里手算的）
   check(quest.params(GA).maxPerWeek === 1, '★ `quest.params(群号)` 就是那套参数');
+  check(
+    paramsFor('chat', GA).strictness === 50,
+    '★ 收紧度没分群覆盖时固定回默认 50，不继承旧全局值',
+    String(paramsFor('chat', GA).strictness),
+  );
 }
 
 console.log('\n【2】★ 日常事件：每个群各排各的（条数不混）');

@@ -32,6 +32,83 @@ const check = (ok, label) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * WebUI 的导航和正文必须始终留在 `.wrap` 两栏容器里。
+ * 只检查首屏 body（脚本和注释先剥掉），不执行页面脚本。
+ */
+function inspectWebuiMarkup(html) {
+  const body = html.slice(html.indexOf('<body>'), html.indexOf('<script>'));
+  const clean = body.replace(/<!--[\s\S]*?-->/g, '');
+  const stack = [];
+  const tabButtons = new Set(
+    [...clean.matchAll(/<button\b[^>]*\bdata-tab="([^"]+)"/g)].map((m) => m[1]),
+  );
+  const tabSections = new Set();
+  let balanced = true;
+  let allTabsInWrap = true;
+
+  const groupsBody =
+    clean.match(/<section\b[^>]*\bid="tab-groups"[^>]*>([\s\S]*?)<\/section>/i)?.[1] ?? '';
+  const groupCardStarts = [...groupsBody.matchAll(/<div\b[^>]*\bclass="[^"]*\bcard\b[^"]*"[^>]*>/gi)].map(
+    (m) => m.index,
+  );
+  const replyHeadingAt = groupsBody.indexOf('<h2>回复与分条');
+  const firstCardEnd = groupCardStarts[1] ?? groupsBody.length;
+  const groupReplyFirst =
+    groupCardStarts.length > 0 && replyHeadingAt > groupCardStarts[0] && replyHeadingAt < firstCardEnd;
+  const replyCardBody =
+    replyHeadingAt >= 0 ? groupsBody.slice(groupCardStarts[0] ?? 0, firstCardEnd) : '';
+  const replyIds = [
+    'msg-trigger',
+    'trigger-historyRounds',
+    'trigger-cooldownMs',
+    'chunking-maxChars',
+    'chunking-delayMs',
+    'chunking-delayMaxMs',
+  ];
+  const groupReplyComplete =
+    replyIds.every((id) => replyCardBody.includes(`id="${id}"`)) &&
+    replyCardBody.includes('onclick="saveTrigger()"');
+
+  for (const m of clean.matchAll(/<(\/?)(div|nav|section)\b([^>]*)>/gi)) {
+    const closing = m[1] === '/';
+    const tag = m[2].toLowerCase();
+    const attrs = m[3];
+    if (!closing) {
+      if (tag === 'section') {
+        const id = attrs.match(/\bid="tab-([^"]+)"/)?.[1];
+        if (id) {
+          tabSections.add(id);
+          const parent = stack.at(-1);
+          if (parent?.tag !== 'div' || !/\bclass="[^"]*\bwrap\b[^"]*"/.test(parent.attrs)) {
+            allTabsInWrap = false;
+          }
+        }
+      }
+      stack.push({ tag, attrs });
+    } else {
+      const open = stack.pop();
+      if (!open || open.tag !== tag) balanced = false;
+    }
+  }
+
+  const idCounts = new Map();
+  for (const m of clean.matchAll(/\sid="([^"]+)"/g)) {
+    idCounts.set(m[1], (idCounts.get(m[1]) ?? 0) + 1);
+  }
+  const duplicateIds = [...idCounts].filter(([, count]) => count > 1).map(([id]) => id);
+  const tabsMatch =
+    tabButtons.size === tabSections.size && [...tabButtons].every((tab) => tabSections.has(tab));
+  return {
+    balanced: balanced && stack.length === 0,
+    allTabsInWrap,
+    tabsMatch,
+    duplicateIds,
+    groupReplyFirst,
+    groupReplyComplete,
+  };
+}
+
 // 临时配置：深拷贝真实配置，改端口，避免动到用户文件
 const realCfg = readFileSync(join(ROOT, 'config.yml'), 'utf8');
 writeFileSync(
@@ -138,11 +215,174 @@ async function main() {
   console.log('\n[2] 首页与状态接口');
   const page = await fetch(BASE + '/');
   const html = await page.text();
+  const js = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
   // ⚠️ 2026-09-17 用户要求「把 webui 上小祥的名字也统一一下，改成 Saki」——
   //    界面标题从「客服小祥 · 管理台」改成了「客服 Saki · 管理台」，这条断言跟着改。
   //    ⚠️ 别把别处的「小祥」也一起改掉：那些是**她被人这么叫**的识别逻辑
   //    （`trigger.callNames` / 骂人词表 / 人设关键词），动了她就不认这个名字了。
   check(page.status === 200 && html.includes('客服 Saki'), '首页能打开且内容正确');
+
+  console.log('\n[2a] WebUI 布局结构');
+  const layout = inspectWebuiMarkup(html);
+  check(layout.balanced, '页面 div / nav / section 标签完整配对');
+  check(layout.allTabsInWrap, '所有页面都留在 .wrap 两栏容器内');
+  check(layout.tabsMatch, '导航 data-tab 与页面 section 一一对应');
+  check(layout.duplicateIds.length === 0, `页面没有重复 id${layout.duplicateIds.length ? `：${layout.duplicateIds.join(', ')}` : ''}`);
+  check(layout.groupReplyFirst, '「回复与分条」是群与触发页第一张独立卡片');
+  check(layout.groupReplyComplete, '「回复与分条」的五个字段、保存按钮和反馈位都在首卡内');
+  check(
+    /const currentFile = KFILES\.find\(\(f\) => f\.name === current\)/.test(html) &&
+      /KFILES\.find\(\(f\) => kGroupOf\(f\) === KLIB_CUR\)/.test(html) &&
+      !/const want = keep \|\| \$\('k-file'\)\.value \|\| 'persona\.md'/.test(html),
+    '知识库首次打开会选中过滤后的可用文件，不再回落到已移走的 persona.md',
+  );
+  check(
+    /「它学到的」面板的显隐：只有 learned\.md 才显示（它就是那份文件的内容视图）。\s*\*\/\s*function kLearnedPane\(/.test(html),
+    '「它学到的」说明注释已闭合，kLearnedPane 不会被整段注释掉',
+  );
+  check(
+    /\.kedit-body\.hidden\s*\{\s*display:none\s*\}/.test(html),
+    '预览模式会真正隐藏编辑区（后置 display:grid 不再盖掉 .hidden）',
+  );
+  check(
+    /别人怎么叫她<\/h3><div class="gridfull">/.test(html) &&
+      /const PJ_ARR = \[[\s\S]*?selfNames[\s\S]*?例：miku[\s\S]*?callNames[\s\S]*?例：miku[\s\S]*?nicknames[\s\S]*?例：小祥[\s\S]*?matchNames[\s\S]*?例：祥/.test(html) &&
+      /out\.push\(tagRow\(label \+ key\(k\), `pf-\$\{k\}`, v, hint, undefined, 'tags-stacked', example\)\)/.test(html),
+    '别人怎么叫她的四行字段共用两行标签布局，并各有一个空值示例',
+  );
+  check(
+    /未保存标记：改动任一输入框就亮点。\*\*只提醒，不拦保存、不拦切页\*\*。 \*\/\s*function pjDirtyClear\(/.test(html),
+    '人设未保存标记的注释已闭合，pjDirty 不会被整段注释掉',
+  );
+  check(
+    /document\.addEventListener\('input',[\s\S]{0,500}tagitem\.example/.test(html) &&
+      /example\.hidden = !!inp\.value\.trim\(\) \|\| pjList\(hid\.value\)\.length > 0/.test(html),
+    '开始输入时空值示例立即隐藏，不会等回车才更新',
+  );
+  check(
+    /\.tags-stacked\{[^}]*grid-template-columns:minmax\(0,1fr\)/.test(html) &&
+      /const example = !list\.length && box\.dataset\.example/.test(html) &&
+      /tagitem example/.test(html),
+    '四个称呼字段空值时只显示一个不可删除示例，示例不写入 hidden input',
+  );
+  check(
+    /\.kflib-hint\{[^}]*margin:0 0 12px/.test(html) && !/\.kflib-hint\{[^}]*margin:-/.test(html),
+    '知识库库名提示不再用负边距钻进上方卡片',
+  );
+  check(
+    /id="k-lib-btn"[\s\S]*aria-haspopup="listbox"[\s\S]*id="k-lib-menu"/.test(html) &&
+      /id="k-file-btn"[\s\S]*aria-haspopup="listbox"[\s\S]*id="k-file-menu"/.test(html) &&
+      /class="kpicker-label" id="k-lib-label">知识库/.test(html) &&
+      /class="kpicker-label" id="k-file-label">文件/.test(html) &&
+      /class="chev" aria-hidden="true"/.test(html) &&
+      /function kDropToggle\(which\)/.test(html) && /function kDropCloseAll\(\)/.test(html) &&
+      /e\.key === 'Escape'/.test(html) &&
+      /function kFileLabel\(f\)/.test(html) && /esc\(kFileLabel\(f\)\)/.test(html) &&
+      /'memes\.md': '梗库/.test(html) &&
+      !/kswitch|id="k-lib-pick"|id="k-file-pick"|kPickLibSelect|kPickFileSelect/.test(html),
+    '知识库和文件都是通栏大卡片下拉（标题在上、V 箭头、可展开面板），文件选项用说明文字而不是原始文件名',
+  );
+  check(
+    /class="on" id="k-mode-prev"[\s\S]*id="k-mode-edit"/.test(html) &&
+      /class="kedit-body hidden" id="k-editwrap"/.test(html) &&
+      /class="kpreview" id="k-preview"/.test(html),
+    '知识文件默认打开预览，预览按钮排在编辑按钮前面',
+  );
+  // 弹层必须是**不透明**的 —— 卡片(--card)是半透明毛玻璃，弹层不能跟着它透（用户报过"能看见背后"）
+  check(
+    /--pop-bg:#f4f8ff; --pop-item:#ffffff; --pop-item-hover:#eaf1fd/.test(html) &&
+      /--pop-bg:#1a2233; --pop-item:#202a3d; --pop-item-hover:#26324a/.test(html),
+    '下拉弹层有不透明底色变量，深浅两套主题各一份',
+  );
+  check(
+    /\.kpicker-menu\{[\s\S]{0,260}?background:var\(--pop-bg\)/.test(html) &&
+      /\.klib,\.kfcard\{[\s\S]{0,200}?background:var\(--pop-item\)/.test(html) &&
+      /\.klib:hover,\.kfcard:hover\{[\s\S]{0,120}?background:var\(--pop-item-hover\)/.test(html) &&
+      /\.kpicker-menu\{[\s\S]{0,300}?backdrop-filter:none/.test(html),
+    '下拉面板和列表项底色走不透明的 --pop-*，且没有 backdrop-filter 让背后正文透出来',
+  );
+  // ⚠️ 反向断言：弹层一旦写回 var(--card)/var(--card2) 就又会透明（--card 是 rgba .34/.07）
+  check(
+    !/\.kpicker-menu\{[\s\S]{0,300}?var\(--card2?\)/.test(html),
+    '下拉面板不再直接使用半透明的 --card / --card2',
+  );
+  check(
+    /function kPickFile\(name\)[\s\S]{0,360}kMode\('prev'\)/.test(html),
+    '切换文件后自动回到预览模式',
+  );
+  check(
+    /<div class="new-form-grid">[\s\S]*?id="p-new-id"[\s\S]*?id="p-draft-name"[\s\S]*?id="p-draft-work"[\s\S]*?<\/div>\s*<\/div>/.test(html) &&
+      !/id="p-anime-(?:mode|name|lib)"/.test(html.slice(html.indexOf('<h2>新建人设</h2>'), html.indexOf('<h2>QQ 昵称'))),
+    '新建人设只保留 id / 角色名 / 出自作品，不再在人设页创建或选择动画库',
+  );
+  check(
+    (html.match(/id="p-new-primary"/g) ?? []).length === 1 &&
+      /onclick="personaNewPrimary\(\)"/.test(html) &&
+      !/id="p-draft-btn"|id="p-new-copy"|id="p-copy-btn"/.test(html),
+    '新建人设只剩一个主按钮，旧「搜集并起草」和底部复制控制块已删除',
+  );
+  check(
+    /manual \? personaTemplateButtonText\(\) : 'AI 联网生成起草'/.test(html) &&
+      /=== '_template' \? '创建标准模板' : '创建'/.test(html),
+    'AI / 手动主按钮文案会按模式与关联模板正确切换',
+  );
+  check(
+    /id="p-template-row"/.test(html) &&
+      /label>关联模板/.test(html) &&
+      /id="p-new-from" onchange="personaTemplateChange\(\)"/.test(html),
+    '「照谁复制」已合并为手动模式里的「关联模板」下拉框',
+  );
+  check(
+    /提示：新建后将先生成预览，确认后保存落盘。/.test(html) &&
+      /data-tip="使用规范：不给真人做人设；仅支持虚构角色。"/.test(html) &&
+      /\.tooltip:hover::after,\.tooltip:focus::after/.test(html),
+    '新建提示已精简为 Alert 提示条，使用规范移入悬停 / 聚焦 Tooltip',
+  );
+  check(
+    /identity\.name = name/.test(html) &&
+      /if \(!keywords\.includes\(work\)\) keywords\.unshift\(work\)/.test(html) &&
+      /animeMode:|animeLib:|animeName:/.test(html.slice(html.indexOf('async function personaDraftStart'), html.indexOf('function renderDraft'))) === false,
+    '人设创建只保存角色名和作品关键词；AI 起草不再请求、生成或写盘动画库',
+  );
+  check(
+    /id="k-anime-new-btn"/.test(html) && /onclick="kAnimeNewToggle\(\)"/.test(html) &&
+      /\/api\/knowledge\/draft-anime/.test(html) && /\/api\/knowledge\/create/.test(html) &&
+      /id="k-anime-preview"/.test(html) && /onclick="kAnimeSave\(\)"/.test(html),
+    '★★ 知识库页独立提供「新建动画库 → AI 起草 → 预览编辑 → 保存」',
+  );
+  check(
+    /<div class="knewbar hidden" id="k-anime-new">/.test(html) &&
+      /\$\('k-anime-new'\)\?\.classList\.toggle\('hidden', KLIB_CUR !== '动画库'\)/.test(html),
+    '★★ 「新建动画库」默认隐藏，且只在选中「动画库」分类时出现',
+  );
+  check(
+    !/<h[23][^>]*>[^<]*高级提示词设置/.test(html) &&
+      /const keys = all\.filter\(\(k\) => PJ_PROMPT_TOP\.includes\(k\)\)/.test(html) &&
+      html.includes('const it = JSON.parse(JSON.stringify(PJ.identity || {}));') &&
+      html.includes("const el = $('pp-' + k);"),
+    '★★ 人设页移除「高级提示词设置」，但保存逻辑仍克隆原 identity 并保留未渲染字段',
+  );
+  check(
+    /id="k-anime-mode-ai"[\s\S]*kAnimeMode\('ai'\)[\s\S]*id="k-anime-mode-manual"[\s\S]*kAnimeMode\('manual'\)/.test(html) &&
+      /id="k-anime-characters"/.test(html) && /function kAnimeInputs\(\)/.test(html) &&
+      /mode: manual \? 'manual' : 'ai'/.test(html),
+    '新建动画库有 AI / 手动切换，并共享库名、作品名、主要角色三字段',
+  );
+  check(
+    /'POST \/api\/knowledge\/draft-anime'/.test(js) &&
+      /'POST \/api\/knowledge\/create'/.test(js) &&
+      /existsSync\(target\)[\s\S]{0,160}409/.test(js),
+    '知识库页有独立起草/创建接口，且创建接口拒绝覆盖已有动画库',
+  );
+  check(
+    /\.tags \.tagitem\{[^}]*min-width:0/.test(html) &&
+      /\.tags \.tagitem span\{[^}]*min-width:0/.test(html),
+    '标签气泡允许收缩，长文字省略，不再把相邻内容挤出容器',
+  );
+  check(
+    /html,body\{overflow-x:clip\}/.test(html),
+    '固定背景油滴不会在窄屏制造横向滚动',
+  );
   // ★★ 页面版本号：界面靠它发现"我这个标签页是旧的"（2026-09-15 加）
   const pv0 = await api('/api/pagever');
   check(/^\d+$/.test(String(pv0.ver ?? '')), `★ 有页面版本接口 /api/pagever → ${pv0.ver}`);
@@ -174,6 +414,35 @@ async function main() {
   check(savedYaml.includes('test-model-changed'), '配置文件里能看到新模型名');
   check(savedYaml.includes('allowGroups'), '保存时保留了 yaml 里的其它字段（allowGroups）');
   check(savedYaml.includes('debugInject') === false || true, '（字段保留检查）');
+
+  // ⚠️ 2026-09-22 加：**生图配置也要能存能读**。
+  //    这个文件正是踩过一次"saveConfig 白名单漏了某段 → 静默丢弃、但界面报保存成功"
+  //    （`persona` 那次，用户怎么切都不生效）—— 所以以后**新加的配置段一律在这儿钉一条**。
+  console.log('\n[3b] 生图配置：存得进去、读得回来（白名单不能漏）');
+  const ig = await post('/api/config', {
+    imagegen: { enable: true, provider: 'openai', model: 'Qwen/Qwen-Image-Edit-2509', apiKey: 'sk-ig-test' },
+  });
+  check(ig.ok === true, '保存成功');
+  check(ig.config.imagegen.provider === 'openai', '返回的新配置已是新值（说明白名单里有它）');
+  check(ig.config.imagegen.apiKey === 'sk-ig-test', 'apiKey 也存进去了');
+  const st3 = await api('/api/state');
+  check(st3.config.imagegen.provider === 'openai', '重新读取仍是新值（已写盘）');
+  check(readFileSync(CFG, 'utf8').includes('Qwen/Qwen-Image-Edit-2509'), '配置文件里能看到生图模型名');
+
+  // ⚠️ 2026-09-22 加（用户要求「模型应该要能自动拉取列表选择」）：
+  //    **没填 key 时下拉框也不能是空的** —— 火山方舟的模型要先去控制台开通才会出现在
+  //    `/models` 里，很多生图平台干脆没实现这个接口。所以内置候选是兜底，必须回。
+  console.log('\n[3c] 生图模型列表：没填 key 也要有内置候选（否则下拉框是空的）');
+  const igm = await post('/api/imagegen/models', { imagegen: { provider: 'ark' } });
+  check(igm.ok === true, '接口返回 ok');
+  check(
+    Array.isArray(igm.models) && igm.models.includes('doubao-seedream-4-0-250828'),
+    '★ 没 key 也回内置候选（界面才有得选）',
+  );
+  check(igm.builtin >= 5, `内置候选 ${igm.builtin} 个`);
+  check(igm.models[0] === 'doubao-seedream-4-0-250828', '默认模型排第一');
+  const igm2 = await post('/api/imagegen/models', { imagegen: { provider: 'openai' } });
+  check(igm2.models.includes('Qwen/Qwen-Image-Edit-2509'), '换服务商 → 候选跟着换');
 
   console.log('\n[4] 改群、私聊白名单与触发开关');
   const r2 = await post('/api/config', {
@@ -265,6 +534,104 @@ async function main() {
 
   const badName = await api('/api/knowledge?name=../config.yml');
   check(badName.ok === false, '路径穿越被拒绝');
+
+  // 知识页把动画库列成 `anime/<库名>.md`。以前列表能显示、文件也能选，
+  // 但 safeKnowName 只放行根文件和 groups/，点开统一返回 400；编辑器与预览就都空了。
+  const previewList = await api('/api/knowledge/list');
+  const animeFile = (previewList.files ?? []).find((f) => /^anime\/[\w.-]+\.md$/.test(f.name));
+  check(!!animeFile, `列表里能找到动画库文件（${animeFile?.name ?? '无'}）`);
+  if (animeFile) {
+    const animeRead = await api('/api/knowledge?name=' + encodeURIComponent(animeFile.name));
+    check(
+      animeRead.ok === true && typeof animeRead.content === 'string' && animeRead.content.length > 0,
+      '★★ 列表里选得到的动画库文件能真正读取（预览不再空白）',
+      `${animeRead.content?.length ?? 0} 字`,
+    );
+  }
+  const badAnime = await api('/api/knowledge?name=' + encodeURIComponent('anime/../config.yml'));
+  check(badAnime.ok === false, '放开合法 anime/ 后，路径穿越仍被拒绝');
+
+  // 敏感词库（2026-09-25）：独立目录 `sensitive/`，界面单独一组，仍然全局注入。
+  const sensitiveName = 'sensitive/sensitive-words.md';
+  check(
+    js.includes('sensitive\\/[\\w.-]+\\.md') && html.includes("return '敏感词';"),
+    '路径白名单与界面分组都认得独立的 sensitive/ 库',
+  );
+  const sensitiveList = await api('/api/knowledge/list');
+  const sensitiveMeta = (sensitiveList.files ?? []).find((f) => f.name === sensitiveName);
+  check(!!sensitiveMeta, `敏感词库出现在知识文件列表（${sensitiveMeta?.name ?? '没有'}）`);
+  const sensitiveRead = await api('/api/knowledge?name=' + encodeURIComponent(sensitiveName));
+  check(
+    sensitiveRead.ok === true && sensitiveRead.content.includes('只认不接'),
+    '★★ 敏感词库能读取，且总规则「只认不接」在正文里',
+    `${sensitiveRead.content?.length ?? 0} 字`,
+  );
+  const badSensitive = await api('/api/knowledge?name=' + encodeURIComponent('sensitive/../config.yml'));
+  check(badSensitive.ok === false, 'sensitive/ 放开后，目录穿越仍被拒绝');
+  const sensitiveVerify = await api('/api/knowledge/verify');
+  check(
+    sensitiveVerify.ok === true && !(sensitiveVerify.mismatched ?? []).includes(sensitiveName),
+    '★ 知识校验会覆盖 sensitive/（不是只扫根目录）',
+    sensitiveVerify.error || '',
+  );
+
+  // 知识库页的新建入口：真调创建接口，但不联网、不花模型钱。
+  const draftBad = await post('/api/knowledge/draft-anime', { name: '../bad', work: '测试作品' });
+  check(draftBad.ok === false, '动画库起草接口存在，并在联网前拒绝非法库名');
+  const draftEmpty = await post('/api/knowledge/draft-anime', { name: 'webui-test-anime', work: '' });
+  check(draftEmpty.ok === false, '动画库起草接口在联网前拒绝空作品名');
+
+  const manualName = `webui-test-manual-${process.pid}`;
+  const manualDraft = await post('/api/knowledge/draft-anime', {
+    name: manualName,
+    work: '手动测试作品',
+    characters: '角色甲、角色乙',
+    mode: 'manual',
+  });
+  check(
+    manualDraft.ok === true && manualDraft.content.includes('角色甲') && manualDraft.content.includes('角色乙'),
+    '手动模式能生成带主要角色的可编辑模板',
+  );
+  const manualNoRoles = await post('/api/knowledge/draft-anime', {
+    name: `${manualName}-noroles`,
+    work: '手动测试作品',
+    mode: 'manual',
+  });
+  check(manualNoRoles.ok === true && manualNoRoles.content.includes('（待补）'), '主要角色可以不填');
+  const manualEmptyWork = await post('/api/knowledge/draft-anime', {
+    name: `${manualName}-empty`,
+    mode: 'manual',
+  });
+  check(manualEmptyWork.ok === false, '手动模式同样要求作品名必填');
+
+  const manualPath = join(ROOT, 'knowledge', 'anime', `${manualName}.md`);
+  const manualCreated = await post('/api/knowledge/create', {
+    kind: 'anime',
+    name: manualName,
+    content: manualDraft.content,
+  });
+  check(manualCreated.ok === true && existsSync(manualPath), '手动模板也能通过知识库创建接口落盘');
+  unlinkSync(manualPath);
+  await post('/api/reload');
+  check(!existsSync(manualPath), '手动模式回归临时动画库已删除');
+
+  const createName = `webui-test-anime-${process.pid}`;
+  const createPath = join(ROOT, 'knowledge', 'anime', `${createName}.md`);
+  const createBody = '# WebUI 测试动画库\n\n仅用于接口回归。';
+  const createdAnime = await post('/api/knowledge/create', { kind: 'anime', name: createName, content: createBody });
+  check(createdAnime.ok === true, '★★ 知识库页创建接口能真正落盘', createdAnime.error || '');
+  check(existsSync(createPath), '新文件落在 knowledge/anime/ 下');
+  const afterCreateList = await api('/api/knowledge/list');
+  check((afterCreateList.files ?? []).some((f) => f.name === `anime/${createName}.md`), '新库立刻出现在知识库列表');
+  const afterCreateRead = await api('/api/knowledge?name=' + encodeURIComponent(`anime/${createName}.md`));
+  check(afterCreateRead.ok === true && afterCreateRead.content === createBody, '新库正文能原样读回');
+  const duplicateAnime = await post('/api/knowledge/create', { kind: 'anime', name: createName, content: '不能覆盖' });
+  check(duplicateAnime.ok === false, '创建入口拒绝覆盖已有动画库');
+  const badCreate = await post('/api/knowledge/create', { kind: 'anime', name: '../bad', content: 'x' });
+  check(badCreate.ok === false, '创建接口拒绝路径穿越');
+  unlinkSync(createPath);
+  await post('/api/reload');
+  check(!existsSync(createPath), '回归临时动画库已删除');
 
   console.log('\n[7b] ★★ 人设 API —— **真的调一遍**（路由注册了 ≠ 调得通）');
   {
@@ -418,6 +785,17 @@ async function main() {
     );
 
     // ④ ⚠️ 「挡位 2 不能进事件系统，只有 1 才能设置」（<主人> 2026-09-15）
+    // ⚠️ 这段不能直接 import `src/life.js` 就完事：WebUI 服务是在**子进程**里用
+    //    `config.webui-test.yml` 启动的，而测试主进程没有这个环境变量；直接 import
+    //    会读到真实 config.yml，于是「1 档群」看起来永远是 false（历史假红）。
+    //    先把本套件要验的假群写进临时配置，再让本进程读同一份配置。
+    await post('/api/config', {
+      trigger: {
+        allowGroups: ['200000001', '200000003', '200000005'],
+        groupRespondTo: { '200000001': 1, '200000003': 3, '200000005': 2 },
+      },
+    });
+    process.env.QQBOT_CONFIG = 'config.webui-test.yml';
     const lifeMod = await import('../src/life.js');
     check(lifeMod.isEventGroup('200000001') === true, '★ 1 档群 = 进事件系统');
     check(lifeMod.isEventGroup('200000005') === false, '★★ 2 档群**不进**事件系统（200000005 是 2 档）');

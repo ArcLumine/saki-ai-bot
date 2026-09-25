@@ -50,7 +50,21 @@ mkdirSync(join(ROOT, POOL, 'alpha', 'prompt'), { recursive: true });
 mkdirSync(join(ROOT, POOL, 'broken'), { recursive: true });
 writeFileSync(
   join(ROOT, POOL, '_template', 'identity.json'),
-  JSON.stringify({ id: 'miku', name: '角色全名（例：初音未来）', selfName: 'Miku' }, null, 2),
+  JSON.stringify(
+    {
+      id: 'miku',
+      name: '角色全名（例：初音未来）',
+      selfName: 'Miku',
+      selfNames: ['判断说明', '例：miku', '初音'],
+      callNames: ['点名说明', '例：miku', '初音'],
+      nicknames: ['外号说明', '别人叫她任何一个'],
+      matchNames: ['原子说明', '例：祥', '例：小祥'],
+      anime: { works: ['例：bangdream'], keywords: ['作品说明', '明日方舟'] },
+      style: { verbalTics: ['口癖（例：倒）'] },
+    },
+    null,
+    2,
+  ),
   'utf8',
 );
 writeFileSync(
@@ -107,7 +121,15 @@ console.log('\n【2】读包 + 文档清单');
 
 console.log('\n【3】★★ 保存：id 对齐 + 拒绝空必填 + 必须留备份');
 {
-  const saved = pa.saveIdentity('alpha', { id: '别人的id', name: '阿尔法', selfName: 'Al' });
+  const saved = pa.saveIdentity('alpha', {
+    id: '别人的id',
+    name: '阿尔法',
+    selfName: 'Al',
+    selfNames: ['阿尔法'],
+    callNames: ['阿尔法'],
+    nicknames: ['小阿'],
+    matchNames: ['阿'],
+  });
   check(saved.id === 'alpha', '★ id 被**强制对齐**成目录名（照抄别人的 id 最难查）', String(saved.id));
   const onDisk = JSON.parse(readFileSync(join(ROOT, POOL, 'alpha', 'identity.json'), 'utf8'));
   check(onDisk.id === 'alpha', '★ 写进文件的 id 也是目录名');
@@ -183,6 +205,13 @@ console.log('\n【5】写文档 + 新建 + 删除');
     '★ 源包**没有**的文档才写骨架（beta 的 voices.md 是骨架）',
   );
   check(bi.name === '', '★ 从 `_template` 复制时，说明性的名字被清掉', JSON.stringify(bi.name));
+  check(
+    ['selfNames', 'callNames', 'nicknames', 'matchNames'].every((k) => Array.isArray(bi[k]) && bi[k].length === 0) &&
+      Array.isArray(bi.anime?.works) && bi.anime.works.length === 0 &&
+      Array.isArray(bi.anime?.keywords) && bi.anime.keywords.length === 0 &&
+      Array.isArray(bi.style?.verbalTics) && bi.style.verbalTics.length === 0,
+    '★★ 从 `_template` 复制时，模板数组说明全部清空，不再伪装成真实名字/关键词',
+  );
 
   // ★★ 2026-09-22 加：从**真实角色**复制 = 完整副本（这才是这个下拉框最常用的用法）
   {
@@ -193,6 +222,11 @@ console.log('\n【5】写文档 + 新建 + 删除');
     const gi = JSON.parse(readFileSync(join(gdir, 'identity.json'), 'utf8'));
     check(gi.id === 'gamma', '★ 但 `id` 换成了新目录名');
     check(gi.name === '阿尔法', '★ 名字**保留**（从真实角色复制时不清空 —— 用户想要的是"另一个它"）');
+    check(
+      gi.selfNames?.[0] === '阿尔法' && gi.callNames?.[0] === '阿尔法' &&
+        gi.nicknames?.[0] === '小阿' && gi.matchNames?.[0] === '阿',
+      '★★ 复制真实角色时，四个称呼数组也完整保留',
+    );
     pa.removePack('gamma');
   }
 
@@ -212,11 +246,68 @@ console.log('\n【5】写文档 + 新建 + 删除');
   );
 }
 
+console.log('\n【6】★ 生图参考图（立绘）：和头像是**两个字段两个文件**');
+{
+  const dir = join(ROOT, POOL, 'alpha');
+  const img = Buffer.from('not-really-a-png-but-fine');
+  // ⚠️ `persona.js` 读的是 **`QQBOT_PERSONA_DIR`（单个包）**，
+  //    而 `persona-admin.js` 读的是 `QQBOT_PERSONAS_DIR`（包池）—— 两个变量不是一回事，
+  //    少设这个的话 `persona.refImages()` 会去读**真实的 personas/**（这套件就白测了）。
+  process.env.QQBOT_PERSONA_DIR = join(POOL, 'alpha');
+
+  // ① 先只设头像 —— 参考图应当**退回头像**（"刚配好就能用"）
+  pa.saveAvatar('alpha', img, '.png');
+  const persona = await import('../src/persona.js');
+  persona.reload();
+  check(persona.qq().avatar === 'avatar.png', '头像存成 `avatar.png` 并写进 `qq.avatar`', persona.qq().avatar);
+  check(
+    persona.refImages().length === 1 && /avatar\.png$/.test(persona.refImages()[0]),
+    '★ 没配参考图时**退回头像**（否则生图直接没参考图可用）',
+    persona.refImages()[0] || '(空)',
+  );
+
+  // ② 传立绘
+  const r = pa.saveRefImage('alpha', img, '.png');
+  check(r.file === 'ref.png', '立绘存成独立文件 `ref.png`', r.file);
+  const pack = pa.readPack('alpha');
+  check(pack.identity.image?.refs?.[0] === 'ref.png', '★★ 写进 `identity.image.refs`（**不碰** `qq.avatar`）');
+  check(pack.identity.qq?.avatar === 'avatar.png', '★ 头像字段**没被动过**（两个字段各管各的）');
+  persona.reload();
+  check(/ref\.png$/.test(persona.refImages()[0]), '★ 配了立绘之后，`refImages()` 优先用它');
+
+  // ③ 换扩展名：旧文件要删掉，不然包里躺两张、下次看目录会以为是两张参考图
+  pa.saveRefImage('alpha', img, '.webp');
+  check(pa.readPack('alpha').identity.image.refs[0] === 'ref.webp', '换格式后 refs 指向新文件');
+  check(!existsSync(join(dir, 'ref.png')), '★★ 旧的 `ref.png` 被删掉了（不留两张）');
+  check(existsSync(join(dir, 'ref.webp')), '新文件在');
+
+  // ④ 校验：不认的格式要拒绝
+  let threw = '';
+  try {
+    pa.saveRefImage('alpha', img, '.txt');
+  } catch (e) {
+    threw = e.message;
+  }
+  check(/不支持/.test(threw), '不认的格式被拒', threw);
+
+  let threw2 = '';
+  try {
+    pa.saveRefImage('alpha', Buffer.alloc(0), '.png');
+  } catch (e) {
+    threw2 = e.message;
+  }
+  check(/空/.test(threw2), '空文件被拒', threw2);
+
+  // ⑤ 路径白名单：参考图也走同一套（这是要读进内存、发到外部 API 的路径）
+  check(pa.avatarFile('alpha', '../../secret.png') === '', '★★ `../` 出不去（复用同一套白名单）');
+  check(pa.avatarFile('alpha', 'ref.webp') !== '', '正常文件名能解析到绝对路径');
+}
+
 cleanup();
 
 console.log(
   failures === 0
-    ? '\n结果: 全部通过 ✅（id 对齐 / 必填校验 / 路径白名单 / 备份 / 新建改名 / 删除留底）\n'
+    ? '\n结果: 全部通过 ✅（id 对齐 / 必填校验 / 路径白名单 / 备份 / 新建改名 / 删除留底 / 生图参考图）\n'
     : `\n结果: ${failures} 项失败 ❌\n`,
 );
 process.exit(failures === 0 ? 0 : 1);

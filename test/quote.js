@@ -291,6 +291,30 @@ console.log('\n【10】★★ 余额见底那条提醒的 @ **不许动**（用�
   );
 }
 
+console.log('\n【12】★★★ 分条时**只有第一条带引用**（用户截图：三条都带了引用框）');
+{
+  const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  // 真因：`sendChunk()` **自己又重判了一遍引用**，而 `shouldQuote()` 是
+  // **按"群里热不热闹"重新算**的（有意不看传进来的值）⇒ 每条分条都被判成"该引用"。
+  // 判定其实早就做过了（`quoteThisReply`），调用方也给后面几条传了 `false`。
+  check(
+    /const quote = !!reply;/.test(src),
+    '★★★ `sendChunk` **只认调用方给的引用判定**（不再自己重算）',
+  );
+  check(
+    /sentFirst \? false : quoteThisReply/.test(src),
+    '★ 调用方对后面几条传的确实是 `false`（和上面那条是一对）',
+  );
+  check(
+    !/const quote = this\.shouldQuote\(event, reply\)/.test(src),
+    '★ 那个会重算的写法已经不在了',
+  );
+  check(
+    /const quoteThisReply = lateMs > 0 \? true : this\.shouldQuote\(event, false\)/.test(src),
+    '★ 判定仍然**只做一次**（在 `handle()` 里），迟到回复照旧强制引用',
+  );
+}
+
 console.log('\n【11】★ 新路不受触发冷却影响（和 @ 她一样是明确召唤）');
 {
   const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
@@ -307,6 +331,31 @@ console.log('\n【12】★★ 正文里**点名叫她** → 也算召唤（<主�
   const d1 = b.decide(evOf([textSeg('祥子你现在和谁住在一起')]));
   check(d1?.hit === 'call', '★★ 「祥子你现在和谁住在一起」→ 直接回（hit=call）');
   check(d1?.calledBy === '祥子', '★ 记下了是哪个名字叫的');
+  // ⚠️⚠️ 2026-09-23 加（用户截图：「为什么这句话提到了祥但是没有主动回」）：
+  //    群友 03:51 说「祥，睡颜」——**点名在叫她**，可她一个字都没回
+  //    （日志里只有 `[收到] …祥，睡颜`，之后什么都不发生 ⇒ 触发判据说"没在叫她"）。
+  //    真因：召唤判据读的是 `callNames`，而那份里**没有单字「祥」**
+  //    （`t.includes('祥')` 匹配不上「祥子」「小祥」）；`identity.json` 里**另有一份
+  //    `matchNames`**（含单字「祥」，界面上写着它是"**判据用的名字原子**、允许单字和变体"）
+  //    —— 那份**没被召唤判据用上** ✗ 两份名单各管一半。
+  check(b.decide(evOf([textSeg('祥，睡颜')]))?.hit === 'call', '★★ 单字「祥」也算（群友就用这一个字叫她）');
+  check(b.decide(evOf([textSeg('祥每次都说真的去睡')]))?.hit === 'call', '★ 「祥」在句首也算');
+  // ⚠️⚠️ 2026-09-23 加（用户要求：「把 @ 加上小祥的**所有名字**识别为一个组合，
+  //    然后**接回原来 @ 的反应**」）。
+  //    起因：协议端（SnowLuma）有时**不给 at 段**（实测 `[at=0 atMe=false]`，
+  //    而正文里是字面的「@saki酱saki酱saki酱 做题」）⇒ `msg.isAt` 认不出 ⇒
+  //    只能靠 `calledByName` 碰运气；**不命中就掉进主动接话**（要过 speak-judge、
+  //    还可能被判断节流丢掉）⇒ 表现就是「@ 了她却没反应」。
+  //    最容易漏的是「**@ + 她的 QQ 号**」—— 那个写法名字表里当然没有 ✗
+  check(
+    b.decide(evOf([textSeg('@saki酱saki酱saki酱 做题')]))?.hit === 'at',
+    '★★★ 正文里「@名字」（协议端退化了、没有 at 段）→ **当成 @**（hit=at）',
+  );
+  check(
+    b.decide(evOf([textSeg('@10000002 做题')]))?.hit === 'at',
+    '★★ 「@ + 她的 QQ 号」也算 —— 这是原来最容易漏的一种（名字表里没有号码）',
+  );
+  check(b.decide(evOf([textSeg('@小祥 在吗')]))?.hit === 'at', '★ 「@小祥」也算');
   // ② 别的叫法（用户/群里都在用）
   check(b.decide(evOf([textSeg('小祥在吗')]))?.hit === 'call', '★ 「小祥在吗」也算');
   check(b.decide(evOf([textSeg('客服小祥帮我看看这个')]))?.hit === 'call', '★ 「客服小祥」也算');

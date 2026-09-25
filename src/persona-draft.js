@@ -19,14 +19,12 @@
  * ## 三条用户定死的规矩
  *
  * 1. **不给真人做人设**（隐私 + 平台规则）—— 模型先判断，不是虚构角色就 `blocked`。
- * 2. **动画库**：界面上选「复用已有的 / 新建一个 / 不用」——
- *    · 复用 ⇒ 只**声明**引用（`anime.works`），**绝不往那份库写东西**；
- *    · 新建 ⇒ 才让模型起草库内容，保存时写进 `knowledge/anime/<新库名>.md`。
+ * 2. **动画库不在这里创建**：统一到知识库页；人设页只列出现成库供身份关联。
  * 3. **`persona.md` 限长**（用户 2026-09-21：「对，限长」）—— 硬上限 `MAX_PERSONA_CHARS`。
  */
 import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, thinkingField } from './config.js';
+import { ROOT, KNOWLEDGE_DIR, thinkingField } from './config.js';
 import { log } from './log.js';
 import { streamChat } from './llm.js';
 import { searchSmart, moegirlSearch, searchBlock } from './search.js';
@@ -112,7 +110,7 @@ function mergeShape(shape, got) {
 
 /** 现在有哪些动画库（`knowledge/anime/<名>.md`） */
 export function availableAnimeLibs() {
-  const dir = join(ROOT, 'knowledge', 'anime');
+  const dir = join(KNOWLEDGE_DIR, 'anime');
   if (!existsSync(dir)) return [];
   try {
     return readdirSync(dir)
@@ -132,10 +130,129 @@ async function collect(messages, opts = {}) {
 }
 
 /**
- * 起草一份人设。
+ * 单独起草一份动画库正文，供知识库页「新建动画库」使用。
+ * 这里只产出 Markdown，不写盘；页面预览后调用 /api/knowledge/create 保存。
+ */
+export async function draftAnimeLib(p = {}, opts = {}) {
+  const name = String(p.name ?? '').trim();
+  const work = String(p.work ?? '').trim();
+  const characters = String(p.characters ?? '').trim();
+  const mode = p.mode === 'manual' ? 'manual' : 'ai';
+  if (!name) throw bad('库名必须填（例：bangdream）');
+  if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(name) || name.includes('..')) {
+    throw bad('库名只能是小写字母、数字、点、横线或下划线，且必须字母数字开头');
+  }
+  if (!work) throw bad('作品名 / 关键词必须填（例：BanG Dream!）');
+  const libs = availableAnimeLibs();
+  if (libs.some((x) => x.toLowerCase() === name.toLowerCase())) {
+    throw bad(`动画库「${name}」已经存在了 —— 想改内容请直接打开它`);
+  }
+
+  if (mode === 'manual') {
+    const cleanCell = (v) => String(v).replace(/[\r\n|]+/g, ' ').trim();
+    const title = cleanCell(work);
+    const roleList = characters.split(/[、,，\n]/).map(cleanCell).filter(Boolean);
+    const roleLines = (roleList.length ? roleList : ['（待补）']).map((x) => `- ${x}`);
+    const content = [
+      `# 动画库：${title}`,
+      '',
+      '## 一、判别要点',
+      '',
+      '| 关键词 | 是什么 | 别搞混 |',
+      '| --- | --- | --- |',
+      `| ${title} |  |  |`,
+      '',
+      '## 二、主要角色',
+      '',
+      ...roleLines,
+      '',
+      '## 三、备注',
+      '',
+      '- 待补：粉丝常用外号、容易混淆的相似作品。',
+    ].join('\n');
+    if (content.length > MAX_ANIME_CHARS) throw bad(`手动模板不能超过 ${MAX_ANIME_CHARS} 字`);
+    return { ok: true, name, work, characters, mode, content, notes: [], sources: [] };
+  }
+
+  const query = `${work}${characters ? ` ${characters}` : ''} 作品 世界观 设定 角色 简介`;
+  const results = [];
+  const seen = new Set();
+  const push = (arr) => {
+    for (const r of Array.isArray(arr) ? arr : []) {
+      const u = String(r?.url ?? '');
+      if (!u || seen.has(u)) continue;
+      seen.add(u);
+      results.push(r);
+    }
+  };
+  try {
+    push(await searchSmart(query, { signal: opts.signal }));
+  } catch (e) {
+    log.warn(`起草动画库「${name}」：搜「${query}」失败（继续）：${e.message}`);
+  }
+  if (/[\u4e00-\u9fa5\u3040-\u30ff]/.test(work)) {
+    try { push(await moegirlSearch(work, 3)); } catch (e) {
+      log.debug(`起草动画库「${name}」：萌娘百科没搜到：${e.message}`);
+    }
+  }
+  const material = searchBlock(query, results.slice(0, 12));
+  const sys = [
+    '你在给一个 QQ 机器人的知识库起草一份「动画库」Markdown。',
+    '只输出 JSON，不要代码围栏、不要解释：{"content":"...","notes":["..."]}。',
+    '',
+    '这份库只放**判别要点**，不要堆剧情细节：作品是什么、有哪些团体/阵营、主要角色、粉丝常用外号、容易混淆的相似作品。',
+    '剧情细节、最新动态、具体台词一律留给联网搜索，不要写进来。',
+    '用中文 Markdown；建议包含「## 一、判别要点」和一张三列表格（关键词 / 是什么 / 别搞混）。',
+    `正文不超过 ${MAX_ANIME_CHARS} 字。`,
+  ].join('\n');
+  const user = [
+    `库名：${name}`,
+    `作品名：${work}`,
+    `主要角色（用户指定，可为空）：${characters || '（未指定）'}`,
+    '',
+    '请把 content 写成可以直接保存成 knowledge/anime/' + name + '.md 的正文。',
+    '',
+    material,
+  ].join('\n');
+  const raw = await collect(
+    [
+      { role: 'system', content: sys },
+      { role: 'user', content: user },
+    ],
+    { maxTokens: 6000, ...thinkingField(), signal: opts.signal },
+  );
+
+  let parsed;
+  try {
+    parsed = parseJson(raw);
+  } catch {
+    // 模型偶尔会绕过 JSON 直接回 Markdown；仍尽量接住，别让用户白等一次搜索。
+    parsed = { content: String(raw ?? '').replace(/^```(?:markdown)?\s*|\s*```$/gi, '').trim() };
+  }
+  let content = String(parsed?.content ?? '').trim();
+  if (!content) throw bad('模型没有给出动画库正文，请重新起草');
+  const notes = Array.isArray(parsed?.notes) ? parsed.notes.map((x) => String(x)) : [];
+  if (!/^#\s/m.test(content)) content = `# 动画库：${work}\n\n${content}`;
+  if (content.length > MAX_ANIME_CHARS) {
+    notes.push(`正文超过 ${MAX_ANIME_CHARS} 字，已截断；建议保存前再删减`);
+    content = content.slice(0, MAX_ANIME_CHARS);
+  }
+  return {
+    ok: true,
+    name,
+    work,
+    characters,
+    mode,
+    content,
+    notes,
+    sources: results.slice(0, 12).map((r) => ({ title: r.title, url: r.url })),
+  };
+}
+
+/**
+ * 起草一份人设；只产出 identity + persona.md / voices.md，不创建知识库文件。
  *
- * @param {{name:string, work?:string, id:string,
- *   animeMode?:'reuse'|'new'|'none', animeLib?:string, animeName?:string}} p
+ * @param {{name:string, work?:string, id:string}} p
  * @param {{signal?:AbortSignal}} [opts]
  */
 export async function draft(p = {}, opts = {}) {
@@ -145,23 +262,10 @@ export async function draft(p = {}, opts = {}) {
   if (!name) throw bad('先填「角色名」');
   if (!/^[a-z0-9][\w.-]{0,31}$/i.test(id)) throw bad('id 只能字母数字开头（含 . - _），例：miku');
 
-  const libs = availableAnimeLibs();
-  const mode = ['reuse', 'new', 'none'].includes(p.animeMode) ? p.animeMode : 'none';
-  const reuseLib = String(p.animeLib ?? '').trim();
-  const newLib = String(p.animeName ?? '').trim().replace(/[^\w.-]/g, '');
-  if (mode === 'reuse') {
-    if (!libs.includes(reuseLib)) throw bad(`要复用的动画库「${reuseLib}」不存在（现有：${libs.join('、') || '无'}）`);
-  }
-  if (mode === 'new') {
-    if (!newLib) throw bad('要新建的动画库得有名字（小写字母数字，例：bangdream）');
-    if (libs.includes(newLib)) throw bad(`动画库「${newLib}」已经存在了 —— 想用它请选「复用已有」`);
-  }
-
   const tpl = templateIdentity();
   if (!Object.keys(tpl).length) throw bad('读不到 personas/_template/identity.json —— 没有字段清单，没法保证不漏字段');
   const shape = shapeOf(tpl);
   const hints = hintLines(tpl);
-  const wantAnimeDoc = mode === 'new';
 
   // ── ① 联网搜 ──
   const query = `${name}${work ? ` ${work}` : ''} 角色 设定`;
@@ -188,30 +292,10 @@ export async function draft(p = {}, opts = {}) {
     }
   }
 
-  // 新建库时，额外搜一轮"作品/世界观"的资料（库内容是作品层面的，不是角色层面）
-  let libMaterial = '';
-  if (wantAnimeDoc) {
-    const libQ = `${work || name} 作品 世界观 设定 角色 简介`;
-    const libResults = [];
-    const seen2 = new Set();
-    try {
-      for (const r of await searchSmart(libQ, { signal: opts.signal })) {
-        const u = String(r?.url ?? '');
-        if (!u || seen2.has(u)) continue;
-        seen2.add(u);
-        libResults.push(r);
-      }
-    } catch (e) {
-      log.warn(`起草动画库：搜「${libQ}」失败：${e.message}`);
-    }
-    libMaterial = searchBlock(libQ, libResults.slice(0, 10));
-    push(libResults);
-  }
-
   const material = searchBlock(query, results.slice(0, 12));
   log.info(
     `起草人设「${name}」：搜到 ${results.length} 条资料（${material.length} 字），` +
-      `模板字段 ${hints.length} 个，动画库模式 ${mode}`,
+      `模板字段 ${hints.length} 个`,
   );
 
   // ── ② 让模型**按模板逐字段**填 ──
@@ -249,9 +333,6 @@ export async function draft(p = {}, opts = {}) {
     '## 另外两份文档',
     '',
     'drafts 里的 `persona.md` / `voices.md` 也要给（见下面字数限制）。',
-    wantAnimeDoc
-      ? '还要给 `animeLib`：这个作品的**动画库**内容（见下面）。'
-      : '（这次不需要动画库内容。）',
     '',
     '## persona.md 怎么写（⭐ 有**字数硬上限**）',
     '',
@@ -268,19 +349,6 @@ export async function draft(p = {}, opts = {}) {
     '',
     '贴几段示例对话，覆盖：打招呼 / 被夸 / 被骂 / 被问到不知道的事 / 主动接话 / 拒绝。',
     `（${MAX_VOICES_CHARS} 字以内）⚠️ 这是"人味"的关键 —— 比一堆形容词有用得多。`,
-    wantAnimeDoc
-      ? [
-          '',
-          '## animeLib 怎么写（这个作品的"常识库"）',
-          '',
-          '⚠️ 这是给**以后所有引用这个库的角色**看的世界观资料，所以写**作品层面**的东西，',
-          '不要写成某一个角色的档案：',
-          '- 这个作品是什么、有哪些乐队/团体/阵营、主要角色是谁、粉丝常用外号；',
-          '- **只写判别要点**（"认出来这是什么"就够），**剧情细节一律靠联网搜**，别往库里堆；',
-          '- 用 markdown：`## 一、判别要点` + 表格（关键词 / 是什么 / 别搞混）；',
-          `- ⚠️ ${MAX_ANIME_CHARS} 字以内。`,
-        ].join('\n')
-      : '',
   ]
     .join('\n')
     .replace('SHAPE_PLACEHOLDER', JSON.stringify(shape, null, 2));
@@ -291,22 +359,12 @@ export async function draft(p = {}, opts = {}) {
     work ? `出自：${work}` : '（用户没填出自哪部作品 —— 你自己判断，拿不准就在 notes 里说）',
     `人设包 id：${id}（identity.id 照抄这个）`,
     '',
-    '# 动画库怎么处理（**已经定好了，别自己改**）',
-    mode === 'reuse'
-      ? `复用已有的库「${reuseLib}」⇒ identity.anime.works 就是 ["${reuseLib}"]，**不要**产出 animeLib`
-      : mode === 'new'
-        ? `新建一个库「${newLib}」⇒ identity.anime.works = ["${newLib}"]，**另外产出 animeLib**（库的正文）`
-        : '不用动画库 ⇒ identity.anime.works 留空数组，**不要**产出 animeLib',
-    `（现有的库：${libs.join('、') || '无'}）`,
-    '',
     '# 输出格式',
     '{"blocked": false, "identity": {…按上面那份形状，**每个键都要有**…},',
-    ' "docs": {"persona.md": "…", "voices.md": "…"},' +
-      (wantAnimeDoc ? ' "animeLib": "…",' : ''),
+    ' "docs": {"persona.md": "…", "voices.md": "…"},',
     ' "notes": ["给用户看的提醒（例：『生日没查到，留空了』）"]}',
     '',
     material,
-    wantAnimeDoc ? `\n# 关于这个作品（写 animeLib 用）\n${libMaterial}` : '',
   ].join('\n');
 
   const raw = await collect(
@@ -334,13 +392,9 @@ export async function draft(p = {}, opts = {}) {
   const identity = mergeShape(shape, j.identity);
   identity.id = id; // ⚠️ 强制对齐（别让模型自己编一个）
 
-  // 动画库由**界面上的选择**决定，不看模型怎么写
-  const before = Array.isArray(j.identity?.anime?.works) ? j.identity.anime.works.map(String) : [];
+  // 人设起草不碰知识库；如需动画库，去知识库页单独创建，再回来关联。
   identity.anime = identity.anime && typeof identity.anime === 'object' ? identity.anime : {};
-  identity.anime.works = mode === 'reuse' ? [reuseLib] : mode === 'new' ? [newLib] : [];
-  if (before.filter((x) => !identity.anime.works.includes(x)).length) {
-    notes.push(`模型本来想引用 ${before.join('、')}，已按你在界面上的选择改成 ${identity.anime.works.join('、') || '（不用）'}`);
-  }
+  identity.anime.works = [];
 
   // 看看有哪些字段模型**没给**（给了空的也算没填）—— 直接告诉用户哪里要补
   const empties = [];
@@ -380,23 +434,11 @@ export async function draft(p = {}, opts = {}) {
   }
   if (!docs['persona.md']) notes.push('⚠️ 没有 persona.md 的人设等于"没有性格"，一定要补');
 
-  let animeLib = '';
-  if (wantAnimeDoc) {
-    animeLib = String(j.animeLib ?? '').trim();
-    if (!animeLib) notes.push(`模型没给动画库「${newLib}」的正文 —— 保存时会建一个空库，你得自己写`);
-    else if (animeLib.length > MAX_ANIME_CHARS) {
-      notes.push(`动画库超了 ${MAX_ANIME_CHARS} 字（${animeLib.length} 字），已截断`);
-      animeLib = animeLib.slice(0, MAX_ANIME_CHARS);
-    }
-  }
-
   return {
     ok: true,
     blocked: false,
     identity,
     docs,
-    animeLib,
-    animeLibName: mode === 'new' ? newLib : '',
     filledFields: hints.length - empties.length,
     totalFields: hints.length,
     notes,

@@ -21,9 +21,23 @@
     --line:rgba(20,50,90,.13); --text:#16233a; --dim:#5c6b82; --dim2:#8494a8;
     --accent:#3b6fb5; --accent-soft:rgba(59,111,181,.12); --accent-line:rgba(59,111,181,.45);
     --ok:#16a34a; --warn:#c2780a; --err:#dc2626;
+    /* ⚠️ 2026-09-23（深色模式渗色修复）：这三个原先是**写死的色值**，
+       深色模式只覆盖了上面那批变量，它们不变 ⇒ 切深色时和周围格格不入：
+         · --mono    .mono 的等宽文字（原 #9db6d8，深色底上偏暗、对比不够）
+         · --scale   收紧度刻度条的 0/50/100（原 #666，深色下是一块灰）
+         · --face-bg 表情缩略图底色（原 #0a0e13，深浅两套都得是"深衬底"）
+       规矩：**深色模式能改的颜色一律走变量**，别再在规则里写 hex。 */
+    --mono:#9db6d8; --scale:#5c6b82; --face-bg:#0a0e13;
+    /* ⚠️ 2026-09-25（用户报「知识库下拉背景是透明的，能看见背后的东西」）：
+       弹层和卡片是两回事 —— 卡片半透明是故意的（毛玻璃动效，见文件头注释），
+       但**浮在内容之上的弹层**一旦半透明就会穿透，能读到背后的正文。
+       所以下拉面板用**不透明**的三色（面板底 / 列表项底 / 列表项 hover），
+       深浅两套各一份。⚠️ 只改弹层，**别动 --card/--card2**（那两个是全站毛玻璃的）。 */
+    --pop-bg:#f4f8ff; --pop-item:#ffffff; --pop-item-hover:#eaf1fd;
     --radius:12px;
   }
   *{box-sizing:border-box}
+  html,body{overflow-x:clip}
   body{margin:0;font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
     /* ⚠️ 2026-09-17：底色不能再是一块纯色 —— 液态玻璃要「透出东西」才有意义。
        下面三层柔光分别是左上偏蓝、右上偏紫、底部偏青，再压一层蓝白线性底。 */
@@ -86,7 +100,7 @@
       0 0 0 1px rgba(255,255,255,.30),
       0 10px 34px -10px rgba(31,38,135,.20)}
   nav button{background:transparent;border:0;padding:9px 12px;border-radius:8px;cursor:pointer;
-    font-size:13.5px;color:var(--dim);text-align:left;
+    font-size:14px;color:var(--dim);text-align:left;
     /* ── Dock 放大（2026-09-17 用户要求「macOS dock 那种悬停自动放大」）──
        ⚠️ 用户后来纠正过两次，这两条都是他明确要的：
          ① **必须等比缩放** —— 第一版我用 `scale(x, y)` 横竖给不同倍数，
@@ -102,6 +116,16 @@
   nav button:hover{background:var(--accent-soft);color:var(--text)}
   nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:600;
     box-shadow:inset 2px 0 0 var(--accent)}
+  /* ── 侧栏分组标题（2026-09-23 信息架构整理）──
+     12 个栏目原来平铺一列，找东西靠扫 ⇒ 按「基础 / 内容 / 玩法 / 运行」分四组。
+     ⚠️ 只在 nav 里插 `<div class="navgrp">`，**一个 `<button>` 都没动、顺序也没动** ——
+        标签切换那段 JS 用 `document.querySelectorAll('nav button')` +
+        写死的 12 项名单，插 div 安全，动 button/顺序就会错位。 */
+  /* 字号比下级按钮（15.5px）更大、颜色从灰提到正文色 —— 分组标题才真的是"标题" */
+  .navgrp{font-size:17px;font-weight:700;letter-spacing:.04em;color:var(--text);
+    padding:14px 12px 4px;user-select:none;pointer-events:none}
+  /* 第一组紧贴顶部（nav 自己已经有 13px 内边距，别再叠一层） */
+  .navgrp:first-child{padding-top:2px}
   #problems{grid-column:1/-1}
   section{grid-column:2;min-width:0}
   /* ── 「液态玻璃」（2026-09-17 用户要求模仿 iOS 26 Liquid Glass）──
@@ -113,7 +137,7 @@
      ⚠️ 别用 `::before` 铺高光：卡片里有 h2/div，伪元素会**盖住内容**，
         还得给每个子元素补 z-index —— 这文件有 80 多处卡片子元素，补不干净。
         所以高光走 `background` 的多层渐变，不另开图层。 */
-  .card{position:relative;border-radius:22px;padding:21px 23px;margin-bottom:14px;
+  .card{position:relative;border-radius:22px;padding:20px 24px;margin-bottom:16px;
     /* ⚠️ 2026-09-17 第五版：原来那组 (.60/.26/.46) 太白了 —— 用户连报两次「没有生效」。
        查清了：**不是缓存，是白得看不出来**（六成白 + 浅底 ≈ 一张白纸）。
        ── 第六版：用户要求「加大边框的厚度，也就是能折射后方背景的那一块面积」──
@@ -193,10 +217,10 @@
       linear-gradient(to top,#000 0,#000 7px,rgba(0,0,0,0) 34px) bottom/100% 34px no-repeat,
       linear-gradient(to right,#000 0,#000 7px,rgba(0,0,0,0) 34px) left/34px 100% no-repeat,
       linear-gradient(to left,#000 0,#000 7px,rgba(0,0,0,0) 34px) right/34px 100% no-repeat}
-  .card h2{font-size:14.5px;margin:0 0 4px;font-weight:600;letter-spacing:.2px}
-  .card .hint{color:var(--dim);font-size:12.5px;margin:0 0 14px}
+  .card h2{font-size:15px;margin:0 0 6px;font-weight:600;letter-spacing:.2px}
+  .card .hint{color:var(--dim);font-size:13px;margin:0 0 12px}
   /* 说明用的表格 */
-  .tbl{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
+  .tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
   .tbl th,.tbl td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
   .tbl th{background:rgba(255,255,255,.40);font-weight:600;white-space:nowrap;color:var(--dim)}
   .tbl td:last-child{white-space:nowrap;color:var(--dim)}
@@ -204,11 +228,11 @@
   .gr-list{display:flex;flex-direction:column;gap:8px;margin-top:6px}
   .gr-row{display:flex;align-items:center;gap:12px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.34)}
   .gr-name{flex:1;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .gr-id{color:var(--dim);font-size:11.5px;margin-left:8px}
+  .gr-id{color:var(--dim);font-size:12px;margin-left:8px}
   .gr-row select{width:auto;min-width:210px;flex:0 0 auto}
   label{display:block;font-size:13px;color:var(--dim);margin:10px 0 4px}
   input[type=text],input[type=number],input[type=password],textarea,select{
-    width:100%;padding:8px 10px;border-radius:9px;font:inherit;
+    width:100%;min-width:0;padding:8px 10px;border-radius:9px;font:inherit;
     /* 输入框也走液态玻璃，但比卡片更透 —— 它是要填内容的地方，不该比卡片还抢眼 */
     background:linear-gradient(135deg,rgba(255,255,255,.42),rgba(255,255,255,.18));
     backdrop-filter:blur(18px) saturate(2.2);
@@ -254,13 +278,13 @@
   .switch:last-child{border-bottom:0}
   .switch input{width:17px;height:17px;accent-color:var(--accent)}
   .switch .t{font-size:14px}
-  .switch .d{color:var(--dim);font-size:12.5px}
-  .faces{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px;margin-top:6px}
+  .switch .d{color:var(--dim);font-size:13px}
+  .faces{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr)));gap:12px;margin-top:6px}
   .face{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--card2)}
-  .face img{width:100%;height:112px;object-fit:contain;background:#0a0e13;display:block}
+  .face img{width:100%;height:112px;object-fit:contain;background:var(--face-bg);display:block}
   .face .body{padding:8px 9px}
   .face .tag{font-weight:600;font-size:13px;margin-bottom:3px}
-  .face .when{color:var(--dim);font-size:11.5px;line-height:1.45;min-height:32px}
+  .face .when{color:var(--dim);font-size:12px;line-height:1.45;min-height:32px}
   .face .ops{display:flex;gap:6px;margin-top:7px}
   .face .ops button{flex:1;font-size:12px;padding:4px 0;border-radius:6px;border:1px solid var(--line);
     background:var(--card);color:var(--text);cursor:pointer}
@@ -269,12 +293,15 @@
   .drop.over{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
   .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;
     background:var(--accent-soft);color:var(--accent);margin-right:6px}
-  .kv{display:flex;gap:10px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+  .kv{display:flex;gap:10px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:14px}
   .kv b{color:var(--dim);font-weight:500;min-width:96px}
   /* ⚠️ 容器类：`kv()` 生成的行本身就是 .kv，外层**不能**再套 .kv ——
      套了外层就成了横向 flex，每一格被挤成一列竖排（一个字一行，2026-09-15 用户截图）。 */
-  .kvs{display:block;padding:0;border:0;font-size:13.5px}
-  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;word-break:break-all;color:#9db6d8}
+  .kvs{display:block;padding:0;border:0;font-size:14px}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:13px;word-break:break-all;color:var(--mono)}
+  /* 收紧度刻度条（0/50/100）：原来 `color:#666` 写死在 style 里 ⇒ 深色模式盖不到。
+     2026-09-23 收成 class，颜色走 --scale。 */
+  .scale-legend{display:flex;justify-content:space-between;font-size:12px;color:var(--scale)}
   details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:6px 0}
   details summary:hover{color:var(--accent)}
   .hidden{display:none}
@@ -283,12 +310,49 @@
   .rad:hover{border-color:var(--accent-line);background:var(--accent-soft)}
   .rad input{margin-top:3px;width:16px;height:16px;accent-color:var(--accent);flex-shrink:0}
   .rad .t{font-size:14px;font-weight:500}
-  .rad .d{color:var(--dim);font-size:12.5px;line-height:1.5}
+  .rad .d{color:var(--dim);font-size:13px;line-height:1.5}
+  /* ══════════════════════════════════════════════════════════════
+     内联样式的 class 化（2026-09-23 代码卫生）
+     ── 为什么做 ──
+     原来 120 多处 `style="..."` 散在标签里，同一个值（如 `margin-top:10px` 出现 9 次）
+     改一次要按 F5 全文替换；而且值和类名两套写法并存，间距慢慢就飘了。
+     ── 规矩 ──
+     ① **只收"纯展示"的**：同值 ≥1 次的机械声明才进 class；
+     ② **JS 控制的** `style="display:none"`（`#qq-qr-card` 等）**留在标签上** ——
+        JS 直接读写 `.style`，收进 class 就断链了；
+     ③ **语义色**（红/绿操作按钮）和**二维码白底**留在标签上 ——
+        前者是"这个按钮是危险操作"的语义，后者是扫码功能要求；
+     ④ 这些类只用**布局/间距/字号**，不碰颜色 ⇒ 深浅两套主题自动都对。
+     ══════════════════════════════════════════════════════════════ */
+  /* 间距 */
+  .mt4{margin-top:4px} .mt6{margin-top:6px} .mt8{margin-top:8px}
+  .mt10{margin-top:10px} .mt12{margin-top:12px} .mt14{margin-top:14px}
+  .mt20{margin-top:20px} .mb8{margin-bottom:8px}
+  .m0{margin:0} .m6y{margin:6px 0} .m6y0{margin:6px 0 0}
+  .m0b6{margin:0 0 6px} .m0b8{margin:0 0 8px} .m18y6{margin:18px 0 6px}
+  .m14y6{margin:14px 0 6px} .wauto-m0{width:auto;margin:0} .wauto{width:auto}
+  /* 弹性布局里的份数（原来写在 style 里的 flex:N） */
+  .f1{flex:1} .f12{flex:1.2} .f14{flex:1.4} .f2{flex:2} .f24{flex:2.4}
+  .fx0{flex:0 0 auto} .f1w240{flex:1;min-width:240px} .f1w260{flex:1;min-width:260px}
+  .f1pt20{flex:1;padding-top:20px} .aifs{align-items:flex-start}
+  /* 横向/纵向串联 */
+  .hstack8{display:flex;gap:8px} .vstack10{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+  .wrap8{flex-wrap:wrap;gap:8px;margin:0 0 8px}
+  .inline13{display:flex;align-items:center;gap:6px;margin:0;font-size:13px}
+  .inline13b{display:flex;align-items:center;gap:6px;font-size:13px}
+  /* 小控件 */
+  .nowrap-btn{white-space:nowrap;padding:8px 12px}
+  .hr12{border:0;border-top:1px dashed var(--line);margin:12px 0}
+  .tc{text-align:center} .tc-p12{text-align:center;padding:12px 0}
+  .mt10-13{margin-top:10px;font-size:13px;line-height:1.7}
+
   /* ── 窄屏：栏目回到顶部横排（手机上还能用）── */
   @media (max-width:820px){
     .wrap{grid-template-columns:1fr;padding:16px}
     nav{flex-direction:row;flex-wrap:wrap;position:static;grid-column:1}
     nav button{text-align:center}
+    /* 窄屏下侧栏变横排一排按钮，分组标题会挤进来变成噪音 ⇒ 直接藏掉 */
+    .navgrp{display:none}
     section,#problems{grid-column:1}
   }
   /* ══════════════════════════════════════════════════════════════
@@ -318,6 +382,10 @@
     --line:rgba(255,255,255,.11); --text:#e6edf7; --dim:#9aa8bf; --dim2:#6f7d93;
     --accent:#6ea8f0; --accent-soft:rgba(110,168,240,.16); --accent-line:rgba(110,168,240,.55);
     --ok:#4ade80; --warn:#fbbf24; --err:#f87171;
+    /* 上面 :root 那三个"写死色"在深色下的对应值（见 :root 里那段注释） */
+    --mono:#a8c3e8; --scale:#9aa8bf; --face-bg:#05080d;
+    /* 深色的弹层不透明三色（浅色那份在 :root 里） */
+    --pop-bg:#1a2233; --pop-item:#202a3d; --pop-item-hover:#26324a;
     background:
       radial-gradient(1200px 700px at 12% -8%,#16233c 0%,rgba(22,35,60,0) 62%),
       radial-gradient(1000px 620px at 92% 8%,#241d3d 0%,rgba(36,29,61,0) 60%),
@@ -396,6 +464,317 @@
      （和上面那组字重规则放一起，都属于"末尾覆盖"，想回退只删这几行。） */
   nav button{font-weight:600;font-size:15.5px}
   nav button.on{font-weight:700}
+
+  /* ══ 人设页 / 知识库页「轻整理」（2026-09-23）══
+     这两页原来都是"一列同权重卡片 + 一大段说明"，扫不出主次 ⇒ 只做三件事：
+       ① 页头导语（一句话说清这页干什么）
+       ② 卡片分级（主操作 / 普通 / 危险区）
+       ③ 警告与普通说明分开（⚠️ 警告原来混在 .hint 里，看不出哪个要当心）
+     ⚠️ 全部颜色走变量，深浅两套主题自动都对；**不动任何既有类名和 id**。 */
+  /* 页头：标题 + 一句导语 + 右侧状态 pill */
+  .pagehead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin:0 0 16px}
+  .pagehead .t{font-size:17px;font-weight:700;letter-spacing:.04em}
+  .pagehead .d{font-size:13px;color:var(--dim)}
+  /* 卡片分级：主操作卡左边框实一点，危险区用 err 色的左边框（不整块染色，避免误点） */
+  .card.primary{border-left:3px solid var(--accent)}
+  .card.danger-zone{border-left:3px solid var(--err);margin-top:24px}
+  /* 警告块：⚠️ 的那些从 .hint 里提出来，左侧色条 + 稍实一点的底 */
+  .warn{border-left:3px solid var(--warn);background:var(--card2);
+    padding:10px 14px;border-radius:0 8px 8px 0;font-size:13px;line-height:1.6;margin:0 0 12px}
+  .warn b{font-weight:600}
+  /* 中性提示（不是警告）：比如 id 格式校验 */
+  .note{border-left:3px solid var(--line);background:var(--card2);
+    padding:8px 14px;border-radius:0 8px 8px 0;font-size:13px;color:var(--dim);margin:6px 0 0;display:none}
+  .note.on{display:block}
+  /* 折叠说明：默认只露一行摘要，点开才铺开（文字一个字都不删） */
+  details.notes{margin:0 0 12px}
+  details.notes>summary{list-style:none;cursor:pointer;font-size:13px;color:var(--dim);
+    padding:6px 0;user-select:none}
+  details.notes>summary::-webkit-details-marker{display:none}
+  details.notes>summary::before{content:'▸ ';color:var(--dim2)}
+  details.notes[open]>summary::before{content:'▾ '}
+  details.notes>summary:hover{color:var(--accent)}
+  details.notes>div{padding:2px 0 4px 16px;border-left:1px dashed var(--line)}
+  /* 知识库「该往哪个库写」：原来那张横排表格改成两栏对照（内容左、落点右） */
+  .kmap{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;margin:8px 0 0}
+  .kmap>div{border:1px solid var(--line);border-radius:9px;padding:10px 12px;background:var(--card2);font-size:13px}
+  .kmap .k{color:var(--dim2);font-size:12px;display:block;margin-bottom:3px}
+  .kmap .v b{color:var(--accent);font-weight:600}
+  @media (max-width:820px){.kmap{grid-template-columns:1fr}}
+  /* 知识文件卡：左边窄（选文件 + 说明）｜右边宽（编辑器） */
+  .kedit{display:grid;grid-template-columns:minmax(220px,1fr) 2.2fr;gap:16px;align-items:start}
+  @media (max-width:820px){.kedit{grid-template-columns:1fr}}
+  .kedit .left{min-width:0}
+  .kedit .left label{display:block}
+  .kedit .left select{width:100%}
+  .kedit textarea{min-height:480px}
+  /* 字数提示：跟在编辑器下面，跟 k-desc 分开（k-desc 是服务端给的说明，不动它） */
+  .kcount{font-size:12px;color:var(--dim2);margin:6px 0 0;text-align:right}
+  /* 「它学到的」搜索框：复用既有 input 样式，只加宽度限制 */
+  .ksearch{width:min(320px,100%);margin:0 0 10px}
+  /* 空态：过滤没结果时用（灰、居中、留白） */
+  .empty{color:var(--dim2);font-size:13px;padding:8px 0;display:block}
+  /* 知识库「它学到的」列表的搜索提示行 */
+  .learned-wrap{max-height:360px;overflow:auto}
+  /* 人设页统一保存栏 */
+  .psavebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    border:1px solid var(--line);border-radius:9px;padding:10px 12px;
+    background:var(--card2);margin:12px 0 4px}
+  .psavebar .pdtext{font-size:12.5px;color:var(--dim2)}
+  .psavebar .kdirty.on + .pdtext{color:var(--dim)}
+  .pverr{margin:0 0 10px}
+  /* 未保存标记：默认不显示，kDirty(true) 时亮起来 */
+  .kdirty{display:none;color:var(--warn);font-size:15px;line-height:1}
+  .kdirty.on{display:inline}
+  /* 「我该往哪个文件写」的折叠卡：帮助文档，默认收起 */
+  .khelp{margin-top:20px}
+  .khelp > summary{cursor:pointer}
+
+  /* ══ 知识库「通栏大卡片下拉」（2026-09-25，用户要求）══
+     两组上下排列：**标题在上、整行大卡片在下**（「知识库」→ 当前库，「文件」→ 当前文件），
+     大卡片里**只放当前选中项 + 右侧一个 V**；点一下就地弹出列表面板。
+     ⚠️ 为什么不用原生 <select>：option 装不下「库名 + 个数 + 说明」「说明 + 标签 + 大小」，
+        也画不出这种通栏大卡片的观感（用户要的就是"整个大卡片下拉"）。
+     ⚠️ 面板里的列表项沿用旧版卡片内容（.klib / .kfcard）—— 只是从页面上的方块
+        搬进了弹层，**信息量一点没减**。 */
+  .kpickers{margin:0 0 8px}
+  .kpicker{position:relative;margin:0 0 12px}
+  .kpicker:last-child{margin-bottom:0}
+  .kpicker-label{display:block;margin:0 0 6px;color:var(--dim);font-size:13px}
+  .kpicker-btn{display:flex;align-items:center;gap:12px;width:100%;
+    padding:15px 18px;border:1px solid var(--line);border-radius:13px;
+    background:var(--card2);color:var(--text);font:inherit;font-size:15px;
+    text-align:left;cursor:pointer;transition:border-color .12s,background .12s}
+  .kpicker-btn:hover,.kpicker-btn:focus-visible{border-color:var(--accent-line);
+    background:var(--accent-soft);outline:none}
+  .kpicker-btn[aria-expanded="true"]{border-color:var(--accent);background:var(--accent-soft)}
+  .kpicker-value{flex:1;min-width:0;font-weight:600;line-height:1.4;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .kpicker-value.is-empty{font-weight:400;color:var(--dim2)}
+  /* 右侧那个 V：两条边拼出来的，不是字体符号 ⇒ 深浅主题都一致 */
+  .chev{flex:0 0 auto;width:9px;height:9px;margin-right:3px;
+    border-right:2px solid var(--dim);border-bottom:2px solid var(--dim);
+    transform:rotate(45deg) translate(-2px,-2px);transition:transform .12s}
+  .kpicker-btn[aria-expanded="true"] .chev{transform:rotate(225deg) translate(-2px,-2px)}
+  .kpicker-menu{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:30;
+    max-height:min(62vh,430px);overflow:auto;padding:8px;border-radius:13px;
+    border:1px solid var(--line);background:var(--pop-bg);
+    backdrop-filter:none;-webkit-backdrop-filter:none;
+    /* ⚠️ 弹层**不许**用 --card（那个是 .34/.07 的半透明毛玻璃），
+       也不许叠 backdrop-filter：两层一起会让背后的正文透出来。
+       这里要的是"挡住背后"，所以纯不透明实色 + 一层就够的阴影。 */
+    box-shadow:0 14px 34px -14px rgba(31,38,135,.45)}
+  .kpicker-menu.hidden{display:none}
+  /* 弹层里的列表项：按钮化（列表项要能被 Tab 聚焦、Enter 选中）。
+     底色同样走**不透明**的 --pop-item（和面板底 --pop-bg 一起才能挡住背后正文）。 */
+  .klib,.kfcard{display:block;width:100%;margin:0 0 6px;border:1px solid var(--line);
+    border-radius:11px;background:var(--pop-item);padding:11px 13px;font:inherit;color:var(--text);
+    text-align:left;cursor:pointer;transition:border-color .12s,background .12s}
+  .klib:last-child,.kfcard:last-child{margin-bottom:0}
+  .klib:hover,.kfcard:hover{border-color:var(--accent-line);background:var(--pop-item-hover)}
+  .klib.on,.kfcard.on{border-color:var(--accent);background:var(--accent-soft);
+    box-shadow:inset 3px 0 0 var(--accent)}
+  .klib .klt{font-size:14.5px;font-weight:600;display:flex;align-items:center;gap:7px}
+  .klib .kln{display:block;font-size:12.5px;color:var(--dim);margin-top:3px;line-height:1.5}
+  .kfcard .fn2{display:flex;align-items:center;gap:6px;font-size:13.5px;font-weight:600;
+    line-height:1.4}
+  .kfcard .fn2 .fnl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .kfcard .fsz{display:block;font-size:11.5px;color:var(--dim2);margin-top:3px}
+  .kflib-hint{font-size:12.5px;color:var(--dim2);margin:0 0 12px;line-height:1.5;
+    min-height:19px;position:relative;z-index:0}
+  .kfile-wrap{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;align-items:start}
+  @media (max-width:900px){.kfile-wrap{grid-template-columns:minmax(0,1fr)}}
+  /* 右侧信息区：标签 + desc（不再显示原始文件名） */
+  .kinfo{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .kinfo .desc{font-size:13px;color:var(--dim);margin:0 0 10px;line-height:1.6}
+  .kinfo .desc b{color:var(--text);font-weight:600}
+  /* 标签（替代原来行内的 📌 和括号文字） */
+  .tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;
+    border:1px solid var(--line);color:var(--dim2);background:var(--card2)}
+  .tag.accent{border-color:var(--accent-line);color:var(--accent);background:var(--accent-soft)}
+  .tag.warn{border-color:var(--warn);color:var(--warn)}
+  .tag.ok{border-color:var(--ok);color:var(--ok)}
+  /* 编辑器外壳：行号槽 + 文本域并排 */
+  .kedit-body{display:grid;grid-template-columns:auto minmax(0,1fr);border:1px solid var(--line);
+    border-radius:9px;background:var(--card2);overflow:hidden}
+  /* ⚠️ 通用 .hidden 在本段之前；同为单类选择器时，后面的 display:grid 会把它盖掉，
+     结果就是点「预览」后编辑框仍留在预览上方。这里用双类选择器明确二选一。 */
+  .kedit-body.hidden{display:none}
+  .kgutter{padding:10px 8px 10px 10px;text-align:right;
+    font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.6;
+    color:var(--dim2);background:var(--card);border-right:1px solid var(--line);
+    overflow:hidden;user-select:none;white-space:pre}
+  .kedit-body textarea{border:0;border-radius:0;background:transparent;min-height:620px;
+    padding:10px 12px;line-height:1.6;resize:vertical}
+  .kedit-body textarea:focus{outline:none}
+  /* 预览视图：Markdown 渲染后的样子 */
+  .kpreview{padding:14px 18px;overflow:auto;max-height:620px;min-height:620px;
+    font-size:14px;line-height:1.75}
+  .kpreview h1{font-size:20px;margin:18px 0 8px;font-weight:700}
+  .kpreview h2{font-size:17px;margin:16px 0 6px;font-weight:700}
+  .kpreview h3{font-size:15px;margin:14px 0 6px;font-weight:600}
+  .kpreview p{margin:8px 0}
+  .kpreview ul,.kpreview ol{margin:8px 0;padding-left:22px}
+  .kpreview li{margin:3px 0}
+  .kpreview code{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;
+    background:var(--card);padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+  .kpreview pre{background:var(--card);border:1px solid var(--line);border-radius:8px;
+    padding:10px 12px;overflow:auto}
+  .kpreview pre code{background:none;border:0;padding:0}
+  .kpreview blockquote{margin:8px 0;padding:4px 12px;border-left:3px solid var(--line);color:var(--dim)}
+  .kpreview hr{border:0;border-top:1px solid var(--line);margin:14px 0}
+  .kpreview table{border-collapse:collapse;font-size:13px;margin:8px 0}
+  .kpreview td,.kpreview th{border:1px solid var(--line);padding:5px 9px}
+  /* 校验条：不合格红字只是提示，后端保存时才会拒 */
+  .kvalid{font-size:12.5px;margin:6px 0 0;display:none}
+  .kvalid.on{display:block}
+  .kvalid.bad{color:var(--err)}
+  .kvalid.good{color:var(--ok)}
+  /* 编辑/预览切换 + 按钮行 */
+  .kmodes{display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap}
+  .kmodes .seg{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .kmodes .seg button{border:0;border-radius:0;background:transparent;padding:7px 14px;
+    cursor:pointer;font-size:13px;color:var(--dim)}
+  .kmodes .seg button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .spacer2{flex:1}
+
+  /* ══ 人设页 P1–P3（2026-09-23）══
+     P1 两张 primary 卡（「当前人设」「切换人设」）合成一张状态卡 + 就地展开的切换区
+     P2 科普文字收成 `?` 小圆点（点/回车展开，不靠 hover —— 触屏也能用）
+     P3 「新建人设」三列真栅格 + AI/手动分段
+     ⚠️ 颜色一律走变量；不动任何既有 id。 */
+  /* 状态卡：头像 + 名字 + 键值 + 切换按钮 */
+  .pprofile{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+  .pprofile .ava{width:64px;height:64px;flex:0 0 64px;border-radius:14px;overflow:hidden;
+    background:var(--face-bg);border:1px solid var(--line);
+    display:flex;align-items:center;justify-content:center;
+    font-size:24px;font-weight:700;color:var(--dim2)}
+  .pprofile .ava img{width:100%;height:100%;object-fit:cover;display:block}
+  .pprofile .meta{flex:1;min-width:200px}
+  .pprofile .nm{font-size:19px;font-weight:700;letter-spacing:.02em;margin-bottom:4px}
+  .pprofile .act2{flex:0 0 auto}
+  @media (max-width:820px){.pprofile .act2{flex:1 0 100%}}
+  /* 状态卡里的键值行：比通用 .kv 更紧凑（原来是 5 行 .kv，太占地方） */
+  .kv2{display:flex;flex-wrap:wrap;gap:6px}
+  .kv2>span{display:inline-flex;align-items:baseline;gap:5px;font-size:12.5px;
+    padding:3px 9px;border-radius:20px;background:var(--card2);border:1px solid var(--line);color:var(--dim)}
+  .kv2>span b{color:var(--dim2);font-weight:500}
+  .kv2>span.mono{font-family:ui-monospace,Consolas,monospace}
+  /* 就地展开的切换区：上面一条细线 + 一点上边距，跟主区隔开 */
+  .pswitch{border-top:1px dashed var(--line);margin-top:12px;padding-top:12px}
+  /* P2：`?` 小圆点。**不用纯 hover tooltip**（移开就没了、不能排版、触屏触发不了）
+     —— 点它 / 键盘聚焦它就把 data-q 的文字就地展开在下方；再点收起。 */
+  .q{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
+    border-radius:50%;border:1px solid var(--line);background:var(--card2);
+    font-size:10px;line-height:1;color:var(--dim2);cursor:help;
+    vertical-align:middle;margin-left:4px;user-select:none}
+  .q:hover,.q:focus{border-color:var(--accent-line);color:var(--accent);outline:none}
+  .q.open{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+  .qbox{font-size:12.5px;color:var(--dim);line-height:1.6;margin:6px 0 0;
+    padding:8px 12px;border-left:3px solid var(--accent-line);background:var(--card2);
+    border-radius:0 7px 7px 0;max-width:640px}
+  /* P3：三列真栅格（等宽），窄屏退成两列 / 一列 */
+  .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+  @media (max-width:900px){.grid3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media (max-width:620px){.grid3{grid-template-columns:minmax(0,1fr)}}
+  .grid3 .fld{min-width:0}
+  /* 新建人设：三个基础字段共用同一套结构；动画库在知识库页单独新建。 */
+  .new-form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start}
+  .new-form-grid .fld{min-width:0}
+  @media (max-width:1050px){.new-form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media (max-width:620px){.new-form-grid{grid-template-columns:minmax(0,1fr)}}
+  .new-template-row{display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;margin-top:14px}
+  .new-template-row.hidden{display:none}
+  .new-template-row .fld{flex:1 1 320px;min-width:0}
+  .new-template-row .hint{flex:1 1 260px;margin:0 0 2px}
+  .alert-info{border-left:3px solid var(--accent);background:var(--card2);
+    padding:10px 14px;border-radius:0 8px 8px 0;font-size:13px;color:var(--dim);line-height:1.6;
+    margin:14px 0 0;display:flex;align-items:flex-start;gap:8px}
+  .alert-info .alert-icon{flex:0 0 auto}
+  .alert-info .q{margin-top:1px}
+  .tooltip{position:relative;display:inline-flex;align-items:center;justify-content:center;
+    width:16px;height:16px;flex:0 0 16px;border:1px solid var(--line);border-radius:50%;
+    color:var(--dim2);font-size:10px;cursor:help;user-select:none;outline:none}
+  .tooltip:hover,.tooltip:focus{border-color:var(--accent-line);color:var(--accent)}
+  .tooltip::after{content:attr(data-tip);position:absolute;left:50%;bottom:calc(100% + 8px);
+    transform:translateX(-50%) translateY(3px);width:max-content;max-width:260px;padding:7px 10px;
+    border:1px solid var(--line);border-radius:7px;background:var(--card);color:var(--text);
+    box-shadow:0 5px 18px rgba(0,0,0,.2);font-size:12px;line-height:1.5;white-space:normal;
+    opacity:0;visibility:hidden;pointer-events:none;transition:opacity .12s,transform .12s;z-index:20}
+  .tooltip:hover::after,.tooltip:focus::after{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0)}
+
+  /* ══ 人设页 P4–P5（2026-09-23）══
+     P4 提示词整句卡：标签换中文标题、code key 降级成灰色 tag、常用项并排、其余折叠
+     P5 结构化设置卡：3 列/2 列栅格、Tag Input、hint 分流（例→placeholder / 规则→? 圆点）
+     ⚠️ 颜色一律走变量；不动任何既有 id。 */
+  .fkey{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:var(--dim2);
+    border:1px solid var(--line);border-radius:5px;padding:0 5px;margin-left:6px;
+    background:var(--card2);vertical-align:middle;user-select:all}
+  .fld>label{display:flex;align-items:center;flex-wrap:wrap;gap:0}
+  /* P5：两列栅格 + 「占满整行」标记（JSON textarea 必须全宽） */
+  .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 18px;align-items:start}
+  @media (max-width:900px){.grid2{grid-template-columns:minmax(0,1fr)}}
+  /* 「各自独占一整行」用（提示词那三句是整段话，挤半栏没法读） */
+  .gridfull{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
+  .gridfull .fld{min-width:0}
+  .grid2 .fld,.grid3 .fld{min-width:0}
+  .fld.full{grid-column:1/-1}
+  .fld .hlabel{font-size:12px;color:var(--dim);margin:3px 0 0;line-height:1.5}
+  /* P5：Tag Input。⚠️ 真正的值**始终存在旁边的 hidden input 里**（`、`-分隔），
+     所以 `personaCollectIdentity()` 那几行**一个字都不用改** —— 标签只是 nicer 的皮。 */
+  .tags{display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-height:34px;
+    border:1px solid var(--line);border-radius:8px;padding:4px 6px;background:var(--card2)}
+  .tags:focus-within{border-color:var(--accent-line)}
+  .tags .tagitem{display:inline-flex;align-items:center;gap:3px;padding:2px 4px 2px 9px;
+    border-radius:20px;font-size:12.5px;background:var(--accent-soft);color:var(--accent);
+    border:1px solid var(--accent-line);max-width:100%;min-width:0}
+  .tags .tagitem span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .tags .tagitem button{border:0;background:transparent;color:inherit;cursor:pointer;
+    font-size:14px;line-height:1;padding:0 3px;border-radius:50%;opacity:.65}
+  .tags .tagitem button:hover{opacity:1;background:var(--accent);color:var(--card)}
+  .tags .tagadd{flex:1;min-width:110px;border:0;background:transparent;color:var(--text);
+    font-size:13px;padding:4px 2px;outline:none;min-width:0}
+  .tags .tagadd::placeholder{color:var(--dim2)}
+  /* 四个称呼字段统一：输入框固定在第一整行，标签列表另起一行。
+     空值时只显示一个不可删除的示例气泡，不把示例写进 identity。 */
+  .tags-stacked{display:grid;grid-template-columns:minmax(0,1fr);gap:6px}
+  .tags-stacked .tagadd{flex:none;width:100%;padding:5px 2px 7px;
+    border-bottom:1px solid var(--line)}
+  .tags-stacked .taglist{display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-height:28px}
+  .tags .tagitem.example{background:transparent;color:var(--dim2);border-style:dashed;
+    padding:2px 10px;cursor:default;opacity:.85}
+
+  /* ══ 2026-09-23 第四轮（用户清单）══
+     · textarea 边框要「看得见」（原来跟 input 一样是半透明玻璃边，多行框看着像没框）
+     · 危险区更醒目
+     · 人设身份页只列出现成动画库；新建入口统一放在知识库页
+     ⚠️ 颜色一律走变量；不动任何既有 id。 */
+  /* 多行输入框：边框用 --line 实边（比玻璃亮线清楚），文字顶格，回车即换行（textarea 本来就是） */
+  textarea{border:1px solid var(--line);vertical-align:top;line-height:1.6;
+    padding:10px 12px;min-height:76px;white-space:pre-wrap}
+  textarea:focus{border-color:var(--accent-line)}
+  /* JSON 那种"代码框"再加一层等宽 + 更实的底 */
+  textarea.code{border-color:var(--dim2);background:var(--card)}
+  /* 危险区：红左边框 + 顶部一条警示带（原来只有左边框，不够醒目） */
+  .card.danger-zone{position:relative;margin-top:28px}
+  .card.danger-zone::before{content:'⚠ 危险操作 —— 下面这张卡里的东西点一下就生效，没有撤销';
+    display:block;margin:-20px -24px 14px;padding:9px 24px;
+    background:var(--err);color:#fff;font-size:12.5px;font-weight:600;letter-spacing:.03em;
+    border-radius:22px 22px 0 0}
+  body.dark .card.danger-zone::before{color:#1a0a0a}
+  /* 人设身份页：只列出现成动画库；新建统一在知识库页 */
+  .libpick{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+  .libpick select{flex:1;min-width:150px}
+  .libpick button{flex:0 0 auto;white-space:nowrap}
+  /* 知识库页：新建动画库入口（AI 起草 → 预览 → 保存） */
+  .knewbar{margin:0 0 14px}
+  .knewbar>.hint{margin:6px 0 0}
+  .knewbox,.knewpreview{margin-top:10px;padding:12px 14px;border:1px solid var(--line);
+    border-radius:10px;background:var(--card2)}
+  .knewbox.hidden,.knewpreview.hidden,.knewbar.hidden{display:none}
+  .knewpreview>label{display:block;margin-bottom:6px;color:var(--dim)}
+  .knewpreview textarea{min-height:240px}
+  .knewpreview .btns{margin-top:10px}
 </style>
 </head>
 <body>
@@ -415,37 +794,46 @@
   <div id="problems"></div>
 
   <nav>
+    <div class="navgrp">基础</div>
     <button data-tab="model" class="on">模型</button>
     <button data-tab="groups">群与触发</button>
-    <button data-tab="faces">表情包</button>
-    <button data-tab="knowledge">知识库</button>
-    <!-- ⚠️ 2026-09-21：人设**单独一页**（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
+    <div class="navgrp">内容</div>
+    <!-- ⚠️ 2026-09-21：人设单独一页（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
     <button data-tab="persona">人设</button>
+    <button data-tab="knowledge">知识库</button>
+    <button data-tab="faces">表情包</button>
+    <div class="navgrp">玩法</div>
     <button data-tab="qzone">QQ空间</button>
+    <!-- ⚠️ 2026-09-16：按群设定单独一页（它管日常事件 + 二级剧情 + 收紧度三样） -->
+    <button data-tab="groupcfg">按群设定</button>
     <button data-tab="life">日常事件</button>
     <button data-tab="quest">二级剧情</button>
-    <!-- ⚠️ 2026-09-16：按群设定**单独一页**（它管日常事件 + 二级剧情 + 收紧度三样） -->
-    <button data-tab="groupcfg">按群设定</button>
     <button data-tab="affinity">好感度 / 好友</button>
-    <button data-tab="qqlogin">QQ登录</button>
-      <button data-tab="status">运行状态</button>
+    <div class="navgrp">运行</div>
+    <button data-tab="qqlogin">QQ 登录</button>
+    <button data-tab="status">运行状态</button>
   </nav>
 
   <!-- 模型 -->
   <section id="tab-model">
-    <div class="card">
+    <div class="pagehead">
+      <div class="t">模型（主人 / 机器人）</div>
+      <div class="d">她是谁、叫什么、用哪个模型、能发照片</div>
+    </div>
+
+    <div class="card primary">
       <h2>身份（主人 / 机器人）</h2>
       <p class="hint">
-        「<b>主人</b>」= 这台机器人**归谁**（原来的叫法是"群主/服主"，用户 2026-09-15 改叫<b>主人</b>）。
-        对他说话是**同级口吻**、不走客服那套；好感度那套也**对他不生效**。<br>
-        「<b>机器人账号</b>」= 它自己那个 QQ —— **登录脚本（一键启动）也读这里**去做快速登录，所以别填错。
+        「<b>主人</b>」= 这台机器人<b>归谁</b>（原来的叫法是"群主/服主"，用户 2026-09-15 改叫<b>主人</b>）。
+        对他说话是<b>同级口吻</b>、不走客服那套；好感度那套也<b>对他不生效</b>。<br>
+        「<b>机器人账号</b>」= 它自己那个 QQ —— <b>登录脚本（一键启动）也读这里</b>去做快速登录，所以别填错。
       </p>
       <div class="row">
-        <div style="flex:1">
+        <div class="f1">
           <label>主人 QQ</label>
           <input type="text" id="id-ownerQQ" placeholder="例如 10000001">
         </div>
-        <div style="flex:1">
+        <div class="f1">
           <label>机器人 QQ</label>
           <input type="text" id="id-botQQ" placeholder="例如 10000002">
         </div>
@@ -460,19 +848,19 @@
       <h2>大模型</h2>
       <p class="hint">换成别的服务（百炼、Kimi、本地 Ollama…）也可以，只要兼容 OpenAI 接口。改完记得保存。</p>
       <div class="row">
-        <div style="flex:2">
+        <div class="f2">
           <label>API 地址（baseURL）</label>
           <input type="text" id="llm-baseURL" placeholder="https://api.deepseek.com/v1">
         </div>
-        <div style="flex:1.4">
+        <div class="f14">
           <label>模型（点右边按钮从 API 拉取列表）</label>
-          <div style="display:flex;gap:8px">
-            <select id="llm-model" style="flex:1"></select>
-            <button class="ghost" onclick="loadModels()" id="btn-models" style="white-space:nowrap;padding:8px 12px">刷新列表</button>
+          <div class="hstack8">
+            <select id="llm-model" class="f1"></select>
+            <button class="ghost nowrap-btn" onclick="loadModels()" id="btn-models">刷新列表</button>
           </div>
         </div>
       </div>
-      <p class="hint" id="model-hint" style="margin-top:8px"></p>
+      <p class="hint mt8" id="model-hint"></p>
       <label>API Key</label>
       <input type="password" id="llm-apiKey" placeholder="sk-...">
       <div class="row">
@@ -486,28 +874,141 @@
         <span class="msg" id="msg-llm"></span>
       </div>
     </div>
+
+    <div class="pagehead">
+      <div class="t">生图（群里让她「拍个照」）</div>
+      <div class="d">配好后群里说「拍个照」，由她自己判断要不要拍</div>
+    </div>
+
+    <div class="card">
+      <p class="hint">
+        配好之后她就能真的发一张自己的照片 —— 群里说「拍个照」，<b>由她自己判断要不要拍</b>。<br>
+        换服务商只改下面几行，不用改代码。
+        <b>ark</b> = 火山方舟 · 豆包 Seedream（0.20 元/张，<b>参考图直接传本地立绘，不用图床</b>）；
+        <b>openai</b> = 任意 OpenAI 风格的生图接口（如硅基流动 Qwen-Image-Edit，0.30 元/张）。<br>
+        ⚠️ 参考图在「人设」页上传（跟着角色走，换人设自动换脸）。
+      </p>
+      <div class="row">
+        <div class="f12">
+          <label>服务商</label>
+          <select id="ig-provider" onchange="igProviderChanged()">
+            <option value="ark">ark（火山方舟 · Seedream）</option>
+            <option value="openai">openai（硅基流动等兼容接口）</option>
+          </select>
+        </div>
+        <div class="f24">
+          <label>API 地址（留空 = 用该服务商的默认地址）</label>
+          <input type="text" id="ig-baseURL" placeholder="留空即用默认">
+        </div>
+      </div>
+      <div class="row">
+        <div class="f24">
+          <label>模型（点「刷新列表」从 API 拉，也可以直接打字）</label>
+          <div class="hstack8">
+            <input type="text" id="ig-model" list="ig-model-list" class="f1" placeholder="留空即用默认">
+            <button class="ghost nowrap-btn" onclick="igLoadModels()" id="btn-ig-models">刷新列表</button>
+          </div>
+          <datalist id="ig-model-list"></datalist>
+        </div>
+        <div class="f1">
+          <label>尺寸</label>
+          <input type="text" id="ig-size" list="ig-size-list" placeholder="2K">
+          <datalist id="ig-size-list"></datalist>
+        </div>
+      </div>
+      <p class="hint mt8" id="ig-model-hint"></p>
+
+      <div class="grp">固定画风提示词 —— ⚠️ 和「每次现算的」是两层，别混</div>
+      <p class="hint m0b8">
+        这里只管<b>画风</b>（背景写实 / 人物二次元 / 随手拍感），写一次就一直生效。<br>
+        <b>时间、地点、拍什么</b>是每次拍照现算的：时间地点取<b>她此刻的真实状态</b>，内容另跑一次模型理解。
+      </p>
+      <label>画面里<b>有她</b>时用（自拍 / 别人帮她拍）</label>
+      <textarea id="ig-style-self" rows="4"></textarea>
+      <label class="mt10">画面里<b>没有她</b>时用（她拍下来的东西：校门、街景、货架…）</label>
+      <textarea id="ig-style-scene" rows="3"></textarea>
+
+      <label>API Key</label>
+      <input type="password" id="ig-apiKey" placeholder="填这家平台的 Key">
+      <div class="row">
+        <div><label>超时（毫秒）</label><input type="number" id="ig-timeoutMs"></div>
+        <div><label>防连拍间隔（毫秒，0 = 不限）</label><input type="number" id="ig-cooldownMs"></div>
+      </div>
+
+      <div class="grp">本地缓存 —— 生成图会自动删掉</div>
+      <p class="hint m0b8">
+        发出去的图是<b>上传给协议端的副本</b>，所以删本地<b>不影响群里已经发出的图</b> ——
+        留着只是为了重看和排障，默认留一天。
+      </p>
+      <div class="row">
+        <div class="f12">
+          <label>保留多少小时后自动删（0 = 不删）</label>
+          <input type="number" id="ig-keepHours" min="0">
+        </div>
+        <div class="f1pt20">
+          <span class="hint" id="ig-cache-info">…</span>
+        </div>
+        <button class="ghost nowrap-btn" onclick="igSweep()" id="btn-ig-sweep">立即清理</button>
+      </div>
+      <div class="grp">测试出图 —— ⚠️ 会真的出一张（Seedream 4.0 约 0.2 元/张）</div>
+      <p class="hint m0b8">
+        这个输入框 = <b>「假装群友说的那句话」</b>，下面会走**和群里完全相同**的流程
+        （先理解拍什么 → 时间地点取她此刻的真实状态 → 拼画风 → 出图），并把她「理解成了什么」显示出来。
+      </p>
+      <div class="row">
+        <div class="f24">
+          <label>假装群友说（留空用默认）</label>
+          <input type="text" id="ig-testScene" placeholder="例：拍张你现在的样子 / 能拍一张月之森校门吗">
+        </div>
+        <div class="f1">
+          <label>她自己写的标记</label>
+          <select id="ig-testKind">
+            <option value="auto">不写，让理解判断</option>
+            <option value="self">[拍照] 画面里有她</option>
+            <option value="scene">[拍] 她拍的东西</option>
+          </select>
+        </div>
+      </div>
+      <div class="btns">
+        <label class="inline13">
+          <input type="checkbox" id="ig-enable" class="wauto"> 启用
+        </label>
+        <button class="act" onclick="saveImagegen()">保存</button>
+        <button class="ghost" onclick="testImagegen()">测试出图</button>
+        <span class="msg" id="msg-ig"></span>
+      </div>
+      <div id="ig-preview" class="mt10"></div>
+    </div>
   </section>
 
   <!-- 群与触发 -->
   <section id="tab-groups" class="hidden">
-    <div class="card">
-      <h2>它能在哪些群说话</h2>
-      <p class="hint">
-        ⚠️ <b>这个名单同时决定两件事</b>：① 不在名单里的群，消息它<b>完全不处理</b>；
-        ② <b>只有名单里的群，它才会主动搭话</b>（没 @ 它也接）。<br>
-        一行一个群号。留空 = 所有群都应答（不推荐，客服容易在无关的群里乱说话）。<br>
-        不知道群号？在目标群里随便发条消息，然后看机器人日志，或者用
-        <span class="mono">node test/group-history.js</span> 拉群列表。<br>
-        ⚠️ 想让它<b>主动搭话</b>，除了填在这里，那个群的<b>灵敏度还要设成 1 或 2</b>
-        （在「每个群的灵敏度」里设）；3 档只认 @。
-      </p>
+    <div class="pagehead">
+      <div class="t">群与触发</div>
+      <div class="d">决定她在哪些群说话、回得多主动、谁能教她</div>
+    </div>
+
+    <!-- 回复与分条是本页最常用的节奏设置，单独放在第一张卡片。 -->
+    <div class="card primary">
+      <h2>回复与分条 <span class="pill" id="msg-trigger"></span></h2>
+      <p class="hint">她每条回多长、隔多久再回、记几轮对话。</p>
+      <div class="row">
+        <div><label>记忆轮数</label><input type="number" id="trigger-historyRounds"></div>
+        <div><label>冷却（毫秒）</label><input type="number" id="trigger-cooldownMs"></div>
+        <div><label>单条最多字数</label><input type="number" id="chunking-maxChars"></div>
+        <div><label>分条间隔（毫秒）</label><input type="number" id="chunking-delayMs"></div>
+        <div><label>分条间隔上限（毫秒，留空=不随机）</label><input type="number" id="chunking-delayMaxMs"></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveTrigger()">保存回复节奏</button>
+      </div>
+    </div>
+
+    <div class="card primary">
+      <h2>它能在哪些群说话 <span class="q" tabindex="0" data-q="⚠️ 这个名单同时决定两件事：① 不在名单里的群，消息它完全不处理；② 只有名单里的群，它才会主动搭话（没 @ 它也接）。一行一个群号。留空 = 所有群都应答（不推荐）。⚠️ 想让它主动搭话，除了填在这里，那个群的灵敏度还要设成 1 或 2；3 档只认 @。">?</span></h2>
       <textarea id="trigger-allowGroups" rows="4" placeholder="200000001"></textarea>
 
-      <h3 style="margin:18px 0 6px">它能回应哪些人的私聊</h3>
-      <p class="hint">
-        一行一个 QQ 号。<b>只有名单中的人私聊时，它才会回应</b>；留空 = 不回应任何私聊。<br>
-        这与群聊白名单分开：即使开启「私聊应答」，也不会放开未列入名单的陌生人。
-      </p>
+      <h3 class="m18y6">它能回应哪些人的私聊 <span class="q" tabindex="0" data-q="一行一个 QQ 号。只有名单中的人私聊时，它才会回应；留空 = 不回应任何私聊。这与群聊白名单分开：即使开启「私聊应答」，也不会放开未列入名单的陌生人。">?</span></h3>
       <textarea id="trigger-allowPrivateUsers" rows="4" placeholder="10000001"></textarea>
 
       <div class="switch">
@@ -523,7 +1024,7 @@
         <div><div class="t">群里需要 @ 才回复</div><div class="d">旧选项，下面选了灵敏度之后以灵敏度为准</div></div>
       </div>
       <div class="btns">
-        <!-- ⚠️ 保存按钮必须放在**这个卡片里**。
+        <!-- ⚠️ 保存按钮必须放在这个卡片里。
              以前它只在下面「回复与分条」那个卡片里，用户在这儿填完群号
              根本找不到保存按钮（真实反馈：「我都不知道哪个按钮是保存群号的」）。 -->
         <button class="act" onclick="saveTrigger()">保存以上设置</button>
@@ -531,10 +1032,10 @@
       </div>
     </div>
 
-    <div class="card">
-      <h2>群里回复灵敏度</h2>
-      <p class="hint">决定它在群里多主动。越往下越活跃，但也越费 token。</p>
-      <div style="display:flex;flex-direction:column;gap:10px;margin-top:6px">
+    <div class="card primary">
+      <h2>群里回复灵敏度（全局默认）</h2>
+      <p class="hint">决定它在群里多主动。越往下越活跃，但也越费 token。<br>单个群要不一样，去下面「按群参数」那张卡。</p>
+      <div class="vstack10">
         <label class="rad">
           <input type="radio" name="respondTo" value="3">
           <div><div class="t">③ 只有 @ 它才回复</div><div class="d">最安静。群里不 @ 它它就不说话，除非命中关键词。</div></div>
@@ -555,40 +1056,31 @@
     </div>
 
     <div class="card">
-      <h2>① 档的「收紧度」（按群）</h2>
-      <p class="hint">
-        <b>只对灵敏度 ① 的群生效</b>（② ③ 本来就是安静档，不受这里影响）。<br>
-        往左 = 更活跃，往右 = 更安静。<b>改了当场生效，不用重启。</b>
-        <br>⚠️ **按群各设各的**（2026-09-15 晚）：热闹的大群可以调松一点（才接得上话），
-        严肃的群可以调紧。<b>没设过的群 = 默认 50</b>。
-      </p>
-      <div class="kv" style="flex-wrap:wrap;gap:8px;margin:0 0 8px">
+      <h2>按群参数（每个群可以不一样）</h2>
+      <h3 class="m18y6">① 档的「收紧度」<span class="q" tabindex="0" data-q="只对灵敏度 ① 的群生效（② ③ 本来就是安静档）。往左=更活跃，往右=更安静。改了当场生效，不用重启。按群各设各的：热闹的大群可以调松一点，严肃的群可以调紧。没设过的群 = 默认 50。">?</span></h3>
+
+      <div class="kv wrap8">
         <b>哪个群</b>
-        <select id="strict-group" style="width:auto;margin:0" onchange="fillStrictForGroup()"></select>
-        <span class="hint" style="margin:0" id="strict-group-note"></span>
+        <select id="strict-group" class="wauto-m0" onchange="fillStrictForGroup()"></select>
+        <span class="hint m0" id="strict-group-note"></span>
       </div>
-      <div style="margin:14px 0 6px">
+      <div class="m14y6">
         <input type="range" id="strictness" min="0" max="100" step="5" value="50"
                style="width:100%" oninput="onStrictInput()">
       </div>
-      <div style="display:flex;justify-content:space-between;font-size:12px;color:#666">
+      <div class="scale-legend">
         <span>0 · 最活跃</span><span>50 · 平衡</span><span>100 · 最克制</span>
       </div>
-      <div id="strict-desc" style="margin-top:10px;font-size:13px;line-height:1.7"></div>
+      <div id="strict-desc" class="mt10-13"></div>
       <div class="btns">
         <button class="act" onclick="saveStrictForGroup()">保存这个群的</button>
         <button class="ghost" onclick="clearStrictForGroup()">还原成默认（50）</button>
         <span class="msg" id="msg-strict-group"></span>
       </div>
-    </div>
 
-    <div class="card">
-      <h2>分群调节（每个群可以不一样）</h2>
-      <p class="hint">
-        上面那个是**全局默认**。这里可以给**单个群**单独设一档 ——
-        比如大群收紧成「只认 @」，熟人小群放开成「什么都能聊」。<br>
-        选「跟随全局」就用上面的默认值。
-      </p>
+      <hr class="hr12">
+
+      <h3 class="m18y6">分群灵敏度（单个群单独设一档）<span class="q" tabindex="0" data-q="上面的灵敏度是全局默认，这里能给单个群单独设一档 —— 比如大群收紧成「只认 @」，熟人小群放开成「什么都能聊」。选「跟随全局」就用默认值。">?</span></h3>
       <div id="group-respond-list" class="gr-list">加载中…</div>
       <div class="btns">
         <button class="ghost" onclick="loadGroupRespond()">刷新群列表</button>
@@ -597,8 +1089,8 @@
     </div>
 
     <div class="card">
-      <h2>谁能教它</h2>
-      <p class="hint">群里默认只认群主和管理员（靠 QQ 角色判断）。这里可以额外授权某些 QQ 号，一行一个。</p>
+      <h2>其他规则（教学 / 服务器查询）</h2>
+      <h3 class="m18y6">谁能教它<span class="q" tabindex="0" data-q="群里默认只认群主和管理员（靠 QQ 角色判断）。这里可以额外授权某些 QQ 号，一行一个。">?</span></h3>
       <textarea id="teach-teachers" rows="3" placeholder="（留空 = 只认群主和管理员）"></textarea>
       <div class="switch">
         <input type="checkbox" id="teach-allowPrivateTeach">
@@ -610,31 +1102,16 @@
           <input type="text" id="teach-keywords" placeholder="记住,你需要知道,更正一下">
         </div>
       </div>
-    </div>
 
-    <div class="card">
-      <h2>回复与分条</h2>
-      <div class="row">
-        <div><label>记忆轮数</label><input type="number" id="trigger-historyRounds"></div>
-        <div><label>冷却（毫秒）</label><input type="number" id="trigger-cooldownMs"></div>
-        <div><label>单条最多字数</label><input type="number" id="chunking-maxChars"></div>
-        <div><label>分条间隔（毫秒）</label><input type="number" id="chunking-delayMs"></div>
-        <div><label>分条间隔上限（毫秒，留空=不随机）</label><input type="number" id="chunking-delayMaxMs"></div>
-      </div>
-      <div class="btns">
-        <button class="act" onclick="saveTrigger()">保存以上设置</button>
-        <span class="msg" id="msg-trigger"></span>
-      </div>
-    </div>
+      <hr class="hr12">
 
-    <div class="card">
-      <h2>实时查服务器</h2>
+      <h3 class="m18y6">实时查服务器<span class="q" tabindex="0" data-q="开启后，问「几个人在线」时会去查真实状态，而不是瞎猜。">?</span></h3>
       <div class="switch">
         <input type="checkbox" id="status-enable">
         <div><div class="t">开启实时查询</div><div class="d">问「几个人在线」时去查真实状态，而不是瞎猜</div></div>
       </div>
       <div class="row">
-        <div style="flex:2"><label>服务器地址（带 SRV 记录的域名即可）</label><input type="text" id="status-host"></div>
+        <div class="f2"><label>服务器地址（带 SRV 记录的域名即可）</label><input type="text" id="status-host"></div>
         <div><label>显示名</label><input type="text" id="status-displayName"></div>
         <div><label>缓存秒数</label><input type="number" id="status-cacheSeconds"></div>
       </div>
@@ -644,10 +1121,17 @@
         <span class="msg" id="msg-status"></span>
       </div>
     </div>
+
+
   </section>
 
   <!-- 表情包 -->
   <section id="tab-faces" class="hidden">
+    <div class="pagehead">
+      <div class="t">表情包</div>
+      <div class="d">群里发图、查图、加图、删图</div>
+    </div>
+
     <div class="card">
       <h2>添加表情</h2>
       <p class="hint">
@@ -660,7 +1144,7 @@
       <div class="btns">
         <button class="act" onclick="scanFaces()" id="btn-scan">更新表情库</button>
         <button class="ghost" onclick="annotateFaces()" id="btn-annotate">自动补注释</button>
-        <span class="hint" style="margin:0">先扫一遍 <span class="mono">library/</span>；
+        <span class="hint m0">先扫一遍 <span class="mono">library/</span>；
           「自动补注释」让机器人看图补上「图里是谁 / 什么时候用」（每张约 5~10 秒）</span>
       </div>
       <div class="btns">
@@ -677,208 +1161,352 @@
 
   <!-- 知识库 -->
   <section id="tab-knowledge" class="hidden">
-    <div class="card">
-      <h2>该往哪个库写（别放错）</h2>
-      <p class="hint">知识分成几类，**放错地方会出现「我记录了你」这种副作用**，或者该记住的记不住。对照着写：</p>
-      <table class="tbl">
-        <tr><th>内容</th><th>放哪</th></tr>
-        <tr><td>它**自己**是什么、会干什么（比如「你会自己发说说」）</td><td><b>persona.md</b>（人设）</td></tr>
-        <tr><td>服务器的事：进服、排障、规则、存档、价格</td><td><b>hzymtr-server.md</b></td></tr>
-        <tr><td>**群友是谁**、什么性格、群里发生过什么（比如「luomosan 上初三，压力大」）</td><td><b>group-memory.md</b>（群资料库）</td></tr>
-        <tr><td>二次元作品、乐队、角色</td><td><b>knowledge/anime/&lt;库名&gt;.md</b>（⚠️ 由人设的 <span class="mono">anime.works</span> 决定读哪几个 —— 见「人设」页）</td></tr>
-        <tr><td>群里临时教的一句话（「记住：…」）</td><td><b>learned.md</b>（自动维护，这里只读）</td></tr>
-      </table>
-      <p class="hint" style="margin-top:8px">
+    <div class="pagehead">
+      <span class="t">知识库</span>
+      <span class="d">它脑子里那些「知道的事」。改完保存立即生效，不用重启。</span>
+    </div>
+
+    <details class="notes khelp">
+      <summary>我该往哪个文件写？（放错会有副作用）</summary>
+      <p class="hint">知识分成几类，<b>放错地方会出现「我记录了你」这种副作用</b>，或者该记住的记不住。对照着写：</p>
+      <!-- ⚠️ 2026-09-23：原来是一张横排 table（内容｜放哪），字一多就挤成一团 ⇒
+           改成两栏对照：左"这是什么内容"、右"落到哪个文件"，窄屏自动上下堆叠。
+           **五行的文字一字未改**，只是排版从横表换成了竖排。 -->
+      <div class="kmap">
+        <div><span class="k">这是什么</span><span class="v">它<b>自己</b>是什么、会干什么（比如「你会自己发说说」）</span></div>
+        <div><span class="k">落到哪</span><span class="v"><b>persona.md</b>（人设）</span></div>
+        <div><span class="k">这是什么</span><span class="v">服务器的事：进服、排障、规则、存档、价格</span></div>
+        <div><span class="k">落到哪</span><span class="v"><b>hzymtr-server.md</b></span></div>
+        <div><span class="k">这是什么</span><span class="v"><b>群友是谁</b>、什么性格、群里发生过什么（比如「luomosan 上初三，压力大」）</span></div>
+        <div><span class="k">落到哪</span><span class="v"><b>group-memory.md</b>（群资料库）</span></div>
+        <div><span class="k">这是什么</span><span class="v">二次元作品、乐队、角色</span></div>
+        <div><span class="k">落到哪</span><span class="v"><b>knowledge/anime/&lt;库名&gt;.md</b>（⚠️ 由人设的 <span class="mono">anime.works</span> 决定读哪几个 —— 见「人设」页）</span></div>
+        <div><span class="k">这是什么</span><span class="v">群里临时教的一句话（「记住：…」）</span></div>
+        <div><span class="k">落到哪</span><span class="v"><b>learned.md</b>（机器人和群主自动维护；<b>可以手动改</b>，但格式有硬要求，见下方校验条）</span></div>
+      </div>
+      <p class="hint mt8">
         简单判断：<b>关于「它自己」→ 人设</b>；<b>关于「服务器」→ 服务器库</b>；
         <b>关于「群和群友」→ 群资料库</b>。
       </p>
-    </div>
+    </details>
 
-    <div class="card">
+    <div class="card primary">
       <h2>知识文件</h2>
-      <p class="hint">改完保存立即生效（不需要重启）。<span class="mono">learned.md</span> 由机器人和群主在群里维护，这里只读。</p>
-      <div class="row">
-        <div>
-          <label>选择文件</label>
-          <select id="k-file"></select>
+      <p class="hint">先选知识库，再选文件；默认先看预览，要修改再点编辑。</p>
+      <!-- ⚠️ 2026-09-25（用户截图）：两个下拉都改成**通栏大卡片** —— 标题在上、
+           整行卡片在下，卡片里只有「当前选中项 + 右侧 V」，点开才就地弹列表。
+           列表项沿用旧版卡片内容；**选项文字用 kFileLabel() 说明**，不出现 anime/xxx.md。 -->
+      <div class="kpickers">
+        <div class="kpicker">
+          <span class="kpicker-label" id="k-lib-label">知识库</span>
+          <button type="button" class="kpicker-btn" id="k-lib-btn"
+                  aria-haspopup="listbox" aria-expanded="false" aria-controls="k-lib-menu"
+                  onclick="kDropToggle('lib')">
+            <span class="kpicker-value is-empty" id="k-lib-value">（还没加载）</span>
+            <span class="chev" aria-hidden="true"></span>
+          </button>
+          <div class="kpicker-menu hidden" id="k-lib-menu" role="listbox" aria-labelledby="k-lib-label"></div>
+        </div>
+        <div class="kpicker">
+          <span class="kpicker-label" id="k-file-label">文件</span>
+          <button type="button" class="kpicker-btn" id="k-file-btn"
+                  aria-haspopup="listbox" aria-expanded="false" aria-controls="k-file-menu"
+                  onclick="kDropToggle('file')">
+            <span class="kpicker-value is-empty" id="k-file-value">（还没加载）</span>
+            <span class="chev" aria-hidden="true"></span>
+          </button>
+          <div class="kpicker-menu hidden" id="k-file-menu" role="listbox" aria-labelledby="k-file-label"></div>
         </div>
       </div>
-      <p class="hint" id="k-desc" style="margin-top:6px"></p>
-      <label>内容</label>
-      <textarea id="k-content" rows="22"></textarea>
-      <div class="btns">
-        <button class="act" onclick="saveKnowledge()" id="k-save">保存</button>
-        <span class="msg" id="msg-k"></span>
+      <p class="kflib-hint" id="k-libhint"></p>
+      <!-- 默认 hidden：「新建动画库」只属于下面的「动画库」分类，由 kListFilter() 按分类显隐。 -->
+      <div class="knewbar hidden" id="k-anime-new">
+        <button type="button" class="ghost" id="k-anime-new-btn" onclick="kAnimeNewToggle()">＋ 新建动画库</button>
+        <p class="hint">在这里 AI 起草或手动生成库正文；建好后到「人设 → 身份与话术」关联给角色使用。</p>
+        <span class="msg" id="k-anime-mainmsg"></span>
+        <div class="knewbox hidden" id="k-anime-newbox">
+          <div class="kmodes" style="margin:0 0 12px">
+            <div class="seg">
+              <button type="button" class="on" id="k-anime-mode-ai" onclick="kAnimeMode('ai')">AI 联网起草</button>
+              <button type="button" id="k-anime-mode-manual" onclick="kAnimeMode('manual')">手动创建</button>
+            </div>
+            <span class="kcount" id="k-anime-mode-hint">联网搜资料 → 生成可预览的库正文</span>
+          </div>
+          <div class="row">
+            <div>
+              <label>库名（必填，小写字母数字）</label>
+              <input type="text" id="k-anime-name" placeholder="例：bangdream">
+            </div>
+            <div>
+              <label>作品名 / 关键词（必填）</label>
+              <input type="text" id="k-anime-work" placeholder="例：BanG Dream!">
+            </div>
+            <div>
+              <label>主要角色（可选）</label>
+              <input type="text" id="k-anime-characters" placeholder="例：户山香澄、高松灯">
+            </div>
+          </div>
+          <div class="btns">
+            <button type="button" class="act" id="k-anime-draft-btn" onclick="kAnimeDraft()">AI 起草</button>
+            <button type="button" class="ghost" onclick="kAnimeNewCancel()">取消</button>
+            <span class="msg" id="k-anime-msg"></span>
+          </div>
+        </div>
+        <div class="knewpreview hidden" id="k-anime-previewwrap">
+          <label id="k-anime-preview-label">起草结果（可以直接修改，再保存）</label>
+          <textarea id="k-anime-preview" rows="14" spellcheck="false"></textarea>
+          <p class="hint" id="k-anime-sources"></p>
+          <div class="btns">
+            <button type="button" class="act" id="k-anime-save" onclick="kAnimeSave()">保存成动画库</button>
+            <button type="button" class="ghost" id="k-anime-regenerate" onclick="kAnimeRegenerate()">重新起草</button>
+            <button type="button" onclick="kAnimeDrop()">不要了</button>
+            <span class="msg" id="k-anime-msg2"></span>
+          </div>
+        </div>
       </div>
-    </div>
-    <div class="card">
-      <h2>它学到的 <span class="pill" id="learned-count"></span></h2>
-      <p class="hint">群主在群里教它的内容。想删就在群里说「忘记：主题名」。</p>
-      <div id="learned-list" class="mono"></div>
+      <div class="kfile-wrap">
+        <div>
+          <div class="kinfo">
+            <span id="k-tags"></span>
+          </div>
+          <p class="desc" id="k-desc"></p>
+          <!-- ⚠️ 2026-09-23 第四轮：「编辑 / 预览」切换栏 + 字数从编辑器**下方**挪到
+               **正上方** —— 原来按钮在框下面，模式是什么要滚到底才看得到。 -->
+          <div class="kmodes" style="margin:0 0 8px">
+            <div class="seg">
+              <button class="on" id="k-mode-prev" onclick="kMode('prev')">预览</button>
+              <button id="k-mode-edit" onclick="kMode('edit')">编辑</button>
+            </div>
+            <span class="kcount" id="k-count"></span>
+            <span class="kdirty" id="k-dirty" title="有未保存的改动">●</span>
+            <span class="spacer2"></span>
+            <button class="ghost" onclick="knowledgeReload()">放弃改动</button>
+            <button class="act" onclick="saveKnowledge()" id="k-save">保存</button>
+            <span class="msg" id="msg-k"></span>
+          </div>
+          <div class="kedit-body hidden" id="k-editwrap">
+            <div class="kgutter" id="k-gutter">1</div>
+            <textarea id="k-content" spellcheck="false" oninput="kDirty(true)"></textarea>
+          </div>
+          <div class="kpreview" id="k-preview"></div>
+          <p class="kvalid" id="k-valid"></p>
+        </div>
+      </div>
+      <input type="hidden" id="k-file">
+
+      <!-- ⚠️ 2026-09-23：原来「它学到的」是**页面底部一张独立的卡**，
+           和左边的文件列表/右边的编辑器像是两件不相干的事 ——
+           但它其实就是 learned.md 的内容（列表里选 learned.md 就能编辑它）。
+           ⇒ 挪到**编辑区正下方**，且只在**选中 learned.md 时**才显示（kLearnedPane）。
+           搜索框是纯前端过滤，**不碰后端、不改 learned.md**。id 全部保持原样。 -->
+      <div id="k-learnwrap" class="hidden" style="margin-top:16px">
+        <h3 class="m18y6" style="margin-top:0">它学到的 <span class="pill" id="learned-count"></span></h3>
+        <p class="hint">群主在群里教它的内容。想删就在群里说「忘记：主题名」。</p>
+        <input type="text" class="ksearch" id="learned-q" placeholder="搜一条看看…" oninput="learnedFilter()">
+        <div class="learned-wrap"><div id="learned-list" class="mono"></div></div>
+      </div>
     </div>
   </section>
 
   <!-- 人设（2026-09-21 加：直接切换机器人核心人设） -->
   <section id="tab-persona" class="hidden">
-    <div class="card">
-      <h2>当前人设 <span class="pill" id="p-cur-pill"></span></h2>
-      <p class="hint">
-        「人设包」= 一个角色的**一整套**：名字 / 自称 / 别人怎么叫她 / 口癖 / 性格正文 /
-        示例对话 / 引用哪些动画库。一个包 = 一个目录（<span class="mono">personas/&lt;id&gt;/</span>）。
-      </p>
-      <p class="hint">
-        ⚠️ 切换和保存都**不用重启机器人** —— 人设包是热重载的，存完立刻生效。
-      </p>
-      <div id="p-cur" class="kvs"></div>
+    <!-- ⚠️ 2026-09-23 轻整理：加页头导语（右侧 pill 复用 #p-cur-pill，不新增元素） -->
+    <div class="pagehead">
+      <span class="t">人设</span>
+      <span class="d">一个包 = 一个角色：名字 / 自称 / 别人怎么叫她 / 口癖 / 性格正文 / 动画库。热重载，存完即生效。</span>
+      <span class="pill" id="p-cur-pill"></span>
     </div>
 
-    <div class="card">
-      <h2>切换人设</h2>
-      <p class="hint">
-        换角色 = 换这一整个包：名字 / 自称 / 外号 / 口癖 / 人设正文 / 示例对话 /
-        读哪几个动画库 / QQ 昵称头像。<b>切换和保存都不用重启机器人</b>。
-      </p>
-      <div class="flds">
-        <div class="fld" style="flex:1;min-width:260px">
-          <label>切到哪个人设包</label>
-          <select id="p-pick" onchange="personaPickChange()"></select>
+    <!-- ⚠️ 2026-09-23 P1：原来「当前人设」和「切换人设」是**两张并列的 primary 卡**，
+         同一个信息（名字/文档数）在两处各说一遍，纵向被撑得很长
+         ⇒ 合成**一张状态卡**：常态只显示「她是谁」，点「切换」才**就地展开**下拉。
+         ⚠️ 数据不用新接口：`/api/persona/list` 已经返回 name/selfName/displayName/docs/chars，
+            头像也有现成接口 `GET /api/persona/avatar?id=<id>`（下面 #p-cur-ava 直接用它）。
+         ⚠️ #p-pick / #p-pick-hint / #msg-p-switch / #p-cur-pill 的 id 和读它们的 JS 一行没动，
+            只是从「另一张卡」搬到了「这张卡的折叠区」里。 -->
+    <div class="card primary">
+      <h2>当前人设</h2>
+      <div class="pprofile">
+        <div class="ava" id="p-cur-ava"><span id="p-cur-initial">?</span></div>
+        <div class="meta">
+          <div class="nm" id="p-cur-name">—</div>
+          <div class="kv2" id="p-cur"></div>
         </div>
-        <button class="act" onclick="personaSwitch()">切到这个</button>
+        <div class="act2">
+          <button class="ghost" id="p-switch-btn" onclick="personaToggleSwitch()">切换人设</button>
+        </div>
       </div>
-      <p class="hint" id="p-pick-hint" style="margin-top:8px"></p>
-      <div class="btns"><span class="msg" id="msg-p-switch"></span></div>
+      <div class="warn">
+        ⚠️ 切换和保存都<b>不用重启机器人</b> —— 人设包是热重载的，存完立刻生效。
+      </div>
+
+
+      <!-- 就地展开的切换区：默认 hidden，点上面那个按钮才出现 -->
+      <div class="pswitch hidden" id="p-switch-box">
+        <div class="flds">
+          <div class="fld f1w260">
+            <label>切到哪个人设包 <span class="q" tabindex="0" data-q="换角色 = 换这一整个包：名字 / 自称 / 外号 / 口癖 / 人设正文 / 示例对话 / 读哪几个动画库 / QQ 昵称头像。">?</span></label>
+            <select id="p-pick" onchange="personaPickChange()"></select>
+          </div>
+          <button class="act" onclick="personaSwitch()">切到这个</button>
+        </div>
+        <p class="hint mt8" id="p-pick-hint"></p>
+        <div class="btns"><span class="msg" id="msg-p-switch"></span></div>
+      </div>
+
+      <p class="hint mt8">
+        <span class="q" tabindex="0" data-q="「人设包」= 一个角色的一整套：名字 / 自称 / 别人怎么叫她 / 口癖 / 性格正文 / 示例对话 / 引用哪些动画库。一个包 = 一个目录 personas/<id>/。">?</span>
+        「人设包」= 一个角色的<b>一整套</b>，一个包就是一个目录。
+      </p>
     </div>
 
     <div class="card">
       <h2>新建人设</h2>
-      <p class="hint">
-        填 id + 角色名 →「搜集并起草」：联网搜资料，然后**按模板把人设逐字段填满**
-        （每个字段都会给值，填不出来的会留空并**列出来告诉你**）。
-        ⚠️ 结果**先给你看，点了保存才落盘**。
-      </p>
+      <!-- 两种模式共用同一套基础字段；手动模式只额外显示「关联模板」和对应主按钮文案。 -->
+      <div class="kmodes" style="margin:0 0 12px">
+        <div class="seg">
+          <button class="on" id="p-mode-ai" onclick="personaNewMode('ai')">AI 联网起草</button>
+          <button id="p-mode-manual" onclick="personaNewMode('manual')">手动创建</button>
+        </div>
+        <span class="kcount" id="p-mode-hint">联网搜资料 → 按模板逐字段填满 → 给你过一眼再落盘</span>
+      </div>
 
-      <div class="flds">
+      <!-- 两种模式共用这三个基础字段；动画库统一去知识库页新建，不在人设包里写知识库。 -->
+      <div class="new-form-grid">
         <div class="fld">
           <label>新的 id（小写字母数字）</label>
-          <input id="p-new-id" placeholder="例：miku">
+          <input type="text" id="p-new-id" placeholder="例：miku" oninput="personaIdCheck()">
+          <p class="note" id="p-new-id-note"></p>
         </div>
         <div class="fld">
           <label>角色名</label>
-          <input id="p-draft-name" placeholder="例：初音未来">
+          <input type="text" id="p-draft-name" placeholder="例：初音未来">
         </div>
         <div class="fld">
-          <label>出自哪部作品</label>
-          <input id="p-draft-work" placeholder="例：VOCALOID">
+          <label>出自作品</label>
+          <input type="text" id="p-draft-work" placeholder="例：VOCALOID">
         </div>
       </div>
 
-      <div class="flds">
+      <!-- 手动创建时，把原来的底部复制块合并到这里；AI 模式不显示。 -->
+      <div class="new-template-row hidden" id="p-template-row">
         <div class="fld">
-          <label>动画库怎么办</label>
-          <select id="p-anime-mode" onchange="onAnimeModeChange()">
-            <option value="none">不用动画库</option>
-            <option value="reuse">复用已有的库（只读，不往里写）</option>
-            <option value="new">新建一个库（把搜到的资料填进去）</option>
-          </select>
+          <label>关联模板 <span class="q" tabindex="0" data-q="标准模板会创建一份空白骨架；选择现有人设则会复制它的整套文件，再把 id 换成新的。">?</span></label>
+          <select id="p-new-from" onchange="personaTemplateChange()"></select>
         </div>
-        <div class="fld" id="p-anime-reuse-wrap" style="display:none">
-          <label>复用哪一个</label>
-          <select id="p-anime-lib"></select>
-        </div>
-        <div class="fld" id="p-anime-new-wrap" style="display:none">
-          <label>新库的名字</label>
-          <input id="p-anime-name" placeholder="例：bangdream">
-        </div>
-        <button class="act" onclick="personaDraftStart()" id="p-draft-btn">搜集并起草</button>
+        <p class="hint">创建后会自动打开新人设包；再在下面的完整表单里补充内容并保存。</p>
       </div>
 
-      <p class="hint" style="margin-top:10px">
-        ⚠️ 不给真人做人设；<span class="mono">persona.md</span> 限 3000 字（它每次请求都进提示词）。<br>
-        「复用」= 只在她的人设里**声明**引用那份库，**绝不动库里的内容**；
-        「新建」= 才把资料写进 <span class="mono">knowledge/anime/&lt;新库名&gt;.md</span>。
-      </p>
-      <div class="btns"><span class="msg" id="msg-p"></span></div>
+      <div class="btns">
+        <button class="act" onclick="personaNewPrimary()" id="p-new-primary">AI 联网生成起草</button>
+        <span class="msg" id="msg-p"></span>
+      </div>
 
-      <div class="grp" style="margin-top:20px">不想联网？建一个空的 / 复刻现成的</div>
-      <div class="flds">
-        <div class="fld">
-          <label>照谁复制</label>
-          <select id="p-new-from"></select>
-        </div>
-        <button class="ghost" onclick="personaCreate()">建一个（id 用上面那个）</button>
+      <div class="alert-info" role="note">
+        <span class="alert-icon">💡</span>
+        <span>提示：新建后将先生成预览，确认后保存落盘。<span class="mono">persona.md</span> 建议控制在 3000 字以内。</span>
+        <span class="tooltip" tabindex="0" data-tip="使用规范：不给真人做人设；仅支持虚构角色。" aria-label="查看使用规范">ⓘ</span>
       </div>
       <div id="p-draft"></div>
     </div>
 
     <div class="card">
-      <h2>删除人设</h2>
-      <p class="hint">
-        删除是**挪走**（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
-        不是真销毁。<br>
-        而且**正在用的那个删不了** —— 先切到别的再删它。
-      </p>
-      <div class="btns">
-        <button class="danger" onclick="personaDelete()">删除「<span id="p-del-name">（上面选中的）</span>」</button>
-      </div>
-    </div>
-
-    <div class="card">
       <h2>QQ 昵称 / 头像 <span class="pill" id="p-qq-pill"></span></h2>
       <p class="hint">
-        ⚠️ 这两样**跟着人设走**：把昵称 / 头像存进这个人设包，**切换人设时会自动改成它的**
+        ⚠️ 这两样<b>跟着人设走</b>：存进这个人设包，<b>切换人设时会自动改成它的</b>
         （改的是 <b>QQ 上真实的</b>昵称 / 头像，所有群和好友都看得见）。<br>
-        留空 = 切换时**不动**那一项（不是清空）。
+        留空 = 切换时<b>不动</b>那一项（不是清空）。
       </p>
-      <div class="row">
-        <div style="flex:0 0 auto">
+
+      <div class="flds aifs">
+        <div class="fx0">
           <label>这个人设的头像</label>
           <img id="p-avatar" src="" alt="（还没设）"
-               style="width:96px;height:96px;border-radius:12px;object-fit:cover;background:#1a1a2e;display:block">
-          <p class="hint" id="p-avatar-name" style="margin:6px 0 0"></p>
+               style="width:96px;height:96px;border-radius:12px;object-fit:cover;background:var(--face-bg);display:block">
+          <p class="hint m6y0" id="p-avatar-name"></p>
         </div>
-        <div style="flex:1">
+        <div class="fld f1w240">
           <label>这个人设的 QQ 昵称</label>
-          <input id="p-nick" placeholder="（留空 = 切换时不动昵称）">
-          <label style="margin-top:10px">换这个人设的头像（png / jpg / gif / webp，≤8MB）</label>
-          <div class="row">
-            <div style="flex:1"><input type="file" id="p-avatar-file" accept="image/png,image/jpeg,image/gif,image/webp"></div>
-            <div style="flex:0 0 auto"><label>&nbsp;</label><button onclick="qqSaveAvatar()">上传进人设包</button></div>
-          </div>
-          <div class="btns">
-            <button class="act" onclick="qqSaveNick()">把昵称存进人设包</button>
-            <button onclick="qqApplyNow()">立即应用到 QQ</button>
-          </div>
+          <input type="text" id="p-nick" placeholder="（留空 = 切换时不动昵称）">
+          <p class="hint m6y0" id="p-qq-now"></p>
         </div>
       </div>
-      <p class="hint" id="p-qq-now" style="margin-top:10px"></p>
-      <div class="btns"><span class="msg" id="msg-qqp"></span></div>
+
+      <div class="grp">换头像（png / jpg / gif / webp，≤8MB）</div>
+      <div class="flds">
+        <div class="fld f1w240">
+          <label>选一张图</label>
+          <input type="file" id="p-avatar-file" accept="image/png,image/jpeg,image/gif,image/webp">
+        </div>
+        <button class="ghost" onclick="qqSaveAvatar()">上传进人设包</button>
+      </div>
+
+      <div class="grp">生图参考图 / 立绘（png / jpg / webp / bmp，≤30MB）</div>
+      <p class="hint m0b8">
+        群友说「拍个照」时，她按这张图来画。
+        ⚠️ <b>不填这张，生成的脸每次都不一样</b> —— 所以单要一张，
+        头像那张太小太糊，当参考图会飘。<br>
+        和头像一样存进人设包：<b>换人设自动换脸，代码不用改</b>。
+      </p>
+      <div class="flds aifs">
+        <div class="fx0">
+          <label>这个人设的立绘</label>
+          <img id="p-ref" src="" alt="（还没设）"
+               style="width:96px;height:96px;border-radius:12px;object-fit:cover;background:var(--face-bg);display:block">
+          <p class="hint m6y0" id="p-ref-name"></p>
+        </div>
+        <div class="fld f1w240">
+          <label>选一张图</label>
+          <input type="file" id="p-ref-file" accept="image/png,image/jpeg,image/webp,image/bmp">
+          <p class="hint m6y0">全身或半身、脸清楚的都行；正脸效果最好</p>
+        </div>
+        <button class="ghost" onclick="qqSaveRef()">上传进人设包</button>
+      </div>
+
+      <div class="btns">
+        <button class="act" onclick="qqSaveNick()">把昵称存进人设包</button>
+        <button onclick="qqApplyNow()">立即应用到 QQ</button>
+        <span class="msg" id="msg-qqp"></span>
+      </div>
     </div>
 
+    <!-- ⚠️ 2026-09-23：「结构化设置」和「提示词里的整句」原本是**两张并列卡**、
+         两个保存按钮、两条消息 —— 但它们调的是**同一个** personaSaveIdentity()（一次全存）。
+         拆成两张的结果是：字段之间看不出关联，还以为要分别保存。
+         ⇒ 合成一张「身份与话术」，内部用 h3 分两节，**底部只留一组保存**。
+         ⚠️ #p-fields / #p-prompts / #p-save / #msg-pi / #msg-pp 的 id 一个没动。 -->
     <div class="card">
-      <h2>结构化设置</h2>
+      <h2>身份与话术 <span class="q" tabindex="0" data-q="这一整张卡存在 identity.json 里，一次保存全部生效。下面两块只是分区看：上半是「代码要用来判定的字段」，下半是「直接进提示词的原句」。">?</span></h2>
+
+      <h3 class="m18y6">结构化设置 <span class="pill" id="msg-pi"></span></h3>
       <p class="hint">
-        这些字段是**代码要用的**（判"这句话是不是在叫她""该不该去搜"）—— 换名字时她会跟着变，不用改代码。<br>
-        ⚠️ <b>「主人是谁」不在这里</b>：那是**共用事实**（QQ 号在「模型」页、资料在
+        这些字段是<b>代码要用的</b>（判"这句话是不是在叫她""该不该去搜"）—— 换名字时她会跟着变，不用改代码。<br>
+        ⚠️ <b>「主人是谁」不在这里</b>：那是<b>共用事实</b>（QQ 号在「模型」页、资料在
         <span class="mono">owner.md</span>），换人设改的是「<b>你叫他什么</b>」。
       </p>
-      <div id="p-fields"></div>
-      <div class="btns">
-        <button class="act" onclick="personaSaveIdentity()" id="p-save">保存</button>
-        <span class="msg" id="msg-pi"></span>
-      </div>
-    </div>
+      <div id="p-fields" oninput="pjDirty()"></div>
 
-    <div class="card">
-      <h2>提示词里的整句（prompt.*）</h2>
+      <hr class="hr12">
+
+      <h3 class="m18y6">提示词里的整句</h3>
       <p class="hint">
-        ⚠️⚠️ 这些是**整句替换**的 —— 直接写"这个角色会说的那句话"，**别指望代码帮你拼**。
+        ⚠️⚠️ 这些是<b>整句替换</b>的 —— 直接写"这个角色会说的那句话"，<b>别指望代码帮你拼</b>。
         不同角色的自我介绍结构本来就不一样，拼出来只会是个谁也不像的平均角色。<br>
         ⚠️ <b>留空 = 那一段不出现</b>（代码不会兜底编一句，编出来的不是这个人设说的话）。
       </p>
-      <div id="p-prompts"></div>
+      <div id="p-prompts" oninput="pjDirty()"></div>
+
+      <!-- ⚠️ 2026-09-23（用户截图报的「排版不对」）：原来这条统一保存栏放在**最上面的
+           「当前人设」卡**里，但它保存的内容在**页面最底下**这张卡 —— 改完要往回滚很远才够得着保存。
+           ⇒ 挪到**这张卡自己的底部**，跟「保存这张卡」并排：改完当场就存。 -->
+      <div class="psavebar" id="p-savebar">
+        <span class="kdirty" id="p-dirty" title="有未保存的改动">●</span>
+        <span class="pdtext" id="p-dirtytext">这张卡改了要存（结构化设置 + 提示词整句，一起生效）</span>
+      </div>
       <div class="btns">
-        <button class="act" onclick="personaSaveIdentity()">保存</button>
+        <button class="act" onclick="personaSaveIdentity()" id="p-save">保存这张卡</button>
         <span class="msg" id="msg-pp"></span>
+        <span class="msg" id="msg-p-savebar"></span>
       </div>
     </div>
 
@@ -886,7 +1514,7 @@
       <h2>人设文档</h2>
       <p class="hint">
         改完保存立即生效（不用重启）。<span class="mono">cast.md</span> / <span class="mono">life-events.md</span> /
-        <span class="mono">quest-ideas.md</span> 是这个角色**专属的数据**（名册、日常事件库、剧情点子），
+        <span class="mono">quest-ideas.md</span> 是这个角色<b>专属的数据</b>（名册、日常事件库、剧情点子），
         它们不进聊天提示词，但剧情和日常事件要用。
       </p>
       <div class="row">
@@ -896,48 +1524,61 @@
         </div>
       </div>
       <label>内容</label>
-      <textarea id="p-doc-text" rows="20"></textarea>
+      <textarea id="p-doc-text" rows="20" class="code"></textarea>
       <div class="btns">
         <button class="act" onclick="personaSaveDoc()">保存</button>
         <span class="msg" id="msg-pd"></span>
+      </div>
+    </div>
+
+    <!-- ⚠️ 2026-09-23 第四轮：删除人设从**第 3 张卡挪到最底下**（危险操作不该夹在中间），
+         并加了顶部红色警示带。⚠️ #p-del-name / personaDelete() 一行没动。 -->
+    <div class="card danger-zone">
+      <h2>删除人设</h2>
+      <p class="hint">
+        删除是<b>挪走</b>（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
+        不是真销毁。<br>
+        而且<b>正在用的那个删不了</b> —— 先切到别的再删它。
+      </p>
+      <div class="btns">
+        <button class="danger" onclick="personaDelete()">删除「<span id="p-del-name">（上面选中的）</span>」</button>
       </div>
     </div>
   </section>
 
   <!-- 运行状态 -->
   <section id="tab-qzone" class="hidden">
-    <div class="card">
+    <div class="pagehead">
+      <div class="t">QQ空间</div>
+      <div class="d">让 Saki 把群里的趣事、服务器近况发到空间里</div>
+    </div>
+
+    <div class="card primary">
       <h2>QQ空间</h2>
       <p class="hint">让客服 Saki 把群里的趣事、服务器近况、自己的感想发到 QQ 空间。
         自动模式会定期看一遍攒下来的群消息，<b>觉得值得发才发</b>；觉得没什么可发的就什么都不做。</p>
       <div id="qzone-status" class="kvs"></div>
-    </div>
 
-    <div class="card">
-      <h2>立刻发一条</h2>
+      <h3 class="m18y6">立刻发一条</h3>
       <div class="btns">
         <button class="act" onclick="qzonePreview()" id="btn-qz-preview">先看看会发什么（不发布）</button>
         <button class="act" onclick="qzonePost()" id="btn-qz-post" style="background:#16a34a">立刻发送说说</button>
         <span class="msg" id="msg-qzone"></span>
       </div>
       <p class="hint">「立刻发送」会让它自己挑素材写一条发出去。<b>发出去就收不回来了</b>，建议先点预览看看。</p>
-    </div>
 
-    <div class="card">
-      <h2>自己写一条</h2>
+      <h3 class="m18y6">自己写一条</h3>
       <p class="hint">不想让它自己写？直接在这里写好内容发出去。</p>
       <textarea id="qz-manual" rows="4" placeholder="想说点什么……"></textarea>
       <div class="btns">
-        <label style="margin:0;display:flex;align-items:center;gap:6px;font-size:13px">
+        <label class="inline13b">
           配表情（可留空，一条说说配一张）
-          <select id="qz-face" style="width:auto;margin:0"></select>
+          <select id="qz-face" class="wauto-m0"></select>
         </label>
         <button class="act" onclick="qzoneManualPost()">发送这条</button>
       </div>
-    </div>
 
-    <div class="card">
-      <h2>设置</h2>
+      <h3 class="m18y6">设置</h3>
       <div class="row">
         <div><label>每天最多发几条</label><input type="number" id="qz-maxPerDay" min="1" max="10"></div>
         <div><label>两次间隔（小时）</label><input type="number" id="qz-cooldownHours" min="1" max="24" step="0.5"></div>
@@ -966,7 +1607,12 @@
   </section>
   <!-- QQ 登录 -->
   <section id="tab-life" class="hidden">
-    <div class="card">
+    <div class="pagehead">
+      <div class="t">日常事件（一级）</div>
+      <div class="d">群里的小插曲，自动按排程发</div>
+    </div>
+
+    <div class="card primary">
       <h2>日常事件（一级）</h2>
       <p class="hint">
         让 Saki 像真人一样，在一天里随机发生些小事（拼好饭被偷、没赶上末班地铁…），
@@ -987,14 +1633,14 @@
         <b>算今天的一条</b>（今天已发数 +1，后面的时间会重排）。
         ⚠️ 只有 <b>1 档群</b>会收到 —— 别的档位不进事件系统。
       </p>
-      <div class="kv" style="margin:6px 0">
+      <div class="kv m6y">
         <b>发到哪个群</b>
-        <select id="life-group" style="width:auto;margin:0"
+        <select id="life-group" class="wauto-m0"
           onchange="localStorage.setItem('life-group', this.value)"></select>
-        <span class="hint" style="margin:0">每群的条数和排程是分开的 —— 这里只发到你选的那个群</span>
+        <span class="hint m0">每群的条数和排程是分开的 —— 这里只发到你选的那个群</span>
       </div>
       <div id="life-preview" class="kvs"></div>
-      <div class="btns" style="margin-top:8px">
+      <div class="btns mt8">
         <button class="act" onclick="lifePreview()">预览一条</button>
         <button class="act" onclick="lifeSendNow()">立即发送</button>
         <span class="msg" id="msg-life2"></span>
@@ -1002,9 +1648,9 @@
     </div>
 
     <div class="card">
-      <h2>节奏 / 参数（**按群**）</h2>
+      <h2>节奏 / 参数（按群）</h2>
       <p class="hint">
-        ⚠️ 2026-09-16 起：日常事件和二级剧情的参数**没有"全局默认"了**，
+        ⚠️ 2026-09-16 起：日常事件和二级剧情的参数<b>没有"全局默认"了</b>，
         <b>完全按群各设各的</b> —— 每天几条、间隔多久、时段、剧情概率…全在
         <b>「按群设定」</b>那一页里，选一个群就设那个群。<br>
         没设过的群用<b>内置起点</b>（每天 3 条、间隔 90 分钟、7:00-24:00）。
@@ -1012,14 +1658,19 @@
       <div class="btns">
         <button class="act" onclick="showTab('groupcfg')">去「按群设定」</button>
       </div>
-      <p class="hint" style="margin-top:10px">
+      <p class="hint mt10">
         事件库在「知识库」页的 <span class="mono">life-events.md</span>、节日在 <span class="mono">holidays.md</span>，改完保存即热重载。
       </p>
     </div>
   </section>
 
   <section id="tab-quest" class="hidden">
-    <div class="card">
+    <div class="pagehead">
+      <div class="t">二级剧情（任务系统）</div>
+      <div class="d">能改变世界线的关键事件，像游戏任务一样分阶段</div>
+    </div>
+
+    <div class="card primary">
       <h2>二级剧情（任务系统）</h2>
       <p class="hint">
         「能改变世界线的关键事件」—— 像一个游戏任务，<b>分阶段</b>。
@@ -1031,28 +1682,19 @@
     </div>
 
     <div class="card">
-      <h2>故事线（每个群一份）</h2>
-      <p class="hint">
-        她在这条世界线上发生过什么 —— 一级日常 + 二级主线，全是<b>按群分开存</b>的。
-        这里的数字就是"生成新事件/剧情时喂给模型的那份记忆"。<br>
-        ⚠️ <b>带「锁定」的主线条目永远不会被删</b>，压缩时只允许变短；
-        模型想删掉任何一条锁定的，整次压缩作废、一个字都不写。<br>
-        📖 压缩会把流水账改写成<b>轻小说式的章节 —— 一章 = 一件事</b>，
-        章节标题前面那个日期是<b>代码按真实时间加的</b>（模型不许自己写日期）；
-        模型没提到的日常条目会<b>按原文留着</b>，只有它点名要删的才删。
-      </p>
+      <h2>故事线（每个群一份） <span class="q" tabindex="0" data-q="她在这条世界线上发生过什么 —— 一级日常 + 二级主线，全是按群分开存的。这里的数字就是「生成新事件/剧情时喂给模型的那份记忆」。⚠️ 带「锁定」的主线条目永远不会被删，压缩时只允许变短；模型想删掉任何一条锁定的，整次压缩作废。📖 压缩会把流水账改写成轻小说式的章节 —— 一章 = 一件事，章节标题前面那个日期是代码按真实时间加的。">?</span></h2>
       <!-- ⚠️ 压缩的结果提示写在这里（独立容器）—— `#sl-entries` 会被
            renderStoryline() 重写/清空，提示放那儿等于写完就被吃掉（踩过） -->
       <div id="sl-msg"></div>
       <div id="sl-total" class="kvs"></div>
-      <div id="sl-groups" style="margin-top:10px"></div>
-      <div id="sl-entries" style="margin-top:10px"></div>
+      <div id="sl-groups" class="mt10"></div>
+      <div id="sl-entries" class="mt10"></div>
     </div>
 
     <div class="card">
-      <h2>参数（**按群**）</h2>
+      <h2>参数（按群）</h2>
       <p class="hint">
-        ⚠️ 2026-09-16 起：二级剧情的参数**没有"全局默认"了**，<b>完全按群各设各的</b> ——
+        ⚠️ 2026-09-16 起：二级剧情的参数<b>没有"全局默认"了</b>，<b>完全按群各设各的</b> ——
         自动开不开、概率、每周几条、每段等多久、段数、好感度增减、
         「群友哪句话能改变剧情」，全在 <b>「按群设定」</b>那一页里选群设置。<br>
         没设过的群用<b>内置起点</b>（自动开=关、概率 0.1、每周 3 条、每段等 30 分钟）。<br>
@@ -1065,24 +1707,15 @@
     </div>
 
     <div class="card">
-
-    <div class="card">
-      <h2>手动开一条</h2>
-      <p class="hint">
-        下面这个框有两个用处：点「立即开始剧情」= <b>现在就用它开一条，发到你选的那个群</b>；
-        点「替换下次二级事件」= <b>不现在开</b>，只把它记下来，等<b>这个群</b>下次自动轮到二级事件时用它。
-        ⚠️ 两者<b>都按「发到哪个群」选中的那个群</b>来 ——
-        每个群的故事线是分开的，所以那句子由头也<b>各群各存一句</b>。
-        ⚠️ 「立即开始剧情」会<b>真的往群里发消息</b>。
-      </p>
+      <h2>手动开一条 <span class="q" tabindex="0" data-q="下面这个框有两个用处：点「立即开始剧情」= 现在就用它开一条，发到你选的那个群；点「替换下次二级事件」= 不现在开，只把它记下来，等这个群下次自动轮到二级事件时用它。⚠️ 两者都按「发到哪个群」选中的那个群来 —— 每个群的故事线是分开的。⚠️ 「立即开始剧情」会真的往群里发消息。">?</span></h2>
       <!-- ⚠️ 这个选择器是 2026-09-15 补的：<主人>「我手动开剧情，699开头的群没启动」——
-           原来按钮**根本不传 groupId**，服务端只会退回 groups[0]（配置里第一个 1 档群），
+           原来按钮根本不传 groupId，服务端只会退回 groups[0]（配置里第一个 1 档群），
            所以不管想开在哪个群，它都开在 200000002。 -->
-      <div class="kv" style="margin:6px 0">
+      <div class="kv m6y">
         <b>发到哪个群</b>
-        <select id="q-group" style="width:auto;margin:0"
+        <select id="q-group" class="wauto-m0"
           onchange="localStorage.setItem('q-group', this.value); renderQuest()"></select>
-        <span class="hint" style="margin:0">只有 1 档群会进事件系统；每个群各跑自己的一条，互不影响</span>
+        <span class="hint m0">只有 1 档群会进事件系统；每个群各跑自己的一条，互不影响</span>
       </div>
       <textarea id="q-hint" rows="3" placeholder="留空 = 让它自己从最近的故事线里找由头……"></textarea>
       <div class="btns">
@@ -1091,8 +1724,8 @@
         <span class="msg" id="msg-quest2"></span>
       </div>
       <!-- 清空（2026-09-15 晚 <主人>：「加一个清空上次故事的按钮吧，现在还在测试中」）-->
-      <hr style="border:0;border-top:1px dashed var(--line);margin:12px 0">
-      <p class="hint" style="margin:0 0 6px">
+      <hr class="hr12">
+      <p class="hint m0b6">
         <b>清空／重来（测试用）</b>：把上一次那条剧情当没发生过 ——
         <b>中止</b>正在跑的那条（<b>不写结局、不动好感度</b>）、清掉<b>故事线历史</b>、
         把这个群的「本周开过几条」也清零（不然会被每周上限挡着，没法连着试）。
@@ -1106,18 +1739,12 @@
     </div>
 
     <div class="card">
-      <h2>剧情控制（正在跑的那条）</h2>
-      <p class="hint">
-        跟下面「剧情模拟测试」那一套按钮一样，区别是<b>这些动的是真群里的那条剧情</b>。<br>
-        「推进下一段」<b>不等那 30 分钟</b>，现在就写下一段发到群里；想让她这一段听某个建议，
-        就写在下面的框里（会当成"群里有人这么说"喂给她，跟真群友发言走同一条路）。
-        ⚠️ 都会<b>真的往群里发消息</b>。
-      </p>
-      <div class="kv" style="margin:6px 0">
+      <h2>剧情控制（正在跑的那条） <span class="q" tabindex="0" data-q="跟下面「剧情模拟测试」那一套按钮一样，区别是这些动的是真群里的那条剧情。「推进下一段」不等那 30 分钟，现在就写下一段发到群里；想让她这一段听某个建议，就写在下面的框里。⚠️ 都会真的往群里发消息。">?</span></h2>
+      <div class="kv m6y">
         <b>操作哪个群</b>
-        <select id="qc-group" style="width:auto;margin:0"
+        <select id="qc-group" class="wauto-m0"
           onchange="localStorage.setItem('qc-group', this.value); this.dataset.touched='1'"></select>
-        <span class="hint" style="margin:0" id="qc-now">—</span>
+        <span class="hint m0" id="qc-now">—</span>
       </div>
       <textarea id="qc-reply" rows="2" placeholder="以群友身份说一句（可选）：想让这一段的走向听某句建议，就写在这儿"></textarea>
       <div class="btns">
@@ -1130,12 +1757,7 @@
     </div>
 
     <div class="card">
-      <h2>剧情模拟测试</h2>
-      <p class="hint">
-        <b>在沙箱里跑，不会发消息、不落盘、也不会动真实的故事线。</b>
-        先开始一条，然后像群友一样说话、点「发送并生成下一阶段」，直到收尾 ——
-        最后可以看这次模拟写下的全部故事线。
-      </p>
+      <h2>剧情模拟测试 <span class="q" tabindex="0" data-q="在沙箱里跑，不会发消息、不落盘、也不会动真实的故事线。先开始一条，然后像群友一样说话、点「发送并生成下一阶段」，直到收尾 —— 最后可以看这次模拟写下的全部故事线。">?</span></h2>
       <textarea id="qs-seed" rows="3" placeholder="留空 = 让它自动生成由头；也可以自己写一句（比如：她今天在便利店被人缠上了）"></textarea>
       <div class="btns">
         <button class="act" onclick="simStart(false)" id="btn-qs-auto">自动生成并填充并开始剧情</button>
@@ -1143,33 +1765,38 @@
         <button class="ghost" onclick="simReset()">清空模拟</button>
         <span class="msg" id="msg-sim"></span>
       </div>
-      <div id="sim-panel" style="margin-top:14px"></div>
-      <div id="sim-reply-box" class="hidden" style="margin-top:12px">
+      <div id="sim-panel" class="mt14"></div>
+      <div id="sim-reply-box" class="hidden mt12">
         <label>模拟群友说的话（会走和真群一样的判定：@她 / 回她 / 明显建议 才算数）</label>
         <textarea id="qs-reply" rows="2" placeholder="比如：要不你先去医院看看吧"></textarea>
         <div class="btns">
           <button class="act" onclick="simNext()" id="btn-qs-next">发送并生成下一阶段剧情</button>
           <button class="ghost" onclick="simNext(true)">不发话，直接推进一段</button>
         </div>
-        <div class="btns" style="margin-top:8px">
+        <div class="btns mt8">
           <button class="ghost" onclick="simNext(false,'good')" id="btn-qs-good"
                   style="border-color:#16a34a;color:#16a34a">↳ 直接收成好结局</button>
           <button class="ghost" onclick="simNext(false,'bad')" id="btn-qs-bad"
                   style="border-color:#dc2626;color:#dc2626">↳ 直接收成坏结局</button>
         </div>
-        <p class="hint" style="margin-top:6px">
+        <p class="hint mt6">
           这两个按钮会让它<b>照着那个结局写一段真正的收尾</b>（不是硬切），
           这样好结局和坏结局你都能看到长什么样。
         </p>
       </div>
-      <div id="sim-story" style="margin-top:14px"></div>
+      <div id="sim-story" class="mt14"></div>
     </div>
   </section>
 
-  <!-- ⚠️ 2026-09-16：**按群设定单独一页**（用户要求）——
-       原来它塞在「二级剧情」页里，可它管的是**日常事件 + 二级剧情 + 收紧度**三样，
+  <!-- ⚠️ 2026-09-16：按群设定单独一页（用户要求）——
+       原来它塞在「二级剧情」页里，可它管的是日常事件 + 二级剧情 + 收紧度三样，
        放在剧情页里既不好找、也容易让人以为只管剧情。 -->
   <section id="tab-groupcfg" class="hidden">
+    <div class="pagehead">
+      <div class="t">按群设定</div>
+      <div class="d">日常事件 · 二级剧情 · 收紧度：每个群各设各的</div>
+    </div>
+
     <div class="card">
       <h2>按群设定（日常事件 · 二级剧情 · 收紧度）</h2>
       <p class="hint">
@@ -1180,14 +1807,14 @@
         档位管的是「她要不要在这个群说话」，这里管的是「<b>事件和剧情在这个群怎么跑</b>」。<br>
         ⚠️ <b>每个群的条数、排程、故事线都是分开算的</b> —— 给 A 群设成每天 1 条，不影响 B 群。
       </p>
-      <div class="kv" style="margin:6px 0">
+      <div class="kv m6y">
         <b>哪个群</b>
-        <select id="gp-group" style="width:auto;margin:0"
+        <select id="gp-group" class="wauto-m0"
           onchange="localStorage.setItem('gp-group', this.value); fillGroupParams()"></select>
-        <span class="hint" style="margin:0" id="gp-note">—</span>
+        <span class="hint m0" id="gp-note">—</span>
       </div>
       <div id="gp-form"></div>
-      <p class="hint" style="margin-top:6px">
+      <p class="hint mt6">
         「日常事件」关掉 = 这个群不再收到一级随机事件（别的群照常）；
         「自动开剧情」关掉 = 这个群不自动开二级剧情（手动/模拟仍然能用）。
       </p>
@@ -1195,6 +1822,11 @@
   </section>
 
   <section id="tab-affinity" class="hidden">
+    <div class="pagehead">
+      <div class="t">好感度 / 好友</div>
+      <div class="d">她对每个人有多熟，熟到会说什么</div>
+    </div>
+
     <div class="card">
       <h2>好感度</h2>
       <p class="hint">
@@ -1205,10 +1837,10 @@
         在 A 群混熟了不代表在 B 群也熟。下面选一个群看那一个群的。
       </p>
       <!-- 「看哪个群」：好感度分群之后必须能选（2026-09-15 晚） -->
-      <div class="kv" style="margin:6px 0">
+      <div class="kv m6y">
         <b>看哪个群</b>
-        <select id="aff-group" style="width:auto;margin:0" onchange="renderAffinity()"></select>
-        <span class="hint" style="margin:0">（空 = 不分群的那份老数据，已经尽量归属到各群了）</span>
+        <select id="aff-group" class="wauto-m0" onchange="renderAffinity()"></select>
+        <span class="hint m0">（空 = 不分群的那份老数据，已经尽量归属到各群了）</span>
       </div>
       <div id="aff-status" class="kvs"></div>
     </div>
@@ -1229,19 +1861,19 @@
     <div class="card">
       <h2>参数</h2>
       <div class="row">
-        <!-- ⚠️ 2026-09-20：好感度**上限已改为无限**（用户要求）→ 门槛的 max 不能还是 100 -->
+        <!-- ⚠️ 2026-09-20：好感度上限已改为无限（用户要求）→ 门槛的 max 不能还是 100 -->
         <div><label>加好友的门槛（好感度）</label><input type="number" id="a-threshold" min="50" max="999999"></div>
         <div><label>排行榜显示几个</label><input type="number" id="a-boardSize" min="1" max="30"></div>
         <div><label>回应判定窗口（分钟）</label><input type="number" id="a-window" min="1" step="5"></div>
       </div>
-      <div class="switch" style="margin-top:8px">
+      <div class="switch mt8">
         <input type="checkbox" id="f-enable">
         <div>
           <div class="t">好友功能（到线通知 + 主动私聊）</div>
           <div class="d">关掉就不发到线通知、也不主动私聊</div>
         </div>
       </div>
-      <div class="row" style="margin-top:8px">
+      <div class="row mt8">
         <div><label>每天主动私聊的概率</label><input type="number" id="f-chance" min="0" max="1" step="0.05"></div>
         <div><label>只在白天（从）</label><input type="number" id="f-from" min="0" max="23"></div>
         <div><label>到</label><input type="number" id="f-to" min="1" max="24"></div>
@@ -1263,7 +1895,7 @@
     <div class="card">
       <h2>手动测试</h2>
       <p class="hint">
-        ⚠️ 到 90 那条线正常要攒好几天，所以给你一个**立刻能验**的办法。
+        ⚠️ 到 90 那条线正常要攒好几天，所以给你一个<b>立刻能验</b>的办法。
         这两个按钮都会<b>真的发消息</b>（到线通知发到 1 档群、私聊直接发给本人）。
       </p>
       <div class="row">
@@ -1275,11 +1907,16 @@
         <button class="act" onclick="sendDm()" id="btn-f-dm" style="background:#dc2626">真的发一条私聊</button>
         <span class="msg" id="msg-f"></span>
       </div>
-      <div id="f-preview" class="kvs" style="margin-top:10px"></div>
+      <div id="f-preview" class="kvs mt10"></div>
     </div>
   </section>
 
   <section id="tab-qqlogin" class="hidden">
+    <div class="pagehead">
+      <div class="t">QQ 登录</div>
+      <div class="d">扫码登录、掉线排查</div>
+    </div>
+
     <div class="card">
       <h2>QQ 登录状态</h2>
       <p class="hint">
@@ -1294,7 +1931,7 @@
         <button class="ghost" onclick="qqReloadQr()">显示二维码</button>
         <button class="ghost" onclick="qqNewQr()" id="btn-qq-newqr">重新出码</button>
       </div>
-      <p class="hint" id="qq-recover-msg" style="margin-top:10px"></p>
+      <p class="hint mt10" id="qq-recover-msg"></p>
     </div>
 
     <div class="card" id="qq-qr-card" style="display:none">
@@ -1304,21 +1941,19 @@
         二维码有时效（几分钟）。<b>扫码失败就点「重新出码」拿一张新的</b>再扫 ——
         每次点都会让 QQ 现生成一张，不是把旧的再画一遍。
       </p>
-      <div style="text-align:center;padding:12px 0">
-        <!--
-          ⚠️⚠️ 2026-09-15：**别加 `image-rendering: pixelated`、也别硬写 280px 拉大**。
+      <div class="tc-p12">
+        <!-- ⚠️⚠️ 2026-09-15：别加 `image-rendering: pixelated`、也别硬写 280px 拉大。
           NapCat 给的原图只有 147×147，最近邻放大到 280 会把二维码模块拉得
-          宽窄不一 → **手机扫不出来**（用户反馈"从来没扫成功过"的原因之一）。
-          现在按原始比例铺满卡片、用浏览器的平滑缩放，交给摄像头去分辨。
-        -->
+          宽窄不一 → 手机扫不出来（用户反馈"从来没扫成功过"的原因之一）。
+          现在按原始比例铺满卡片、用浏览器的平滑缩放，交给摄像头去分辨。 -->
         <img id="qq-qr-img" alt="登录二维码"
              style="width:100%;max-width:320px;height:auto;background:#fff;padding:10px;border-radius:10px">
       </div>
-      <p class="hint" id="qq-qr-hint" style="text-align:center"></p>
+      <p class="hint tc" id="qq-qr-hint"></p>
     </div>
 
     <div class="card">
-      <h2>为什么会掉线 / 起不来</h2>
+      <h2>为什么会掉线 / 起不来 <span class="q" tabindex="0" data-q="掉线大多是：① 有人重复扫码登录，QQ 把旧会话踢了；② 网络抖动导致心跳超时；③ 机器人进程被别的脚本杀掉了。起不来大多是：① 协议端（NapCat）没起来；② 端口被占用；③ token 过期。">?</span></h2>
       <p class="hint">
         <b>网络瞬断</b>：网恢复后 QQ 一般能自己重连，不用管。<br>
         <b>被踢下线</b>（日志里写 <code>KickedOffLine</code>）：腾讯把登录态作废了，
@@ -1327,7 +1962,7 @@
         下面这个按钮会<b>把它启动起来</b>（开一个 NapCat 窗口，最小化在任务栏）——
         不是只能"重启"，没跑的时候点它也有用。
       </p>
-      <p class="hint" id="qq-restart-hint" style="margin-bottom:8px"></p>
+      <p class="hint mb8" id="qq-restart-hint"></p>
       <div class="btns">
         <button class="act" onclick="qqRestart()" id="btn-qq-restart"
                 style="background:#dc2626">重启 NapCat（重新出码）</button>
@@ -1336,8 +1971,13 @@
   </section>
 
   <section id="tab-status" class="hidden">
+    <div class="pagehead">
+      <div class="t">运行状态</div>
+      <div class="d">连接、路径、开机自启</div>
+    </div>
+
     <div class="card">
-      <h2>当前状态</h2>
+      <h2>运行状态</h2>
       <div id="stats"></div>
       <div class="btns">
         <button class="ghost" onclick="reloadAll()">刷新</button>
@@ -1362,7 +2002,7 @@
         <button class="ghost" id="btn-autostart-off" onclick="autostartSet(false)">关闭</button>
         <button class="ghost" onclick="loadAutostart()">刷新状态</button>
       </div>
-      <p class="hint" id="autostart-msg" style="margin-top:10px"></p>
+      <p class="hint mt10" id="autostart-msg"></p>
     </div>
   </section>
 </div>
@@ -1830,7 +2470,7 @@ document.querySelectorAll('nav button').forEach(b => {
     b.classList.add('on');
     // ⚠️ 这个列表必须跟 nav 里的 data-tab 一一对应 —— 漏了哪个，哪个标签就切不过去
     //    （qzone 就漏过一阵子，面板永远显示不出来）
-    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','qqlogin','status'].forEach(t => {
+    ['model','groups','persona','knowledge','faces','qzone','groupcfg','life','quest','affinity','qqlogin','status'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -1886,6 +2526,25 @@ async function reloadAll() {
   $('llm-temperature').value = c.llm.temperature ?? 0.5;
   $('llm-maxTokens').value = c.llm.maxTokens ?? 800;
   $('llm-timeout').value = c.llm.timeout ?? 60000;
+
+  // 生图
+  const ig = c.imagegen || {};
+  $('ig-enable').checked = !!ig.enable;
+  $('ig-provider').value = ig.provider || 'ark';
+  // ⚠️ 顺序：先把值填进去，再调 igProviderChanged() 更新 placeholder
+  //    （它在"值为空"时会塞预设的默认尺寸，直接覆盖用户存的空值是有意的）
+  $('ig-baseURL').value = ig.baseURL || '';
+  $('ig-model').value = ig.model || '';
+  $('ig-size').value = ig.size || '';
+  // 固定画风那层（界面上可改可存）
+  $('ig-style-self').value = (ig.style && ig.style.self) || '';
+  $('ig-style-scene').value = (ig.style && ig.style.scene) || '';
+  $('ig-apiKey').value = ig.apiKey || '';
+  $('ig-timeoutMs').value = ig.timeoutMs ?? 180000;
+  $('ig-cooldownMs').value = ig.cooldownMs ?? 60000;
+  $('ig-keepHours').value = ig.keepHours ?? 24;
+  igProviderChanged();
+  igCacheInfo();
 
   // 群与触发
   $('trigger-allowGroups').value = (c.trigger.allowGroups || []).join('\n');
@@ -1945,7 +2604,7 @@ async function reloadAll() {
   if (r.problems && r.problems.length) {
     p.innerHTML = '<div class="card" style="border-color:#fde68a;background:#fffbeb">' +
       '<h2 style="color:#d97706">配置有问题</h2>' +
-      r.problems.map(x => '<div style="font-size:13.5px">• ' + esc(x) + '</div>').join('') + '</div>';
+      r.problems.map(x => '<div style="font-size:14px">• ' + esc(x) + '</div>').join('') + '</div>';
   } else {
     p.innerHTML = '';
   }
@@ -1967,9 +2626,11 @@ async function reloadAll() {
     kv('NapCat 连接', '<span class="mono">' + esc(c.onebot.mode + ' ' + c.onebot.url) + '</span>');
 
   $('learned-count').textContent = r.stats.learned + ' 条';
-  $('learned-list').innerHTML = r.learnedTopics.length
-    ? r.learnedTopics.map((t, i) => (i + 1) + '. ' + esc(t)).join('<br>')
-    : '<span style="color:#6b7280">还没有学到额外的东西</span>';
+  // ⚠️ 2026-09-23（轻整理）：原来直接 `innerHTML = ...` 全量铺开，条目一多就只能一路往下滚
+  //    ⇒ 改成**先存起来、再交给 `learnedFilter()` 渲染**，这样搜索框能纯前端过滤。
+  //    ⚠️ 渲染逻辑和文案一字未改，只是挪进了 learnedFilter()；id 仍是 learned-list。
+  LEARNED_TOPICS = r.learnedTopics || [];
+  learnedFilter();
 
   // 开机自启（状态页那张卡片）—— 它自己会判元素在不在，不会把上面这些东西带停
   loadAutostart();
@@ -2232,17 +2893,17 @@ function questDevHtml(s) {
   const row = (at, inner) =>
     `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line)">
       <div style="color:#9ca3af;font-size:12px;min-width:38px">${hm(at)}</div>
-      <div style="flex:1">${inner}</div></div>`;
+      <div class="f1">${inner}</div></div>`;
   for (const st of s.stages || []) {
     const reps = (st.replies || [])
-      .map((x) => `<div style="color:#6b7280;font-size:12.5px;padding-left:8px">↳ ${esc(x.name)}：${esc(x.text)}</div>`)
+      .map((x) => `<div style="color:#6b7280;font-size:13px;padding-left:8px">↳ ${esc(x.name)}：${esc(x.text)}</div>`)
       .join('');
     rows.push({
       at: Number(st.at ?? 0),
       html: row(
         st.at,
         `<div><b>第 ${st.i} 段</b>　${esc(st.text || '')}</div>` +
-          (st.event && st.event !== st.text ? `<div style="color:#6b7280;font-size:12.5px">（世界：${esc(st.event)}）</div>` : '') +
+          (st.event && st.event !== st.text ? `<div style="color:#6b7280;font-size:13px">（世界：${esc(st.event)}）</div>` : '') +
           reps,
       ),
     });
@@ -2252,7 +2913,7 @@ function questDevHtml(s) {
       at: Number(x.at ?? 0),
       html: row(
         x.at,
-        `<span style="background:#ede9fe;color:#5b21b6;border-radius:3px;padding:1px 4px;font-size:11.5px">插曲</span>
+        `<span style="background:#ede9fe;color:#5b21b6;border-radius:3px;padding:1px 4px;font-size:12px">插曲</span>
          她在群里顺口接的：${esc(x.text)}`,
       ),
     });
@@ -2267,9 +2928,9 @@ function questDevHtml(s) {
   const WHY_LABEL = { at: '叫了她', reply: '回她的话', suggest: '给了建议', question: '在问剧情', loose: '随口提了一句' };
   for (const x of s.pendingList || []) {
     const tag =
-      '<span style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 4px;font-size:11.5px">等下一段</span>';
+      '<span style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 4px;font-size:12px">等下一段</span>';
     const sub = WHY_LABEL[x.why]
-      ? `<span style="color:#9ca3af;font-size:11.5px">（${WHY_LABEL[x.why]}）</span>`
+      ? `<span style="color:#9ca3af;font-size:12px">（${WHY_LABEL[x.why]}）</span>`
       : '';
     rows.push({
       at: Number(x.at ?? 0),
@@ -2369,7 +3030,7 @@ async function renderQuest() {
         kv('参与过的人', `${(s.cast || []).length} 人`);
       const dev = questDevHtml(s);
       if (dev) {
-        html += '<div style="margin-top:12px"><b style="font-size:13px">剧情发展（按时间）</b>' +
+        html += '<div class="mt12"><b style="font-size:13px">剧情发展（按时间）</b>' +
           '<div class="hint" style="margin:2px 0 0">紫标＝她在群里顺口接的话（也算数）；黄标＝群里说了、还没进下一段</div>' +
           dev + '</div>';
       }
@@ -2394,7 +3055,7 @@ async function renderQuest() {
         otherHints.map(([g, t]) => `群 ${esc(g)}：${esc(String(t).slice(0, 24))}`).join('<br>'));
     }
     if (s.recent && s.recent.length) {
-      html += '<div style="margin-top:10px"><b style="font-size:13px">最近几条</b>' +
+      html += '<div class="mt10"><b style="font-size:13px">最近几条</b>' +
         // ⚠️⚠️ 2026-09-18 修（用户报「最终一共多少段和 webui 上的数字没对上」）：
         //    `recent[]` 里存的是**整个 quest 对象**，所以 `x.stages` 是**每段的数组**
         //    （不是段数！）—— 原来直接 `${x.stages}` 会渲染成一串 `[object Object]`。
@@ -2404,7 +3065,7 @@ async function renderQuest() {
           const n = Array.isArray(x.stages) ? x.stages.length : Number(x.stages) || 0;
           const plan = Number(x.plannedStages) || 0;
           const tail = plan && plan !== n ? `，原计划 ${plan} 段` : '';
-          return `<div style="font-size:12.5px;color:#6b7280;padding:2px 0">
+          return `<div style="font-size:13px;color:#6b7280;padding:2px 0">
           ${x.ending === 'good' ? '🟢' : '🔴'} ${esc(x.premise || '')}（${n} 段${tail}）</div>`;
         }).join('') + '</div>';
     }
@@ -2437,6 +3098,7 @@ async function saveQuest() {
     }})
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) kDirty(false);
   if (r.ok) renderQuest();
 }
 
@@ -2593,18 +3255,18 @@ function renderSim(s) {
       if (x.role === 'saki') {
         return `<div style="padding:6px 0;border-bottom:1px dashed var(--line)">
           <b style="color:#5b7fd4">Saki（第 ${x.stage} 段）</b>　${esc(x.text)}
-          ${x.event ? `<div style="color:#6b7280;font-size:12.5px">（世界：${esc(x.event)}）</div>` : ''}</div>`;
+          ${x.event ? `<div style="color:#6b7280;font-size:13px">（世界：${esc(x.event)}）</div>` : ''}</div>`;
       }
       if (x.role === 'skip') {
-        return `<div style="padding:4px 0;color:#d97706;font-size:12.5px">⚠️ 「${esc(x.text)}」被判成<span class="mono">${esc(x.why || '')}</span>，<b>不会影响剧情</b>（真实群里也是这样）</div>`;
+        return `<div style="padding:4px 0;color:#d97706;font-size:13px">⚠️ 「${esc(x.text)}」被判成<span class="mono">${esc(x.why || '')}</span>，<b>不会影响剧情</b>（真实群里也是这样）</div>`;
       }
-      return `<div style="padding:4px 0;color:#16a34a;font-size:12.5px">${esc(x.name)}：${esc(x.text)}　<span class="mono">(${esc(x.why || '')})</span></div>`;
+      return `<div style="padding:4px 0;color:#16a34a;font-size:13px">${esc(x.name)}：${esc(x.text)}　<span class="mono">(${esc(x.why || '')})</span></div>`;
     }).join('');
   if (box) box.classList.toggle('hidden', !!s.ended);
   if (story) {
     story.innerHTML = (s.story && s.story.length)
       ? '<h2 style="font-size:14px">这次模拟写下的故事线</h2><div class="kvs">' +
-        s.story.map((e) => `<div style="padding:3px 0;font-size:12.5px">${e.tier === 2 ? '【主线】' : ''}${esc(e.text)}</div>`).join('') +
+        s.story.map((e) => `<div style="padding:3px 0;font-size:13px">${e.tier === 2 ? '【主线】' : ''}${esc(e.text)}</div>`).join('') +
         '</div>'
       : '';
   }
@@ -2836,7 +3498,7 @@ async function fillGroupParams() {
   const val = (v) => (v === undefined || v === null ? '' : esc(String(v)));
   /** 开 / 关 两态（值 = 这个群现在实际生效的那个状态） */
   const onoff = (id, on) =>
-    `<select id="${id}" style="width:auto;margin:0">
+    `<select id="${id}" class="wauto-m0">
        <option value="1"${on ? ' selected' : ''}>开</option>
        <option value="0"${on ? '' : ' selected'}>关</option>
      </select>`;
@@ -2853,8 +3515,8 @@ async function fillGroupParams() {
   } catch {}
 
   box.innerHTML = `
-    <div class="hint" style="margin:0 0 8px">群 <b>${esc(gid)}</b> · ${today}</div>
-    <div class="hint" style="margin:0 0 8px">
+    <div class="hint m0b8">群 <b>${esc(gid)}</b> · ${today}</div>
+    <div class="hint m0b8">
       下面是<b>这个群自己的一份</b>（框里就是它现在实际生效的值）——
       改完保存只写进这个群，<b>不影响别的群</b>。没动过的群用的是内置起点。
     </div>
@@ -2883,7 +3545,7 @@ async function fillGroupParams() {
         <label title="硬上限段数">最多段数 <input type="number" id="gp-quest-stages" min="1" max="10" style="width:70px" value="${val(Q.maxStages)}"></label>
         <label title="没人回最多自动续几段">冷场自动续 <input type="number" id="gp-quest-cold" min="0" max="5" style="width:70px" value="${val(Q.coldAutoLimit)}"></label>
         <label title="群友哪句话才算「能改变剧情」">谁的话算数
-          <select id="gp-quest-mode" style="width:auto;margin:0">
+          <select id="gp-quest-mode" class="wauto-m0">
             <option value="strict"${Q.replyMode === 'strict' ? ' selected' : ''}>严格（只认@她/回她/明显的建议）</option>
             <option value="normal"${(Q.replyMode ?? 'normal') === 'normal' ? ' selected' : ''}>标准（+任何问句）</option>
             <option value="loose"${Q.replyMode === 'loose' ? ' selected' : ''}>宽松（+6字以上闲聊）</option>
@@ -2901,12 +3563,12 @@ async function fillGroupParams() {
       </div>
     </div>
 
-    <div class="btns" style="margin-top:10px">
+    <div class="btns mt10">
       <button class="act" onclick="saveGroupParams()">保存这个群的设置</button>
       <button class="act" onclick="clearGroupParams()">恢复内置起点</button>
       <span class="msg" id="msg-gp"></span>
     </div>
-    <div class="hint" style="margin-top:6px">
+    <div class="hint mt6">
       这个群现在：日常事件 <b>${L.enable === false ? '关' : '开'}</b>
       （每天 ${esc(String(L.minPerDay))}~${esc(String(L.maxPerDay))} 条、间隔 ${mins(L.cooldownMs)} 分钟、${esc(String(L.startHour))}~${esc(String(L.endHour))} 点）·
       自动开剧情 <b>${Q.enable === true ? '开' : '关'}</b>
@@ -3191,6 +3853,216 @@ async function testLLM() {
     }})
   });
   flash(el, r.ok, r.ok ? `连通，${r.ms}ms，返回「${r.reply}」` : `失败：${r.error}`);
+}
+
+// ── 生图 ───────────────────────────────────────────────
+// ⚠️ 只用来填 placeholder（提示"留空会用哪个"）。
+//    留空 = 后端 src/imagegen.js 里那张表说了算 —— **默认值只有一份**，
+//    别在这儿再抄一遍当真实值用，抄两遍迟早不一致。
+const IG_PRESETS = {
+  ark: {
+    base: 'https://ark.cn-beijing.volces.com/api/v3',
+    model: 'doubao-seedream-4-0-250828',
+    // ⚠️ 默认 4K ≈ 1660 万像素（2K 只有 400 万，在 QQ 里显示得跟表情包差不多大）
+    size: '4K',
+    // ⚠️ 5.0 pro / flash 最高只到 2K，后端会自动夹一下
+    sizes: ['1K', '2K', '4K'],
+  },
+  openai: {
+    base: 'https://api.siliconflow.cn/v1',
+    model: 'Qwen/Qwen-Image-Edit-2509',
+    size: '1024x1024',
+    sizes: ['1024x1024', '1024x1536', '1536x1024', '768x1024', '512x512'],
+  },
+};
+
+/** 填一个 <datalist>（去重；空值丢掉） */
+function fillIgList(id, list) {
+  const dl = $(id);
+  if (!dl) return;
+  dl.innerHTML = [...new Set((list || []).filter(Boolean))].map((m) => `<option value="${esc(m)}"></option>`).join('');
+}
+
+function igProviderChanged() {
+  const p = IG_PRESETS[$('ig-provider').value] || IG_PRESETS.ark;
+  $('ig-baseURL').placeholder = p.base + '（留空即用这个）';
+  $('ig-model').placeholder = p.model + '（留空即用这个）';
+  // ⚠️ 两家的尺寸格式不一样（Ark 认 `2K`，OpenAI 系只认 `1024x1024`）——
+  //    只在"当前值还是某个预设的默认值"时才跟着换，别覆盖用户自己填的
+  const sizeEl = $('ig-size');
+  if (!sizeEl.value || Object.values(IG_PRESETS).some((x) => x.size === sizeEl.value)) sizeEl.value = p.size;
+  fillIgList('ig-size-list', p.sizes);
+  // 先用默认模型把列表垫上（还没联网也知道有一个能用），下面那次拉取会补全
+  fillIgList('ig-model-list', [p.model]);
+  igLoadModels({ silent: true });
+}
+
+/**
+ * 拉生图模型列表 —— **内置候选 ∪ 平台 `/models`**。
+ * ⚠️ 内置候选是**兜底**，不是装饰：火山方舟的模型要先去控制台开通才会出现在
+ *    `/models` 里，很多生图平台干脆没实现这个接口。拉不到也得能选。
+ */
+async function igLoadModels(opts = {}) {
+  const hint = $('ig-model-hint');
+  const btn = $('btn-ig-models');
+  if (btn) btn.disabled = true;
+  if (!opts.silent && hint) {
+    hint.textContent = '正在从 API 拉取模型列表…';
+    hint.style.color = '';
+  }
+  try {
+    const r = await api('/api/imagegen/models', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ imagegen: {
+        provider: $('ig-provider').value,
+        baseURL: $('ig-baseURL').value.trim(),
+        apiKey: $('ig-apiKey').value.trim(),
+      }})
+    });
+    if (!r || !r.ok) {
+      if (hint) {
+        hint.textContent = `拉取失败（${(r && r.error) || '接口没响应'}）—— 可以直接在输入框里手打模型名。`;
+        hint.style.color = '#d97706';
+      }
+      return;
+    }
+    fillIgList('ig-model-list', r.models);
+    if (!hint) return;
+    // ⚠️ 平台那边失败**不算整体失败**（内置候选照旧能用），所以话要说清楚，别一律报红
+    if (r.error) {
+      hint.textContent = `平台那边没拉到（${r.error}）—— 先用内置的 ${r.builtin} 个候选，也能直接手打。`;
+      hint.style.color = '#d97706';
+    } else if (r.live) {
+      hint.textContent = `平台有 ${r.live} 个模型（生图的排在最前面），另有内置候选 ${r.builtin} 个 —— 点输入框就能选。`;
+      hint.style.color = '#16a34a';
+    } else {
+      hint.textContent = `内置 ${r.builtin} 个候选（还没填 API Key，所以没去平台拉）—— 点输入框就能选，也能手打。`;
+      hint.style.color = '';
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** 显示本地缓存占用（**只统计不删**） */
+async function igCacheInfo() {
+  const el = $('ig-cache-info');
+  if (!el) return;
+  try {
+    const r = await api('/api/imagegen/cache', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ dryRun: true }),
+    });
+    if (!r || !r.ok) return;
+    el.textContent = `本地 ${r.count} 张 / ${(r.bytes / 1048576).toFixed(1)} MB`;
+  } catch { /* 统计失败不该弹错，忽略 */ }
+}
+
+/** 立即清掉过期的（保留时长按上面那个输入框） */
+async function igSweep() {
+  const btn = $('btn-ig-sweep');
+  [[btn, 'disabled']].forEach(([b, k]) => b && (b[k] = true));
+  try {
+    const r = await api('/api/imagegen/cache', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({}),
+    });
+    if (!r || !r.ok) return flash($('msg-ig'), false, '清理失败');
+    if (!r.enabled) flash($('msg-ig'), null, '保留时长是 0（不自动删）—— 什么都没清');
+    else if (r.removed) flash($('msg-ig'), true, `清掉 ${r.removed} 张（${(r.freedBytes / 1048576).toFixed(1)} MB）`);
+    else flash($('msg-ig'), null, `没有过期的（本地还留 ${r.count} 张）`);
+    igCacheInfo();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** 保存生图配置 */
+async function saveImagegen() {
+  const el = $('msg-ig');
+  // ⚠️⚠️ 画风必须**两个一起发**：后端存的时候是整段 `style` 对象替换，
+  //    只发一半会把另一半从 config.yml 里抹掉。
+  // ⚠️ 输入框留空 = **不动那一项**（退回上次读到的值），不是清空 ——
+  //    清空会让提示词退回兜底那一句，画风就废了。
+  const cur = (STATE && STATE.config && STATE.config.imagegen && STATE.config.imagegen.style) || {};
+  const sSelf = $('ig-style-self').value.trim();
+  const sScene = $('ig-style-scene').value.trim();
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ imagegen: {
+      enable: $('ig-enable').checked,
+      provider: $('ig-provider').value,
+      baseURL: $('ig-baseURL').value.trim(),
+      model: $('ig-model').value.trim(),
+      size: $('ig-size').value.trim(),
+      apiKey: $('ig-apiKey').value.trim(),
+      timeoutMs: Number($('ig-timeoutMs').value),
+      cooldownMs: Number($('ig-cooldownMs').value),
+      keepHours: Math.max(0, Number($('ig-keepHours').value) || 0),
+      style: { self: sSelf || cur.self || '', scene: sScene || cur.scene || '' },
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+/**
+ * 测试出图 —— ⚠️ **会真的出一张图**（火山方舟 0.20 元/张），按钮上写明了。
+ * 用人设包里那张参考图 + 一个日常自拍场景，出图后**直接在下面预览** ——
+ * 点一下就能判断"像不像她"，这也是唯一有意义的测试。
+ */
+async function testImagegen() {
+  const el = $('msg-ig');
+  const box = $('ig-preview');
+  box.innerHTML = '';
+  flash(el, null, '正在理解 + 出图…（10~40 秒）');
+  const r = await api('/api/imagegen/test', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      // ⚠️ 这个输入框是「假装群友说的那句话」；kind 是她自己写的标记（auto=不写）
+      prompt: $('ig-testScene').value.trim(),
+      kind: $('ig-testKind').value,
+      imagegen: {
+        enable: true,
+        provider: $('ig-provider').value,
+        baseURL: $('ig-baseURL').value.trim(),
+        model: $('ig-model').value.trim(),
+        size: $('ig-size').value.trim(),
+        apiKey: $('ig-apiKey').value.trim(),
+        timeoutMs: Number($('ig-timeoutMs').value),
+      },
+    })
+  });
+  if (!r.ok) {
+    // ⚠️ 两行分开显示（2026-09-22 实测踩到「模型没开通」之后改的）：
+    //    上面那行是**她会说的话**，下面那行是**给你**的下一步 ——
+    //    只给"相机坏了"，用户根本不知道要去控制台开通模型。
+    box.innerHTML = r.hint
+      ? '<div class="hint" style="margin:0;color:#b45309">' +
+        '<b>出图失败。</b>群里她会说：「' + esc(r.error) + '」<br>' + esc(r.hint) + '</div>'
+      : '';
+    return flash(el, false, '出图失败');
+  }
+  flash(el, true, `成功，${Math.round((r.ms || 0) / 1000)} 秒`);
+  const used = r.withSelf === false
+    ? '这条路没有参考图（拍的是景物，她本来就不在画面里）'
+    : r.refNames && r.refNames.length
+      ? '参考图：' + esc(r.refNames.join('、'))
+      : '⚠️ 没有参考图 —— 生成的脸每次都不一样。去「人设」页传一张立绘。';
+  // ⚠️ 把「理解成了什么」也显示出来 —— 调画风/调场景时只有看得见才调得动
+  const p = r.picked || {};
+  const detail =
+    '<div class="hint" style="margin-top:6px;line-height:1.7">' +
+    used +
+    '<br>她此刻：' + esc((r.facts && r.facts.now) || '?') + ' · ' + esc((r.facts && r.facts.where) || '?') +
+    '<br>理解成：' + (r.withSelf ? '<b>画面里有她</b>' : '<b>她拍的东西（没有她）</b>') +
+    '，拍「' + esc(p.what || '') + '」' +
+    (p.place ? '，地点「' + esc(p.place) + '」' : '') +
+    (p.time ? '，时间「' + esc(p.time) + '」' : '') +
+    '<br><span style="color:#6b7280">最终提示词（' + String(r.prompt || '').length + ' 字）：' +
+    esc(r.prompt || '') + '</span></div>';
+  box.innerHTML =
+    '<img src="' + r.dataUrl + '" style="max-width:340px;border-radius:10px;border:1px solid #e5e7eb">' + detail;
 }
 
 // ── 保存：群与触发 ──
@@ -3603,7 +4475,7 @@ async function renderQzone() {
     $('qz-maxPerDay').value = q.maxPerDay ?? 3;
     $('qz-ugcRight').value = String(q.ugcRight ?? 1);
     if (q.recent && q.recent.length) {
-      $('qzone-status').innerHTML += '<div style="margin-top:12px"><b>最近发过的：</b><br>' +
+      $('qzone-status').innerHTML += '<div class="mt12"><b>最近发过的：</b><br>' +
         q.recent.map(p => '· ' + esc(p.content.slice(0, 80))).join('<br>') + '</div>';
     }
   } catch {}
@@ -3986,30 +4858,588 @@ window.delFace = async (tag) => {
 };
 
 // ── 知识库 ──
-$('k-file').onchange = loadKnowledge;
 
-/** 动态填知识文件下拉框（后端返回的列表，加了新文件不用改这里） */
+/* ⚠️ 2026-09-23「轻整理 / 重做」新增的纯前端工具（**都不碰后端**）—— */
+
+let KFILES = [];      // 后端给的整份列表（含 desc/size/from/readonly）
+let LEARNED_TOPICS = [];
+
+/** 群资料库 / 动画库 / 敏感词 / 共用库（人设包在知识页已被排除）—— 分组按前缀认，不用猜 */
+function kGroupOf(f) {
+  if (f.name.startsWith('groups/')) return '群资料库';
+  if (f.name.startsWith('anime/')) return '动画库';
+  if (f.name.startsWith('sensitive/')) return '敏感词';
+  if (f.from === 'persona') return '人设包';
+  return '共用库';
+}
+const KGROUP_ORDER = ['群资料库', '动画库', '敏感词', '共用库'];
+const KLIB_DESC = {
+  '群资料库': '哪个群、群友是谁、发生过什么 —— 放错会出现「我记录了你」这种副作用',
+  '动画库': '二次元作品 / 乐队 / 角色 —— 读哪几个由人设的 anime.works 决定',
+  '敏感词': '哪些话是雷、怎么绕 —— 独立成库，全局注入，不按群或角色筛选',
+  '共用库': '服务器资料、学习档案、节日表 —— 所有群共享的东西',
+};
+/** 常见文件的稳定说明：后端暂时没有 desc 时，也不要退回显示原始文件名。 */
+const KFILE_LABEL = {
+  'group-memory.md': '群资料：群友是谁、什么性格、群里的大事',
+  'sensitive/sensitive-words.md': '敏感词：只认不接，不重复、不引申、不顺着说',
+  'hzymtr-server.md': '服务器知识库：进服、排障、规则、存档',
+  'learned.md': '学习档案：群里教的短知识',
+  'memes.md': '梗库：常用梗和回复素材',
+  'owner.md': '主人信息：群主、服务器主人等共用事实',
+  'relationship.md': '关系设定：角色与主人 / 群友的关系',
+  'holidays.md': '节日表：节日日期与活动信息',
+};
+let KLIB_CUR = '';
+
+/** `.example.md` 是给新机器的模板，**不是活知识** ⇒ 不进列表
+ *  （`webui.js` 那边 `endsWith('.md')` 拦不住它，改这里最省事、不动后端） */
+function kIsTemplate(f) { return /\.example\.md$/i.test(f.name); }
+
+/** ⚠️ 2026-09-23 第四轮：**人设包的文件不进这个列表**（用户要求）。
+ *  理由：人设的东西在人设页管（那边有「人设文档」卡，**`persona.md` 也在那儿**），
+ *  这边只留「动画库」和「共用库」⇒ 两边职责清楚，也不会出现两份 persona.md 改错地方。
+ *  ⚠️ 所以 `PJ_DOC_ONLY` 那轮加了 `persona.md` —— 两处必须同时改，否则 persona.md 会没入口。 */
+function kIsPersonaPack(f) { return f.from === 'persona'; }
+
+/** 文件名旁边那句短标签（代替原来 option 里那一大坨） */
+function kShortTag(f) {
+  if (f.readonly) return '只读';
+  if (f.from === 'persona') return '人设';
+  if (f.name.startsWith('groups/')) return '分群';
+  if (f.name.startsWith('anime/')) return '动画';
+  if (f.name.startsWith('sensitive/')) return '敏感';
+  return '';
+}
+
+function kFmtSize(n) {
+  n = Number(n) || 0;
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + 'M';
+  if (n >= 1024) return (n / 1024).toFixed(1) + 'K';
+  return n + 'B';
+}
+
+/** 文件下拉的短说明文字：不显示 anime/xxx.md 这类原始文件名。 */
+function kFileLabel(f) {
+  const group = kGroupOf(f);
+  const desc = String(f.desc || '')
+    .replace(/[`*_]/g, '')
+    .replace(/📌/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const fixed = KFILE_LABEL[f.name] || '';
+  let label = fixed || desc.split(/\s+——\s+|\s*⚠️\s*/)[0].trim();
+  if (!label || label === group) label = `${group}资料`;
+  return label.length > 48 ? `${label.slice(0, 45)}…` : label;
+}
+
+/** 动态填两个通栏大卡片下拉（保留 kListFilter 这个启动入口名）。
+ *  ⚠️ 2026-09-25：原来这里填的是两个原生 `<select>`，现在改成
+ *     「弹层列表（.klib / .kfcard）+ 大卡片上的当前值（.kpicker-value）」。
+ *  ⚠️ 页面和列表里**只出现 kFileLabel() 说明文字**，绝不出现 anime/xxx.md 原始文件名。 */
+function kListFilter() {
+  const libMenu = $('k-lib-menu');
+  const fileMenu = $('k-file-menu');
+  const hint = $('k-libhint');
+  if (!libMenu || !fileMenu) return;
+  const cur = $('k-file').value;
+  const groups = KGROUP_ORDER.filter((g) => KFILES.some((f) => kGroupOf(f) === g));
+  if (!KLIB_CUR || !groups.includes(KLIB_CUR)) KLIB_CUR = groups[0] || '';
+  // 「新建动画库」只在**动画库**这一组里出现；切到敏感词/共用库/群资料库就收起来。
+  $('k-anime-new')?.classList.toggle('hidden', KLIB_CUR !== '动画库');
+  libMenu.innerHTML = groups
+    .map((g) => {
+      const n = KFILES.filter((f) => kGroupOf(f) === g).length;
+      const on = g === KLIB_CUR;
+      return `<button type="button" role="option" aria-selected="${on}" class="klib${on ? ' on' : ''}"`
+        + ` onclick="kPickLib('${esc(g).replace(/'/g, '&#39;')}')">`
+        + `<span class="klt">${esc(g)}<span class="tag">${n} 个</span></span>`
+        + `<span class="kln">${esc(KLIB_DESC[g] || '')}</span></button>`;
+    })
+    .join('') || '<span class="empty">还没有知识文件</span>';
+
+  const items = KFILES.filter((f) => kGroupOf(f) === KLIB_CUR);
+  fileMenu.innerHTML = items
+    .map((f) => {
+      const tag = kShortTag(f);
+      const on = f.name === cur;
+      return `<button type="button" role="option" aria-selected="${on}" class="kfcard${on ? ' on' : ''}"`
+        + ` onclick="kPickFile('${esc(f.name).replace(/'/g, '&#39;')}')">`
+        + `<span class="fn2"><span class="fnl">${esc(kFileLabel(f))}</span>`
+        + (tag ? `<span class="tag">${esc(tag)}</span>` : '')
+        + `</span><span class="fsz">${kFmtSize(f.size)}${f.readonly ? ' · 只读' : ''}</span></button>`;
+    })
+    .join('') || '<span class="empty">这个库里还没有文件</span>';
+
+  // 大卡片上只写「当前选中项」；没有可用项时退回灰色占位文字。
+  const curLib = $('k-lib-value');
+  if (curLib) {
+    curLib.textContent = KLIB_CUR || '（没有可用的知识库）';
+    curLib.classList.toggle('is-empty', !KLIB_CUR);
+  }
+  const curFile = $('k-file-value');
+  if (curFile) {
+    const sel = items.find((f) => f.name === cur);
+    curFile.textContent = sel ? kFileLabel(sel) : '（这个库里还没有文件）';
+    curFile.classList.toggle('is-empty', !sel);
+  }
+  if (hint) hint.textContent = KLIB_CUR ? `${KLIB_CUR}：${KLIB_DESC[KLIB_CUR] || ''}` : '';
+}
+
+/** 通栏大卡片：点一下展开/收起；两个永远只开一个（另一个自动收起）。 */
+function kDropToggle(which) {
+  const id = which === 'lib' ? 'lib' : 'file';
+  const btn = $('k-' + id + '-btn');
+  const menu = $('k-' + id + '-menu');
+  const wasOpen = btn && btn.getAttribute('aria-expanded') === 'true';
+  kDropCloseAll();
+  if (wasOpen || !btn || !menu) return;
+  // 空列表（还没有知识文件）就别弹一个空壳出来。
+  if (!menu.querySelector('button')) return;
+  btn.setAttribute('aria-expanded', 'true');
+  menu.classList.remove('hidden');
+}
+
+/** 两个下拉一起收起（点面板外、按 Esc、选中某一项后都走这里）。 */
+function kDropCloseAll() {
+  ['lib', 'file'].forEach((id) => {
+    const btn = $('k-' + id + '-btn');
+    const menu = $('k-' + id + '-menu');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    if (menu) menu.classList.add('hidden');
+  });
+}
+
+/** 点面板外 / 按 Esc 收起（document 上只绑一次，页面里所有这类下拉共用）。
+ *  ⚠️ 命中 `.kpicker` 内部就放行 —— 按钮和列表项各自有 onclick，别在这里抢。 */
+document.addEventListener('click', (e) => {
+  if (e.target && e.target.closest && e.target.closest('.kpicker')) return;
+  kDropCloseAll();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') kDropCloseAll();
+});
+
+/** 切库：自动选该库第一个文件，并按预览模式打开
+ *  （两行文字必须一致 —— 不能"库=动画库、文件=群资料"）。 */
+function kPickLib(group) {
+  if (!KFILES.some((f) => kGroupOf(f) === group)) return;
+  KLIB_CUR = group;
+  const first = KFILES.find((f) => kGroupOf(f) === group);
+  if (first) $('k-file').value = first.name;
+  kListFilter();
+  kDropCloseAll();
+  kMode('prev');
+  if (first) loadKnowledge();
+}
+
+/** 切文件：切库 + 选中 + 回预览，再读取新内容。 */
+function kPickFile(name) {
+  const f = KFILES.find((x) => x.name === name);
+  if (!f) return;
+  KLIB_CUR = kGroupOf(f);
+  $('k-file').value = name;
+  kListFilter();
+  kDropCloseAll();
+  kMode('prev');
+  loadKnowledge();
+}
+
+/** desc 里的 Markdown 标记渲染成真的样式（`**粗体**` / `` `等宽` ``）
+ *  ⚠️ 先 esc 再替换 ⇒ 说明文字里的尖括号不会变成 HTML。 */
+function kDescHtml(desc) {
+  let t = esc(String(desc || ''));
+  t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+  t = t.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  return t;
+}
+
+/** 右侧信息区：只显示标签和说明，不重复显示原始文件名。 */
+function kRenderInfo(meta) {
+  const tags = [];
+  if (meta) {
+    tags.push('<span class="tag accent">' + esc(kGroupOf(meta)) + '</span>');
+    if (meta.from === 'persona') tags.push('<span class="tag">换人设会一起换</span>');
+    if (meta.readonly) tags.push('<span class="tag warn">只读</span>');
+    if (meta.groupId) tags.push('<span class="tag">只给群 ' + esc(meta.groupId) + ' 用</span>');
+    tags.push('<span class="tag">' + esc(kFmtSize(meta.size)) + '</span>');
+  }
+  $('k-tags').innerHTML = tags.join('');
+  $('k-desc').innerHTML = kDescHtml(meta ? meta.desc : '');
+}
+
+/** 「它学到的」搜索过滤：只在浏览器里筛，服务端和 learned.md 一个字没动。 */
+function learnedFilter() {
+  const box = $('learned-list');
+  if (!box) return;
+  const q = (($('learned-q') || {}).value || '').trim().toLowerCase();
+  if (!LEARNED_TOPICS.length) {
+    box.innerHTML = '<span class="empty">还没有学到额外的东西</span>';
+    return;
+  }
+  const hit = q ? LEARNED_TOPICS.filter((t) => String(t).toLowerCase().includes(q)) : LEARNED_TOPICS;
+  box.innerHTML = hit.length
+    ? hit.map((t, i) => (i + 1) + '. ' + esc(t)).join('<br>')
+    : '<span class="empty">没有匹配「' + esc(q) + '」的条目</span>';
+}
+
+/** 新建人设的 id 格式提示：**只提示、不拦提交、不改后端校验**。 */
+function personaIdCheck() {
+  const el = $('p-new-id-note');
+  if (!el) return;
+  const v = (($('p-new-id') || {}).value || '').trim();
+  el.classList.remove('on');
+  if (!v) return;
+  const ok = /^[a-z0-9_-]+$/.test(v);
+  el.textContent = ok ? '✅「' + v + '」可以用' : '⚠️ 只能用小写字母、数字、横线（现在是「' + v + '」）';
+  el.classList.add('on');
+}
+
+/* ── 人设页 P1–P3（2026-09-23）—— 纯前端交互，都不动 id 和后端 ── */
+
+/** P1：状态卡里的「切换人设」—— 就地展开/收起那一小块（不弹窗、不新增组件）。 */
+function personaToggleSwitch() {
+  const box = $('p-switch-box');
+  const btn = $('p-switch-btn');
+  if (!box) return;
+  const open = box.classList.toggle('hidden') === false;
+  if (btn) btn.textContent = open ? '收起' : '切换人设';
+  if (open) personaPickChange();
+}
+
+/** P2：`?` 小圆点 —— 点一下就把说明就地展开在它下面，再点收起。
+ *  ⚠️ **故意不做纯 hover tooltip**：鼠标移开就没了、装不下加粗/换行、触屏根本触发不了。
+ *     键盘也管用（`tabindex=0` + Enter/Space）。 */
+function qToggle(el) {
+  if (!el) return;
+  // ⚠️ 展开块要插在**整个 label 外面** —— `.fld>label` 是 flex（为了塞标题+code key+?），
+  //    插进去会被当 flex item 挤扁。
+  const host = el.closest('label') || el.parentNode;
+  let box = host.nextElementSibling;
+  if (!box || !box.classList.contains('qbox')) {
+    box = document.createElement('div');
+    box.className = 'qbox';
+    host.parentNode.insertBefore(box, host.nextSibling);
+    box.textContent = el.getAttribute('data-q') || '';
+  }
+  const open = box.hidden === false;
+  box.hidden = open;
+  el.classList.toggle('open', !open);
+}
+document.addEventListener('click', (e) => {
+  const q = e.target.closest ? e.target.closest('.q[data-q]') : null;
+  if (q) { qToggle(q); return; }
+  // 点空白处把展开的 `?` 收起来（同一时刻只留一个）
+  if (!e.target.closest || !e.target.closest('.qbox')) {
+    document.querySelectorAll('.qbox').forEach((b) => { b.hidden = true; });
+    document.querySelectorAll('.q.open').forEach((b) => b.classList.remove('open'));
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const q = e.target.closest ? e.target.closest('.q[data-q]') : null;
+  if (q) { e.preventDefault(); qToggle(q); }
+});
+
+/** P3：「新建人设」顶上的 AI / 手动分段。
+ * 两种模式共用三个基础字段；切换只改变主按钮和手动模板选择区，不清空已填内容。 */
+function personaNewMode(m) {
+  const manual = m === 'manual';
+  const ai = $('p-mode-ai'), mm = $('p-mode-manual');
+  if (ai) ai.classList.toggle('on', !manual);
+  if (mm) mm.classList.toggle('on', manual);
+  const template = $('p-template-row');
+  if (template) template.classList.toggle('hidden', !manual);
+  const primary = $('p-new-primary');
+  if (primary) {
+    primary.textContent = manual ? personaTemplateButtonText() : 'AI 联网生成起草';
+    primary.title = manual ? '按当前关联模板创建新人设包' : '联网搜集资料并生成可预览的人设草稿';
+  }
+  const hint = $('p-mode-hint');
+  if (hint) {
+    hint.textContent = manual
+      ? '不联网：从关联模板创建，再逐项编辑'
+      : '联网搜资料 → 按模板逐字段填满 → 给你过一眼再落盘';
+  }
+}
+
+/** 同一个主按钮按当前模式分派：AI 起草 / 手动创建。 */
+function personaNewPrimary() {
+  return $('p-mode-manual')?.classList.contains('on') ? personaCreate() : personaDraftStart();
+}
+
+function personaTemplateButtonText() {
+  return ($('p-new-from')?.value || '_template') === '_template' ? '创建标准模板' : '创建';
+}
+
+function personaTemplateChange() {
+  if (!$('p-mode-manual')?.classList.contains('on')) return;
+  $('p-new-primary').textContent = personaTemplateButtonText();
+}
+
+/* ── 动画库：这里只列现成的库；新建统一在知识库页 ──
+   下拉只负责把已有库加入 hidden input，收集函数照旧，`pjList` 会去重/trim。 */
+function animeLibAddExisting() {
+  const sel = $('pf-anime-libpick');
+  const hid = $('pf-anime-works');
+  if (!sel || !hid || !sel.value) return;
+  hid.value = pjList(hid.value + '、' + sel.value).join('、');
+  sel.value = '';
+  tagsSync('pf-anime-works');
+}
+document.addEventListener('change', (e) => {
+  if (e.target && e.target.id === 'pf-anime-libpick') animeLibAddExisting();
+});
+
+/* ── P5：Tag Input（2026-09-23）──
+   ⚠️ **值永远存在旁边那个 hidden input 里**（`、`-分隔），标签只是皮。
+      所以 `personaCollectIdentity()` 里 `pjList($('pf-'+k).value)` 那几行**一个字都没改**
+      —— 少一个「保存后格式变了/值丢了」的风险类别。
+   ⚠️ 切包（`personaOpen`）会重渲染这些字段，所以同步函数要能反复调。 */
+
+/** 把 hidden input 里的 `a、b、c` 画成一排标签（+ 末尾一个输入框） */
+function tagsSync(inputId) {
+  const box = $('tags-' + inputId);
+  const hid = $(inputId);
+  if (!box || !hid) return;
+  const add = box.querySelector('.tagadd');
+  const keep = add ? add.outerHTML : '<input class="tagadd" placeholder="输入后回车">';
+  const list = pjList(hid.value);
+  const items = list
+    .map((t) => '<span class="tagitem"><span>' + escHtml(t) + '</span>' +
+      '<button type="button" data-del="' + escAttr(t) + '" title="删掉这个">×</button></span>')
+    .join('');
+  // 四个称呼字段使用同一种两行结构：输入框在第一行，标签/示例在第二行。
+  // 示例只是视觉提示，不进入 hidden input；用户一输入真实标签就自动消失。
+  const example = !list.length && box.dataset.example
+    ? '<span class="tagitem example" aria-label="示例">' + escHtml(box.dataset.example) + '</span>'
+    : '';
+  const content = items || example;
+  box.innerHTML = box.classList.contains('tags-stacked')
+    ? keep + '<div class="taglist">' + content + '</div>'
+    : items + keep;
+  hid.value = list.join('、');
+}
+
+/** 标签区的事件代理（只绑一次，因为字段是 innerHTML 重渲染出来的） */
+document.addEventListener('keydown', (e) => {
+  const inp = e.target.closest ? e.target.closest('.tags .tagadd') : null;
+  if (!inp) return;
+  const box = inp.closest('.tags');
+  const hid = $(box.getAttribute('data-for'));
+  if (!hid) return;
+  // 逗号（含中文逗号）也收 —— 用户很可能不打回车直接打逗号
+  if (e.key === 'Enter' || e.key === ',' || e.key === '，') {
+    e.preventDefault();
+    const v = inp.value.trim();
+    if (v) { hid.value = pjList(hid.value + '、' + v).join('、'); inp.value = ''; tagsSync(box.getAttribute('data-for')); }
+    return;
+  }
+  // 空着按退格 = 删最后一个
+  if (e.key === 'Backspace' && !inp.value) {
+    const list = pjList(hid.value);
+    if (list.length) { list.pop(); hid.value = list.join('、'); tagsSync(box.getAttribute('data-for')); }
+  }
+});
+document.addEventListener('click', (e) => {
+  const del = e.target.closest ? e.target.closest('.tags .tagitem button[data-del]') : null;
+  if (!del) return;
+  const box = del.closest('.tags');
+  const hid = $(box.getAttribute('data-for'));
+  if (!hid) return;
+  const t = del.getAttribute('data-del');
+  hid.value = pjList(hid.value).filter((x) => x !== t).join('、');
+  tagsSync(box.getAttribute('data-for'));
+});
+// 输入过程中就隐藏空值示例：一旦开始输入，当前字段就不再是“未填”。
+// 不在这里重建 innerHTML，避免输入框失焦、光标跳回开头。
+document.addEventListener('input', (e) => {
+  const inp = e.target.closest ? e.target.closest('.tags .tagadd') : null;
+  if (!inp) return;
+  const box = inp.closest('.tags');
+  const hid = $(box.getAttribute('data-for'));
+  if (!hid) return;
+  const example = box.querySelector('.tagitem.example');
+  if (example) example.hidden = !!inp.value.trim() || pjList(hid.value).length > 0;
+});
+// 失焦时把还留在输入框里的那半截也收成标签（`pjList` 会 trim 掉空格）
+document.addEventListener('focusout', (e) => {
+  const inp = e.target.closest ? e.target.closest('.tags .tagadd') : null;
+  if (!inp) return;
+  const v = inp.value.trim();
+  if (!v) return;
+  const box = inp.closest('.tags');
+  const hid = $(box.getAttribute('data-for'));
+  if (!hid) return;
+  hid.value = pjList(hid.value + '、' + v).join('、');
+  inp.value = '';
+  tagsSync(box.getAttribute('data-for'));
+});
+
+/** 行号槽：跟着 textarea 的行数和滚动走 */
+function kGutter() {
+  const ta = $('k-content');
+  const g = $('k-gutter');
+  if (!ta || !g) return;
+  const lines = (ta.value.match(/\n/g) || []).length + 1;
+  if (g.dataset.n !== String(lines)) {
+    g.dataset.n = String(lines);
+    g.textContent = Array.from({ length: lines }, (_, i) => i + 1).join('\n');
+  }
+  g.scrollTop = ta.scrollTop;
+}
+
+/** 字数统计：只做显示，**不拦保存**（真要限长由后端说了算） */
+function kCountUpdate() {
+  const el = $('k-count');
+  if (!el) return;
+  el.textContent = '当前 ' + (($('k-content').value || '').length) + ' 字';
+}
+
+$('k-content').addEventListener('input', () => { kCountUpdate(); kGutter(); kValidate(); });
+$('k-content').addEventListener('scroll', () => { $('k-gutter').scrollTop = $('k-content').scrollTop; });
+
+/** learned.md 格式校验（**只提示，不拦保存** —— 后端 `learnedValidate` 才是最终裁决）。
+ *  ⚠️ 规则和 `src/learned.js` 的 `validateFile` 对齐：缺 BEGIN / 缺 END / 顺序反了 /
+ *     有内容但没 `## 主题` / 某条下面是空的。 */
+const K_BEGIN = '<!-- LEARNED:BEGIN -->';
+const K_END = '<!-- LEARNED:END -->';
+function kValidate() {
+  const el = $('k-valid');
+  if (!el) return;
+  if ($('k-file').value !== 'learned.md') { el.classList.remove('on'); return; }
+  const t = $('k-content').value || '';
+  const i = t.indexOf(K_BEGIN), j = t.indexOf(K_END);
+  let bad = '';
+  if (i === -1) bad = '缺少 ' + K_BEGIN + ' 这一行（代码靠它定位条目，删了 learn()/forget() 会静默失效）';
+  else if (j === -1) bad = '缺少 ' + K_END + ' 这一行';
+  else if (j < i) bad = K_END + ' 跑到 ' + K_BEGIN + ' 前面了';
+  else {
+    const block = t.slice(i + K_BEGIN.length, j);
+    const ms = [...block.matchAll(/^##\s+(.+?)\s*$/gm)];
+    if (!ms.length && block.replace(/\s/g, '')) {
+      bad = 'BEGIN/END 之间只有文字，但没一条 `## 主题` —— 代码解析不出条目（等于内容丢了）';
+    } else {
+      for (let k = 0; k < ms.length && !bad; k++) {
+        const end = k + 1 < ms.length ? ms[k + 1].index : block.length;
+        if (!block.slice(ms[k].index + ms[k][0].length, end).trim()) {
+          bad = '条目「' + ms[k][1].trim() + '」下面是空的';
+        }
+      }
+    }
+  }
+  el.classList.add('on');
+  if (bad) { el.className = 'kvalid on bad'; el.textContent = '❌ ' + bad; }
+  else {
+    const n = (t.slice(i + K_BEGIN.length, j).match(/^##\s+/gm) || []).length;
+    el.className = 'kvalid on good'; el.textContent = '✅ 格式合格（' + n + ' 条知识）';
+  }
+}
+
+/** 编辑 / 预览 切换 */
+function kMode(m) {
+  const isEdit = m !== 'prev';
+  $('k-mode-edit').classList.toggle('on', isEdit);
+  $('k-mode-prev').classList.toggle('on', !isEdit);
+  $('k-editwrap').classList.toggle('hidden', !isEdit);
+  $('k-preview').classList.toggle('hidden', isEdit);
+  if (isEdit) kGutter();
+  else $('k-preview').innerHTML = kMarkdown($('k-content').value || '');
+}
+
+/** 重新读取：放弃当前未保存的改动，从磁盘再拉一次。
+ *  ⚠️ 这不是"回滚到上次保存" —— 那需要读 logs/backup/，**得后端加接口**，本轮没做。 */
+function knowledgeReload() {
+  loadKnowledge();
+  flash($('msg-k'), true, '已重新读取');
+}
+
+/** 极简 Markdown 渲染（**先整体 esc**，所以原文件里的 HTML 不会执行）
+ *  ⚠️ 只做「看得懂」那一层：标题/粗体/斜体/行内码/代码块/列表/引用/分隔线/表格/链接。 */
+function kMarkdown(src) {
+  const blocks = [];
+  let t = esc(String(src));
+  t = t.replace(/```([\s\S]*?)```/g, (_, c) => { blocks.push(c); return ' B' + (blocks.length - 1) + ' '; });
+  const inline = (x) => x
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const out = [];
+  let list = null;
+  const closeList = () => { if (list) { out.push('</' + list + '>'); list = null; } };
+  for (const raw of t.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { closeList(); out.push('<h' + h[1].length + '>' + inline(h[2]) + '</h' + h[1].length + '>'); continue; }
+    const fence = line.trim().match(/^ B(\d+) $/);
+    if (fence) { closeList(); out.push('<pre><code>' + blocks[Number(fence[1])] + '</code></pre>'); continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { closeList(); out.push('<hr>'); continue; }
+    if (/^\s*&gt;\s?/.test(line)) { closeList(); out.push('<blockquote>' + inline(line.replace(/^\s*&gt;\s?/, '')) + '</blockquote>'); continue; }
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ul || ol) {
+      const want = ul ? 'ul' : 'ol';
+      if (list !== want) { closeList(); out.push('<' + want + '>'); list = want; }
+      out.push('<li>' + inline((ul || ol)[1]) + '</li>'); continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      const cells = line.split('|').slice(1, -1).map((c) => c.trim());
+      if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue;   // 分隔行不渲染
+      closeList();
+      out.push('<tr>' + cells.map((c) => '<td>' + inline(c) + '</td>').join('') + '</tr>'); continue;
+    }
+    if (!line.trim()) { closeList(); continue; }
+    closeList();
+    out.push('<p>' + inline(line) + '</p>');
+  }
+  closeList();
+  // 连续的 <tr> 收成 <table>
+  return out.join('').replace(/(<tr>[\s\S]*?<\/tr>)+/g, (m) => '<table>' + m + '</table>');
+}
+
+/** 动态填知识文件列表（后端返回的列表，加了新文件不用改这里） */
 async function loadKnowledgeList(keep) {
   const r = await api('/api/knowledge/list');
-  const files = r.files ?? [];
-  const sel = $('k-file');
-  const want = keep || sel.value || 'persona.md';
-  sel.innerHTML = files
-    .map((f) => `<option value="${esc(f.name)}">${esc(f.name)}${f.desc ? ' —— ' + esc(f.desc) : ''}${f.readonly ? '（只读）' : ''}</option>`)
-    .join('');
-  if (files.some((f) => f.name === want)) sel.value = want;
-  return files;
+  // ⚠️ 2026-09-23：把 `.example.md` 模板剔掉 —— 它们是给新机器的样张，
+  //    改它们"保存成功但没生效"，正是这套代码反复警告的坑。
+  // ⚠️ 同理剔掉**人设包的文件**（用户 2026-09-23 要求）：那边在人设页的「人设文档」卡里管，
+  //    这边只留「动画库」和「共用库」。
+  KFILES = (r.files ?? []).filter((f) => !kIsTemplate(f) && !kIsPersonaPack(f));
+  // ⚠️ 旧页面默认选 `persona.md`，但这一页后来明确把整包人设文件移到了「人设」页。
+  //    如果还死盯那个名字，首次打开就会 #k-file 为空，编辑器与预览一起是空的 ——
+  //    用户看到的现象就是「预览按钮点了没反应」。这里改成：保留仍然有效的当前选择，
+  //    否则选过滤后的第一项；一个可用文件都没有时才清空。
+  const current = keep || $('k-file').value;
+  const currentFile = KFILES.find((f) => f.name === current);
+  if (currentFile) KLIB_CUR = kGroupOf(currentFile);
+  if (!KLIB_CUR) KLIB_CUR = KGROUP_ORDER.find((g) => KFILES.some((f) => kGroupOf(f) === g)) || '';
+  const want = currentFile ? current : (KFILES.find((f) => kGroupOf(f) === KLIB_CUR)?.name || '');
+  $('k-file').value = want;
+  kListFilter();
+  return KFILES;
 }
 
 async function loadKnowledge() {
   const name = $('k-file').value;
+  if (!name) return;
+  // ⚠️ 2026-09-23：「它学到的」面板只在**选中 learned.md** 时出现 ——
+  //    它本来就是 learned.md 的内容视图（条目解析自同一份文件），
+  //    原来却是页面底部一张独立卡片，看着像另一件不相干的事。
+  kLearnedPane(name);
   const r = await api('/api/knowledge?name=' + encodeURIComponent(name));
   const list = await api('/api/knowledge/list');
   const meta = (list.files ?? []).find((f) => f.name === name);
-  $('k-desc').textContent = meta
-    ? `${meta.desc || ''}　共 ${meta.size} 字${meta.readonly ? '　（只读）' : ''}`
-    : '';
-  if (!r.ok) { $('k-content').value = '（读取失败：' + r.error + '）'; return; }
+  kRenderInfo(meta);
+  kListFilter();
+  if (!r.ok) {
+    const failed = '（读取失败：' + r.error + '）';
+    $('k-content').value = failed;
+    if ($('k-mode-prev').classList.contains('on')) $('k-preview').textContent = failed;
+    kGutter();
+    kValidate();
+    return;
+  }
   $('k-content').value = r.content;
   // ⚠️ 只读与否**完全由服务端说了算**（`meta.readonly`）。
   //    原来这里还写死了一句 `|| name === 'learned.md'` ——
@@ -4019,6 +5449,25 @@ async function loadKnowledge() {
   $('k-content').readOnly = readOnly;
   $('k-save').disabled = readOnly;
   $('k-save').textContent = readOnly ? '只读' : '保存';
+  kCountUpdate();
+  kGutter();
+  kValidate();
+  if ($('k-mode-prev').classList.contains('on')) $('k-preview').innerHTML = kMarkdown(r.content);
+}
+
+/** 「它学到的」面板的显隐：只有 learned.md 才显示（它就是那份文件的内容视图）。 */
+function kLearnedPane(name) {
+  const w = $('k-learnwrap');
+  if (w) w.classList.toggle('hidden', name !== 'learned.md');
+}
+
+/** 未保存标记：⚠️ 改了内容但没存时，在保存栏上亮一个点。
+ *  ⚠️ 只是提醒，**不拦你切文件** —— 切了会丢（真要保险得做草稿缓存，另记 TODO）。 */
+function kDirty(on) {
+  const d = $('k-dirty');
+  if (d) d.classList.toggle('on', !!on);
+  const s = $('k-save');
+  if (s && !s.disabled) s.textContent = on ? '保存 ●' : '保存';
 }
 
 async function saveKnowledge() {
@@ -4028,6 +5477,176 @@ async function saveKnowledge() {
     body: JSON.stringify({ name: $('k-file').value, content: $('k-content').value })
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  // ⚠️ 保存后重拉一次：拿到服务端算出来的 size / 只读状态，顺带刷新列表上的字数
+  if (r.ok) loadKnowledge();
+}
+
+/* ── 知识库页：新建动画库（AI 起草 → 预览 → 保存） ── */
+let KANIME_DRAFT = null;
+let KANIME_MODE = 'ai';
+
+function kAnimeClearMessages() {
+  for (const id of ['k-anime-msg', 'k-anime-msg2', 'k-anime-mainmsg']) {
+    const el = $(id);
+    if (el) { el.className = 'msg'; el.textContent = ''; }
+  }
+}
+
+function kAnimeMode(m) {
+  const manual = m === 'manual';
+  KANIME_MODE = manual ? 'manual' : 'ai';
+  const ai = $('k-anime-mode-ai');
+  const mm = $('k-anime-mode-manual');
+  if (ai) ai.classList.toggle('on', !manual);
+  if (mm) mm.classList.toggle('on', manual);
+  const button = $('k-anime-draft-btn');
+  if (button) button.textContent = manual ? '生成手动模板' : 'AI 起草';
+  const hint = $('k-anime-mode-hint');
+  if (hint) hint.textContent = manual
+    ? '不联网：生成可编辑的库骨架，再手动补充'
+    : '联网搜资料 → 生成可预览的库正文';
+  const label = $('k-anime-preview-label');
+  if (label) label.textContent = manual
+    ? '手动模板（可以直接修改，再保存）'
+    : '起草结果（可以直接修改，再保存）';
+  const regenerate = $('k-anime-regenerate');
+  if (regenerate) regenerate.textContent = manual ? '重新生成模板' : '重新起草';
+}
+
+function kAnimeNewCancel() {
+  KANIME_DRAFT = null;
+  $('k-anime-newbox')?.classList.add('hidden');
+  $('k-anime-previewwrap')?.classList.add('hidden');
+  if ($('k-anime-preview')) $('k-anime-preview').value = '';
+  if ($('k-anime-sources')) $('k-anime-sources').textContent = '';
+  const save = $('k-anime-save');
+  if (save) save.disabled = true;
+  kAnimeClearMessages();
+  kAnimeMode('ai');
+}
+
+function kAnimeNewToggle() {
+  const form = $('k-anime-newbox');
+  if (!form) return;
+  if (!form.classList.contains('hidden')) return kAnimeNewCancel();
+  kAnimeNewCancel();
+  form.classList.remove('hidden');
+}
+
+function kAnimeInputs() {
+  const name = ($('k-anime-name')?.value || '').trim();
+  const work = ($('k-anime-work')?.value || '').trim();
+  const characters = ($('k-anime-characters')?.value || '').trim();
+  const msg = $('k-anime-previewwrap')?.classList.contains('hidden') ? $('k-anime-msg') : $('k-anime-msg2');
+  if (!name) {
+    flash(msg, false, '库名必须填（例：bangdream）');
+    return null;
+  }
+  if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(name) || name.includes('..')) {
+    flash(msg, false, '库名只能是小写字母、数字、点、横线或下划线，且必须字母数字开头');
+    return null;
+  }
+  if (KFILES.some((f) => f.name === `anime/${name}.md`)) {
+    flash(msg, false, `动画库「${name}」已经存在了，直接打开它修改即可`);
+    return null;
+  }
+  if (!work) {
+    flash(msg, false, '作品名 / 关键词必须填（例：BanG Dream!）');
+    return null;
+  }
+  return { name, work, characters };
+}
+
+async function kAnimeDraft() {
+  const manual = KANIME_MODE === 'manual';
+  const values = kAnimeInputs();
+  if (!values) return;
+  // 重新生成失败时不能继续保存上一份旧草稿，否则用户会误以为这次结果已经替换成功。
+  KANIME_DRAFT = null;
+  const button = $('k-anime-draft-btn');
+  const save = $('k-anime-save');
+  if (button) button.disabled = true;
+  if (save) save.disabled = true;
+  const progressMsg = $('k-anime-previewwrap')?.classList.contains('hidden') ? $('k-anime-msg') : $('k-anime-msg2');
+  flash(progressMsg, true, manual ? '正在生成手动模板…' : '联网搜资料 + 起草中…（30~60 秒，别关页面）');
+  try {
+    const r = await api('/api/knowledge/draft-anime', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...values, mode: manual ? 'manual' : 'ai' }),
+    });
+    if (!r || !r.ok) {
+      flash(progressMsg, false, (r && r.error) || (manual ? '手动模板生成失败' : '动画库起草失败'));
+      return;
+    }
+    KANIME_DRAFT = { ...r, mode: manual ? 'manual' : 'ai', work: values.work, characters: values.characters };
+    if (save) save.disabled = false;
+    $('k-anime-preview').value = r.content || '';
+    $('k-anime-sources').textContent = manual
+      ? '已生成可编辑的库骨架；主要角色可以留空，保存前直接补正文即可。'
+      : (r.sources?.length ? `参考了 ${r.sources.length} 条资料。` : '这次没有搜到资料，内容主要来自模型知识。')
+        + (r.notes?.length ? ` 提醒：${r.notes.join('；')}` : '');
+    $('k-anime-newbox').classList.add('hidden');
+    $('k-anime-previewwrap').classList.remove('hidden');
+    flash($('k-anime-msg2'), true, manual ? '手动模板已生成，可以直接修改后保存' : '起草完成，可以直接修改后保存');
+  } catch (e) {
+    flash(progressMsg, false, manual ? '手动模板生成出错：' + e.message : '动画库起草出错：' + e.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function kAnimeRegenerate() {
+  await kAnimeDraft();
+}
+
+async function kAnimeSave() {
+  if (!KANIME_DRAFT) {
+    flash($('k-anime-msg2'), false, `先点「${KANIME_MODE === 'manual' ? '生成手动模板' : 'AI 起草'}」拿到正文`);
+    return;
+  }
+  if (!KANIME_DRAFT.work) {
+    flash($('k-anime-msg2'), false, '作品名 / 关键词必须填');
+    return;
+  }
+  const content = ($('k-anime-preview').value || '').trim();
+  if (!content) {
+    flash($('k-anime-msg2'), false, '正文是空的，先补一点内容再保存');
+    return;
+  }
+  const name = KANIME_DRAFT.name;
+  const save = $('k-anime-save');
+  if (save) save.disabled = true;
+  try {
+    const r = await api('/api/knowledge/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'anime', name, content }),
+    });
+    if (!r || !r.ok) {
+      flash($('k-anime-msg2'), false, (r && r.error) || '保存动画库失败');
+      return;
+    }
+    const file = `anime/${name}.md`;
+    await loadKnowledgeList(file);
+    KLIB_CUR = '动画库';
+    $('k-file').value = file;
+    kListFilter();
+    await loadKnowledge();
+    $('k-anime-name').value = '';
+    $('k-anime-work').value = '';
+    $('k-anime-characters').value = '';
+    kAnimeNewCancel();
+    flash($('k-anime-mainmsg'), true, `已创建「${name}」；要让角色读它，请到「人设 → 身份与话术」关联`);
+  } catch (e) {
+    flash($('k-anime-msg2'), false, '保存动画库出错：' + e.message);
+  } finally {
+    if (save) save.disabled = false;
+  }
+}
+
+function kAnimeDrop() {
+  kAnimeNewCancel();
 }
 
 // 启动：先拉知识文件列表，再读第一个
@@ -4054,12 +5673,13 @@ const PJ_STR = [
   ['shortName', '群里的昵称', '状态标题那种「捧场小祥」用它（例：小祥）'],
   ['narrativeName', '剧情里的第三人称名', '例：祥子'],
 ];
-/** 结构化字段 · 数组（界面上按顿号/逗号分隔） */
+/** 结构化字段 · 数组（界面上按顿号/逗号分隔）
+ *  第四项只是空值时的视觉示例，不会写入 identity。 */
 const PJ_ARR = [
-  ['selfNames', '判断「是不是在说她」要用的写法', '中英文都写上'],
-  ['callNames', '群友怎么叫她算「点名叫她」', '这些名字一出现就必须回'],
-  ['nicknames', '所有外号', '别人叫她任何一个外号，她都应该正常回应'],
-  ['matchNames', '判据用的名字原子', '允许单字和变体（「祥」能匹配「小祥」「祥子」）；留空＝自动从上面几个凑'],
+  ['selfNames', '判断「是不是在说她」要用的写法', '中英文都写上', '例：miku'],
+  ['callNames', '群友怎么叫她算「点名叫她」', '这些名字一出现就必须回', '例：miku'],
+  ['nicknames', '所有外号', '别人叫她任何一个外号，她都应该正常回应', '例：小祥'],
+  ['matchNames', '判据用的名字原子', '允许单字和变体（「祥」能匹配「小祥」「祥子」）；留空＝自动从上面几个凑', '例：祥'],
 ];
 /** 她怎么称呼别人（`address`） */
 const PJ_ADDR = [
@@ -4068,7 +5688,10 @@ const PJ_ADDR = [
   ['ownerRule', '什么时候用正式称呼', '⚠️ 整句规矩，不在代码里拼'],
 ];
 
-const PJ_DOC_ONLY = ['cast.md', 'life-events.md', 'quest-ideas.md', 'persona-money.md', 'persona-media.md'];
+// ⚠️ 2026-09-23 第四轮：知识页已经**不再列人设包的文件**（那边只留动画库+共用库），
+//    所以 `persona.md`（人设正文，最重要的那个）挪到这里来 —— 它必须有个界面入口。
+//    ⚠️ 这两处是**配套改动**：知识页排掉人设包 ⇔ 这里必须补上 persona.md，否则它就没入口了。
+const PJ_DOC_ONLY = ['persona.md', 'cast.md', 'life-events.md', 'quest-ideas.md', 'persona-money.md', 'persona-media.md'];
 
 /** HTML 转义：凡是要拼进 innerHTML 的值都得过一遍（`escAttr` 连引号一起挡） */
 const escHtml = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -4097,18 +5720,41 @@ async function personaRefresh() {
   PJ.current = r.current || '';
   $('p-cur-pill').textContent = PJ.current;
   const cur = PJ.packs.find((p) => p.id === PJ.current);
+  // ⚠️ 2026-09-23 P1：状态卡 = 名字（大字）+ 几条紧凑标签。
+  //    ⚠️ 头像走**现成接口** `/api/persona/avatar?id=<id>`（webui.js 里早就有），
+  //       没有头像文件时那个接口返回 404 ⇒ onerror 回退到「取名字第一个字」的占位。
+  $('p-cur-name').textContent = cur ? (cur.name || cur.displayName || cur.id) : '（没装好人设包）';
   $('p-cur').innerHTML = cur
     ? [
-        ['id', cur.id],
-        ['角色全名', cur.name || '（空）'],
-        ['自称', cur.selfName || '（空）'],
-        ['显示名', cur.displayName || '（空）'],
-        ['文档', `${cur.docs} 份 · ${(cur.chars / 1000).toFixed(1)}K 字`],
+        ['id', cur.id, 'mono'],
+        ['自称', cur.selfName || '—'],
+        ['显示名', cur.displayName || '—'],
+        // ⚠️ 2026-09-23 第四轮：删掉「文档 X 份 · XXX 字」那一项（用户说冗余）。
+        //    想知道有多少文档，去「人设文档」卡的下拉里数更准。
       ]
-        .map(([k, v]) => `<div><span class="k">${k}</span><span class="v">${String(v)}</span></div>`)
+        .map(([k, v, cls]) => `<span${cls ? ' class="' + cls + '"' : ''}><b>${k}</b>${String(v)}</span>`)
         .join('')
-    : `<div class="hint">⚠️ 配置里写的 persona.id =「${PJ.current}」，但 personas/ 下没有这个包
-       —— 她这会儿**没有名字**，赶紧切一个或新建一个。</div>`;
+    : '';
+  {
+    // 头像：先按「有没有 avatar 文件」决定要不要 <img>，免得每次刷新都吃一个 404
+    const ava = $('p-cur-ava');
+    const initial = $('p-cur-initial');
+    const showImg = !!(cur && cur.qq && cur.qq.avatar && cur.avatarReady);
+    if (ava) {
+      ava.querySelectorAll('img').forEach((n) => n.remove());
+      if (showImg) {
+        const im = document.createElement('img');
+        im.alt = cur.name || cur.id;
+        im.src = '/api/persona/avatar?id=' + encodeURIComponent(cur.id) + '&t=' + Date.now();
+        im.onerror = () => { im.remove(); if (initial) { initial.hidden = false; initial.textContent = (cur.name || cur.id).slice(0, 1); } };
+        ava.prepend(im);
+        if (initial) initial.hidden = true;
+      } else if (initial) {
+        initial.hidden = false;
+        initial.textContent = cur ? (cur.name || cur.id).slice(0, 1) : '?';
+      }
+    }
+  }
   $('p-pick').innerHTML = PJ.packs
     .map(
       (p) =>
@@ -4116,17 +5762,19 @@ async function personaRefresh() {
         `${p.name ? '　' + p.name : ''}${p.broken ? '　⚠️ ' + p.broken : ''}</option>`,
     )
     .join('');
-  $('p-new-from').innerHTML = ['_template', ...PJ.packs.map((p) => p.id)]
-    .map((x) => `<option value="${x}">${x}</option>`)
-    .join('');
-  // 动画库那个下拉：只能从"现在真有的库"里挑（复用模式下）
-  const libs = r.animeLibs || [];
-  $('p-anime-lib').innerHTML = libs.length
-    ? libs.map((x) => `<option value="${x}">${x}</option>`).join('')
-    : '<option value="">（现在一个库都没有）</option>';
-  // ⚠️ 一个库都没有时，"复用"是没法选的 ⇒ 默认跳到"新建"
-  if (!libs.length && $('p-anime-mode').value === 'reuse') $('p-anime-mode').value = 'new';
-  onAnimeModeChange();
+  const oldTemplate = $('p-new-from').value || '_template';
+  $('p-new-from').innerHTML =
+    '<option value="_template">标准模板（空白骨架）</option>' +
+    PJ.packs.map(
+      (p) => `<option value="${escAttr(p.id)}">${escHtml(p.id + (p.name ? ' · ' + p.name : ''))}</option>`,
+    ).join('');
+  const templateOptions = [...$('p-new-from').options].map((o) => o.value);
+  $('p-new-from').value = templateOptions.includes(oldTemplate) ? oldTemplate : '_template';
+
+  // 动画库列表只给「身份与话术」的现成库下拉用；新建动画库统一在知识库页。
+  PJ.animeLibs = r.animeLibs || [];
+  personaTemplateChange();
+  personaNewMode($('p-mode-manual').classList.contains('on') ? 'manual' : 'ai');
   personaPickChange();
   await personaOpen(PJ.current);
   qqProfileRefresh(); // ⚠️ 必须在 personaOpen 之后 —— 它读的是 PJ.identity.qq
@@ -4139,6 +5787,12 @@ async function qqProfileRefresh() {
   $('p-nick').value = q.nickname ?? '';
   $('p-avatar-name').textContent = q.avatar ? `文件：${q.avatar}` : '（没设头像）';
   $('p-avatar').src = q.avatar ? `/api/persona/avatar?id=${encodeURIComponent(PJ.id)}&t=${Date.now()}` : '';
+  // 生图参考图（立绘）—— 和头像是**两个文件**，见 persona-admin.saveRefImage() 的注释
+  const refs = (PJ.identity.image && Array.isArray(PJ.identity.image.refs)) ? PJ.identity.image.refs : [];
+  $('p-ref-name').textContent = refs[0] ? `文件：${refs[0]}` : '（没设 —— 生成的脸每次都不一样）';
+  $('p-ref').src = refs[0]
+    ? `/api/persona/avatar?kind=ref&id=${encodeURIComponent(PJ.id)}&t=${Date.now()}`
+    : '';
   $('p-qq-pill').textContent = PJ.id;
   // ② QQ 上**现在**是什么 —— 好让你一眼看出"该不该点立即应用"
   const r = await api('/api/qq/profile');
@@ -4194,6 +5848,27 @@ async function qqSaveAvatar() {
   }
 }
 
+/** 上传生图参考图（立绘）—— 只存进人设包，**不碰** QQ 头像 */
+async function qqSaveRef() {
+  const f = $('p-ref-file').files[0];
+  if (!f) {
+    pjShow($('msg-qqp'), false, '先选一张立绘图');
+    return;
+  }
+  pjShow($('msg-qqp'), true, '上传中…');
+  const r = await api(
+    `/api/persona/avatar?kind=ref&id=${encodeURIComponent(PJ.id)}&name=${encodeURIComponent(f.name)}`,
+    { method: 'POST', body: f },
+  );
+  if (r && r.ok) {
+    await personaOpen(PJ.id);
+    qqProfileRefresh();
+    pjShow($('msg-qqp'), true, '✅ 立绘已存进人设包 —— 以后这个角色拍照都用它');
+  } else {
+    pjShow($('msg-qqp'), false, (r && r.error) || '上传失败');
+  }
+}
+
 async function qqApplyNow() {
   pjShow($('msg-qqp'), true, '应用中…');
   const r = await api('/api/persona/apply-qq', {
@@ -4242,95 +5917,162 @@ async function personaOpen(id) {
 
 function personaRenderFields() {
   const it = PJ.identity;
-  const row = (label, input, hint) =>
-    `<div class="row" style="margin-bottom:8px"><div style="flex:1"><label>${label}</label>${input}` +
-    `${hint ? `<p class="hint" style="margin:4px 0 0">${hint}</p>` : ''}</div></div>`;
+  // ⚠️ 2026-09-23 P5：原来每个字段都是 `<div class="row mb8"><div class="f1">` = **全宽单列**，
+  //    17 个字段把页面拉得极长 ⇒ 改成栅格：身份 3 列、其余 2 列、JSON 文本框占满整行。
+  //  ⚠️ 顺便处理 hint：**以「例：」开头的搬进 placeholder**（它本来就是示例，不是规则），
+  //    其余（⚠️ 规则 / 真正要知道的约束）收成 `?` 圆点 —— 一刀切会丢信息。
+  const hintSplit = (hint) => {
+    const h = String(hint || '').trim();
+    if (!h) return { ph: '', tip: '' };
+    if (/^例[：:]/.test(h)) return { ph: h.replace(/^例[：:]\s*/, '例：'), tip: '' };
+    return { ph: '', tip: h };
+  };
+  const row = (label, input, hint, cls) => {
+    const { ph, tip } = hintSplit(hint);
+    // 裸 <input> 默认是 text，但不会命中全局 input[type=text] 样式；这里显式补上。
+    const typed = /<input\b(?![^>]*\btype\s*=)/i.test(input)
+      ? input.replace('<input ', '<input type="text" ')
+      : input;
+    return (
+      '<div class="fld' + (cls ? ' ' + cls : '') + '">' +
+      '<label>' + label + (tip ? '<span class="q" tabindex="0" data-q="' + escAttr(tip) + '">?</span>' : '') + '</label>' +
+      typed.replace('<input ', '<input placeholder="' + escAttr(ph) + '" ') +
+      '</div>'
+    );
+  };
+  // Tag Input：真正的值放在**旁边的 hidden input**（`、`-分隔）⇒ 收集函数一行都不用改
+  const tagRow = (label, id, value, hint, ph, cls, example = '') => {
+    const { ph: p2, tip } = hintSplit(hint);
+    return (
+      '<div class="fld">' +
+      '<label>' + label + (tip ? '<span class="q" tabindex="0" data-q="' + escAttr(tip) + '">?</span>' : '') + '</label>' +
+      '<div class="tags' + (cls ? ' ' + cls : '') + '" id="tags-' + escAttr(id) + '" data-for="' + escAttr(id) + '"' +
+      (example ? ' data-example="' + escAttr(example) + '"' : '') + '>' +
+      '<input class="tagadd" placeholder="' + escAttr(p2 || ph || '输入后回车') + '">' +
+      '</div>' +
+      '<input type="hidden" id="' + escAttr(id) + '" value="' + escAttr(value) + '">' +
+      '</div>'
+    );
+  };
+  const key = (k) => '<span class="fkey">' + escHtml(k) + '</span>';
   const out = [];
+
+  out.push('<h3 style="margin:0 0 8px">她是谁</h3><div class="grid3">');
   for (const [k, label, hint] of PJ_STR) {
-    out.push(row(label, `<input id="pf-${k}" value="${escAttr(it[k] ?? '')}">`, hint));
+    out.push(row(label + key(k), `<input id="pf-${k}" value="${escAttr(it[k] ?? '')}">`, hint));
   }
-  for (const [k, label, hint] of PJ_ARR) {
+  out.push('</div>');
+
+  out.push('<h3 style="margin:20px 0 8px">别人怎么叫她</h3><div class="gridfull">');
+  for (const [k, label, hint, example] of PJ_ARR) {
     const v = Array.isArray(it[k]) ? it[k].join('、') : '';
-    out.push(row(label, `<input id="pf-${k}" value="${escAttr(v)}">`, hint));
+    out.push(tagRow(label + key(k), `pf-${k}`, v, hint, undefined, 'tags-stacked', example));
   }
+  out.push('</div>');
+
   const an = it.anime && typeof it.anime === 'object' ? it.anime : {};
-  out.push(
-    row(
-      '读哪几个动画库（anime.works）',
-      `<input id="pf-anime-works" value="${escAttr((an.works || []).join('、'))}">`,
-      '⚠️ 一个名字对应一个文件 <span class="mono">knowledge/anime/&lt;名字&gt;.md</span>；' +
-        '<b>没声明就一份都不读</b>（换角色才不会串味）',
-    ),
-  );
-  out.push(
-    row(
-      '问到这些词要联网搜（anime.keywords）',
-      `<input id="pf-anime-keywords" value="${escAttr((an.keywords || []).join('、'))}">`,
-      '作品名、同作品的角色名',
-    ),
-  );
-  out.push('<h2 style="margin-top:16px">她怎么称呼别人</h2>');
+  out.push('<h3 style="margin:20px 0 8px">动画库与搜索</h3><div class="grid2">');
+  // ⚠️ 2026-09-23 第四轮：「读哪几个动画库」从**自由文本**改成
+  //    「已选标签 + 下拉（只列现成的库）+ 独立的新建输入框」。
+  //    ⚠️ 用户明确要求：**新建不塞进下拉里**（下拉里塞个「新建…」选项很容易被误选），
+  //    所以新建是旁边一个单独的小输入框 + 按钮。
+  //    ⚠️ 真正的值**仍然是 hidden input**（`、`-分隔）⇒ 收集函数照旧。
+  {
+    const libs = Array.isArray(PJ.animeLibs) ? PJ.animeLibs : [];
+    const opts = libs.map((x) => '<option value="' + escAttr(x) + '">' + escHtml(x) + '</option>').join('');
+    out.push(
+      '<div class="fld">' +
+      '<label>读哪几个动画库' + key('anime.works') +
+      '<span class="q" tabindex="0" data-q="' + escAttr('⚠️ 一个名字对应一个文件 knowledge/anime/<名字>.md；没声明就一份都不读（换角色才不会串味）') + '">?</span></label>' +
+      '<div class="tags" id="tags-pf-anime-works" data-for="pf-anime-works">' +
+      '<input class="tagadd" placeholder="例：bangdream">' +
+      '</div>' +
+      '<div class="libpick">' +
+      '<select id="pf-anime-libpick"><option value="">选一个现成的库加进来…</option>' + opts + '</select>' +
+      '<p class="hint">这里只能关联现成库；要新建动画库，请到「知识库 → 动画库」。</p>' +
+      '</div>' +
+      '<input type="hidden" id="pf-anime-works" value="' + escAttr((an.works || []).join('、')) + '">' +
+      '</div>'
+    );
+  }
+  out.push(tagRow('问到这些词要联网搜' + key('anime.keywords'), 'pf-anime-keywords', (an.keywords || []).join('、'),
+    '作品名、同作品的角色名', '例：bangdream、丰川祥子'));
+  out.push('</div>');
+
+  out.push('<h3 style="margin:20px 0 8px">她怎么称呼别人</h3><div class="grid2">');
   const ad = it.address && typeof it.address === 'object' ? it.address : {};
   for (const [k, label, hint] of PJ_ADDR) {
-    out.push(row(label, `<input id="pf-addr-${k}" value="${escAttr(ad[k] ?? '')}">`, hint));
+    // ⚠️ 2026-09-23 第四轮：`ownerRule` 是**整句规矩**（不是短词），原来塞在单行 <input> 里
+    //    连回车都打不了 ⇒ 改成 textarea，文字顶格、边框看得见。
+    if (k === 'ownerRule') {
+      out.push(row(label + key('address.' + k),
+        `<textarea id="pf-addr-${k}" rows="3" class="code">${escHtml(ad[k] ?? '')}</textarea>`, hint));
+    } else {
+      out.push(row(label + key('address.' + k), `<input id="pf-addr-${k}" value="${escAttr(ad[k] ?? '')}">`, hint));
+    }
   }
+  out.push('</div>');
+
   const st = it.style && typeof it.style === 'object' ? it.style : {};
-  out.push('<h2 style="margin-top:16px">口癖</h2>');
-  out.push(
-    row(
-      '口癖词（每行一个也行，用顿号分隔）',
-      `<input id="pf-tics" value="${escAttr((st.verbalTics || []).join('、'))}">`,
-      '说到这些词太频繁时会被提醒换说法',
-    ),
-  );
-  out.push('<h2 style="margin-top:16px">高级（JSON，改坏了会被拒绝保存）</h2>');
-  out.push(
-    row(
-      '歧义词 ambiguity',
-      `<textarea id="pf-ambiguity" rows="3">${escHtml(JSON.stringify(it.ambiguity ?? [], null, 1))}</textarea>`,
-      '例：<span class="mono">[{"name":"祥子","unless":"骆驼祥子"}]</span>',
-    ),
-  );
-  out.push(
-    row(
-      '不喜欢被叫 renameObjection',
-      `<textarea id="pf-rename" rows="3">${escHtml(JSON.stringify(it.renameObjection ?? {}, null, 1))}</textarea>`,
-      '例：<span class="mono">{"dislike":["祥子"],"prefer":"Saki"}</span>',
-    ),
-  );
+  out.push('<h3 style="margin:20px 0 8px">口癖</h3><div class="grid2">');
+  out.push(tagRow('口癖词' + key('style.verbalTics'), 'pf-tics', (st.verbalTics || []).join('、'),
+    '说到这些词太频繁时会被提醒换说法', '例：倒、倒是'));
+  out.push('</div>');
+
+  out.push('<h3 style="margin:20px 0 8px">高级（JSON，改坏了会被拒绝保存）</h3>');
+  out.push(row('歧义词' + key('ambiguity'),
+    `<textarea id="pf-ambiguity" rows="3">${escHtml(JSON.stringify(it.ambiguity ?? [], null, 1))}</textarea>`,
+    '例：<span class="mono">[{"name":"祥子","unless":"骆驼祥子"}]</span>', 'full'));
+  out.push(row('不喜欢被叫' + key('renameObjection'),
+    `<textarea id="pf-rename" rows="3">${escHtml(JSON.stringify(it.renameObjection ?? {}, null, 1))}</textarea>`,
+    '例：<span class="mono">{"dislike":["祥子"],"prefer":"Saki"}</span>', 'full'));
   $('p-fields').innerHTML = out.join('');
+  for (const [k] of PJ_ARR) tagsSync(`pf-${k}`);
+  tagsSync('pf-anime-works');
+  tagsSync('pf-anime-keywords');
+  tagsSync('pf-tics');
 }
 
-/** 提示词整句：把 identity.prompt 里现有的键都渲染出来（`_说明` 除外） */
+/** 提示词整句的**中文标题**（给用户看）+ 说明。
+ *  ⚠️ 2026-09-25 用户：「高级提示词设置似乎并无必要」⇒ 界面**只留常用三句**。
+ *     其余键（spokenNames / quest… 等）仍被 speak-judge / quest 等模块使用，
+ *     只是不在这里编辑 —— `personaCollectIdentity()` 克隆原 identity、
+ *     只覆盖页面上存在的 `pp-<键>`，没渲染的字段会**原样保留**，绝不丢。 */
+const PJ_PROMPT_HINT = {
+  personaLine: ['自我介绍', '最常出现的那句「你是谁」'],
+  styleLine: ['性格与语气', '性格、说话方式的那一段'],
+  quickAside: ['紧凑版人设', '只能塞一句时的浓缩版'],
+};
+/** 界面上**会渲染**的键 —— 只影响摆哪些框；不在表里的后台键照样保存。 */
+const PJ_PROMPT_TOP = ['personaLine', 'styleLine', 'quickAside'];
+
 function personaRenderPrompts() {
   const p = PJ.identity.prompt && typeof PJ.identity.prompt === 'object' ? PJ.identity.prompt : {};
-  const keys = Object.keys(p).filter((k) => k !== '_说明');
-  const hint = {
-    personaLine: '自我介绍（最常见的那句「你是谁」）',
-    styleLine: '性格那一段',
-    quickAside: '只能塞一句时的紧凑版人设',
-    spokenNames: '群里怎么叫她 —— **带括号**，接在「直接点了它的名」后面',
-    attributionTone: '发言前核对归属时提醒的语气 —— **带括号**',
-    followUpLine: '「说完又想补一句」那次的人格声明',
-    castNames: '故事里最常出现的那几个人（同团）',
-    questHomeDirs: '剧情里「家里」这个方向的题材',
-    questPastThreads: '「过去找上门」那类的题材',
-    questOtherGroups: '偶尔碰上的其他团 / 旧识',
-  };
+  const all = Object.keys(p).filter((k) => k !== '_说明');
+  const keys = all.filter((k) => PJ_PROMPT_TOP.includes(k));
   if (!keys.length) {
-    $('p-prompts').innerHTML = '<p class="hint">这个人设包还没有 <span class="mono">prompt</span> 段。</p>';
+    // ⚠️ 区分「没有 prompt 段」和「只有后台字段」—— 后者不是空人设，只是这里无可编辑项。
+    $('p-prompts').innerHTML = all.length
+      ? '<p class="hint">这个人的常用三句没有单独配置；其他后台提示词字段已保留，仍会随人设一起生效。</p>'
+      : '<p class="hint">这个人设包还没有 <span class="mono">prompt</span> 段。</p>';
     return;
   }
-  $('p-prompts').innerHTML = keys
-    .map(
-      (k) =>
-        `<div class="row" style="margin-bottom:8px"><div style="flex:1">` +
-        `<label>prompt.${k}</label>` +
-        `<p class="hint" style="margin:4px 0 4px">${hint[k] || '（这个键喂给哪段提示词请看 personas/README.md）'}</p>` +
-        `<textarea id="pp-${k}" rows="2">${escHtml(p[k] ?? '')}</textarea>` +
-        `</div></div>`,
-    )
-    .join('');
+  const cell = (k) => {
+    const meta = PJ_PROMPT_HINT[k];
+    const title = meta ? meta[0] : k;
+    const tip = meta ? meta[1] : '这个键喂给哪段提示词请看 personas/README.md';
+    return (
+      '<div class="fld">' +
+      '<label>' + escHtml(title) + '<span class="fkey">prompt.' + escHtml(k) + '</span></label>' +
+      (tip ? '<span class="q" tabindex="0" data-q="' + escAttr(tip) + '">?</span>' : '') +
+      '<textarea id="pp-' + escAttr(k) + '" rows="2">' + escHtml(p[k] ?? '') + '</textarea>' +
+      '</div>'
+    );
+  };
+  // ⚠️ 三项各自独占一整行（原来挤在两列里读不了整句）；高级折叠区已按用户要求移除。
+  $('p-prompts').innerHTML =
+    '<h3 style="margin:0 0 8px">常用（最常改的三句）</h3>' +
+    '<div class="gridfull">' + keys.map(cell).join('') + '</div>';
 }
 
 const pjList = (s) =>
@@ -4385,7 +6127,59 @@ function personaCollectIdentity() {
   return it;
 }
 
+/** 未保存标记：改动任一输入框就亮点。**只提醒，不拦保存、不拦切页**。 */
+function pjDirtyClear() {
+  const d = $('p-dirty');
+  if (d) d.classList.remove('on');
+  const t = $('p-dirtytext');
+  if (t) t.textContent = '下面两张卡（结构化设置 / 提示词整句）改了都要存';
+  const b = $('p-save');
+  if (b) b.textContent = '保存';
+  const v = $('p-savebar');
+  if (v) { const e = v.querySelector('.pverr'); if (e) e.remove(); }
+}
+
+function pjDirty() {
+  const d = $('p-dirty');
+  if (d) d.classList.add('on');
+  const t = $('p-dirtytext');
+  if (t) t.textContent = '有改动还没存（结构化设置 / 提示词整句）';
+  for (const id of ['p-save']) { const b = $(id); if (b) b.textContent = '保存 ●'; }
+}
+
+/** 保存前的前端校验（**只提示，不拦保存** —— 服务端才是最终裁决）。
+ *  ⚠️ 与 learned.md 那套实时校验同思路：把「存下去才会报错」的东西提前露出来。 */
+function pjValidate() {
+  const box = $('p-savebar');
+  if (!box) return null;
+  let old = box.querySelector('.pverr');
+  if (old) old.remove();
+  const bad = [];
+  // 1) 名字：至少要有一个（角色全名 / 自称 / 对外显示身份）
+  const nm = ['name', 'selfName', 'displayName'].map((k) => $('pf-' + k) ? $('pf-' + k).value.trim() : '').filter(Boolean);
+  if (!nm.length) bad.push('角色全名 / 自称 / 对外显示身份 三项至少填一个，否则提示词里没有名字');
+  // 2) Tag 字段里不能有重复（重复的名字匹配会命中两遍）
+  for (const k of ['selfNames', 'callNames', 'nicknames', 'matchNames']) {
+    const el = $('pf-' + k); if (!el) continue;
+    const arr = el.value.split(/[、,，\n]/).map((x) => x.trim()).filter(Boolean);
+    const dup = arr.filter((x, i) => arr.indexOf(x) !== i);
+    if (dup.length) bad.push('「' + k + '」里有重复：' + [...new Set(dup)].join('、'));
+  }
+  // 3) 动画库：选了但没保存成功的话，下拉里根本选不到 —— 这里只提醒别填错名
+  const aw = $('pf-anime-works');
+  if (aw && aw.value.trim() && !PJ.animeLibs) bad.push('读不到现有动画库列表，先确认服务在跑');
+  if (!bad.length) return null;
+  const d = document.createElement('div');
+  d.className = 'warn pverr';
+  d.innerHTML = '⚠️ ' + bad.map((b) => esc(b)).join('<br>');
+  box.insertBefore(d, box.firstChild);
+  return bad;
+}
+
 async function personaSaveIdentity() {
+  // ⚠️ 2026-09-23：保存前先跑一遍前端校验（名字缺失 / Tag 重复 / 动画库读不到），
+  //    **只提示、不拦** —— 服务端才是最终裁决。
+  pjValidate();
   let identity;
   try {
     identity = personaCollectIdentity();
@@ -4401,6 +6195,7 @@ async function personaSaveIdentity() {
   });
   if (r && r.ok) {
     PJ.identity = r.identity;
+    pjDirtyClear();
     pjShow($('msg-pi'), true, r.reloaded ? '✅ 存好了，已热重载（没重启）' : '✅ 存好了（这个包当前没在用）');
     pjShow($('msg-pp'), true, '✅ 存好了');
     await personaRefresh();
@@ -4436,22 +6231,69 @@ async function personaSwitch() {
 
 async function personaCreate() {
   const id = $('p-new-id').value.trim();
-  const from = $('p-new-from').value;
+  const name = $('p-draft-name').value.trim();
+  const from = $('p-new-from')?.value || '_template';
   if (!id) {
     pjShow($('msg-p'), false, '先填一个 id');
     return;
   }
-  const r = await api('/api/persona/create', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id, from }),
-  });
-  if (r && r.ok) {
-    pjShow($('msg-p'), true, `✅ 建好了「${id}」（照 ${from} 复制）—— 填好人设再点「切到这个」`);
+  if (!name) {
+    pjShow($('msg-p'), false, '填一下角色名');
+    return;
+  }
+  const primary = $('p-new-primary');
+  if (primary) primary.disabled = true;
+  pjShow($('msg-p'), true, '创建中…');
+  try {
+    const r = await api('/api/persona/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, from }),
+    });
+    if (!r || !r.ok) {
+      pjShow($('msg-p'), false, (r && r.error) || '新建失败');
+      return;
+    }
+
+    // 手动路径也消费统一表单：角色名直接落 identity.name，作品名落检索关键词，
+    // 动画库直接落 anime.works。identity.work 是「身份 / 职业」，不能拿来冒充作品名。
+    const pack = await api('/api/persona?id=' + encodeURIComponent(id));
+    if (!pack || !pack.ok) {
+      pjShow(
+        $('msg-p'),
+        false,
+        `⚠️ 人设包「${id}」已创建，但基础字段没保存：${(pack && pack.error) || '新包读取失败'}`,
+      );
+    } else {
+      const identity = JSON.parse(JSON.stringify(pack.identity || {}));
+      const work = $('p-draft-work').value.trim();
+      identity.name = name;
+      identity.anime = { ...(identity.anime || {}) };
+      if (work) {
+        const keywords = Array.isArray(identity.anime.keywords) ? identity.anime.keywords.map(String) : [];
+        if (!keywords.includes(work)) keywords.unshift(work);
+        identity.anime.keywords = keywords;
+      }
+      const saved = await api('/api/persona', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, identity }),
+      });
+      if (!saved || !saved.ok) {
+        pjShow($('msg-p'), false, `⚠️ 人设包「${id}」已创建，但基础字段没保存：${(saved && saved.error) || '未知错误'}`);
+      }
+    }
+
+    if (!String($('msg-p').textContent).startsWith('⚠️')) {
+      pjShow($('msg-p'), true, `✅ 建好了「${id}」（${from === '_template' ? '标准模板' : '照 ' + from + ' 复制'}）—— 正在打开它`);
+    }
     $('p-new-id').value = '';
     await personaRefresh();
-  } else {
-    pjShow($('msg-p'), false, (r && r.error) || '新建失败');
+    $('p-pick').value = id;
+    personaPickChange();
+    await personaOpen(id);
+  } finally {
+    if (primary) primary.disabled = false;
   }
 }
 
@@ -4510,13 +6352,6 @@ async function personaSaveDoc() {
 
 let PDRAFT = null;
 
-/** 动画库那三个选项：选了"复用/新建"才显示对应的输入框 */
-function onAnimeModeChange() {
-  const m = $('p-anime-mode').value;
-  $('p-anime-reuse-wrap').style.display = m === 'reuse' ? '' : 'none';
-  $('p-anime-new-wrap').style.display = m === 'new' ? '' : 'none';
-}
-
 async function personaDraftStart() {
   const id = $('p-new-id').value.trim();
   const name = $('p-draft-name').value.trim();
@@ -4529,7 +6364,7 @@ async function personaDraftStart() {
     pjShow($('msg-p'), false, '填一下角色名');
     return;
   }
-  $('p-draft-btn').disabled = true;
+  $('p-new-primary').disabled = true;
   pjShow($('msg-p'), true, '联网搜资料 + 起草中…（30~60 秒，别关页面）');
   try {
     const r = await api('/api/persona/draft', {
@@ -4539,9 +6374,6 @@ async function personaDraftStart() {
         id,
         name,
         work,
-        animeMode: $('p-anime-mode').value,
-        animeLib: $('p-anime-lib').value,
-        animeName: $('p-anime-name').value.trim(),
       }),
     });
     if (!r || !r.ok) {
@@ -4558,7 +6390,7 @@ async function personaDraftStart() {
   } catch (e) {
     pjShow($('msg-p'), false, '起草出错：' + e.message);
   } finally {
-    $('p-draft-btn').disabled = false;
+    $('p-new-primary').disabled = false;
   }
 }
 
@@ -4589,16 +6421,10 @@ function renderDraft() {
       : '<p class="hint">⚠️ 一条资料都没搜到 —— 这份是模型凭自己的知识写的，务必仔细核对。</p>') +
     '<label>identity.json（可直接改；保存时会校验）</label>' +
     `<textarea id="pd-identity" rows="18">${escHtml(JSON.stringify(PDRAFT.identity, null, 2))}</textarea>` +
-    '<label style="margin-top:10px">persona.md（≤3000 字）</label>' +
+    '<label class="mt10">persona.md（≤3000 字）</label>' +
     `<textarea id="pd-persona" rows="14">${escHtml(PDRAFT.docs?.['persona.md'] || '')}</textarea>` +
-    '<label style="margin-top:10px">voices.md（示例对话 —— 人味就靠它）</label>' +
+    '<label class="mt10">voices.md（示例对话 —— 人味就靠它）</label>' +
     `<textarea id="pd-voices" rows="12">${escHtml(PDRAFT.docs?.['voices.md'] || '')}</textarea>` +
-    (PDRAFT.animeLibName
-      ? '<label style="margin-top:10px">新建的动画库 ' +
-        escHtml(PDRAFT.animeLibName) +
-        '（保存时写进 knowledge/anime/）</label>' +
-        `<textarea id="pd-animelib" rows="12">${escHtml(PDRAFT.animeLib || '')}</textarea>`
-      : '') +
     '<div class="btns">' +
     '<button class="act" onclick="personaDraftSave()">保存成新人设包</button>' +
     '<button onclick="personaDraftDrop()">不要了</button>' +
@@ -4644,17 +6470,6 @@ async function personaDraftSave() {
     const d = await post('/api/persona/doc', { id, path, text });
     if (!d || !d.ok) {
       pjShow($('msg-pd2'), false, `${path} 写失败：${(d && d.error) || ''}`);
-      return;
-    }
-  }
-  // ③ 新建的动画库（只有选了"新建"才有这份）—— 写进 `knowledge/anime/<名字>.md`
-  //    ⚠️ 用户的规矩：**复用已有的库时只读不写**，只有"新建"才往库里写东西。
-  const libName = PDRAFT && PDRAFT.animeLibName;
-  const libText = ($('pd-animelib') && $('pd-animelib').value.trim()) || '';
-  if (libName && libText) {
-    const dl = await post('/api/knowledge', { name: `anime/${libName}.md`, content: libText });
-    if (!dl || !dl.ok) {
-      pjShow($('msg-pd2'), false, `动画库写失败：${(dl && dl.error) || ''}`);
       return;
     }
   }

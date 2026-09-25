@@ -81,7 +81,7 @@ console.log('\n【2】★ 提醒的是"他去充值"，不是"她自己花超了
     all.find((l) => !/充|余额|账|钱|清零/.test(l)) ?? '',
   );
   // ✅ 私聊中仍明确称呼主人
-  check(all.some((l) => /undefined|你/.test(l)), '有指向主人的说法（undefined / 你）');
+  check(all.some((l) => /<主人>|你/.test(l)), '有指向主人的说法（<主人> / 你）');
   // ❌ 不能再出现"是我花超了"这一套
   check(
     !all.some((l) => /我自己的问题|是我花得快|花得有点凶|我花超/.test(l)),
@@ -97,24 +97,24 @@ console.log('\n【2】★ 提醒的是"他去充值"，不是"她自己花超了
     '不提「这个月/本月/月底」（余额是随用随充，没有月度周期）',
     all.find((l) => /这个月|本月|这月|月底|下个月|每月/.test(l)) ?? '',
   );
-  // 私聊仍统一称呼undefined，不沿用旧称呼。
+  // 私聊仍统一称呼<主人>，不沿用旧称呼。
   check(
-    all.every((l) => /undefined/.test(l)),
-    '每条都点名undefined（私聊提醒仍有明确称呼）',
-    all.find((l) => !/undefined/.test(l)) ?? '',
+    all.every((l) => /<主人>/.test(l)),
+    '每条都点名<主人>（私聊提醒仍有明确称呼）',
+    all.find((l) => !/<主人>/.test(l)) ?? '',
   );
-  const onlyYou = all.filter((l) => /你/.test(l) && !/undefined/.test(l));
-  check(onlyYou.length === 0, '没有"只有你、没有undefined"的句子', onlyYou[0] ?? '');
+  const onlyYou = all.filter((l) => /你/.test(l) && !/<主人>/.test(l));
+  check(onlyYou.length === 0, '没有"只有你、没有<主人>"的句子', onlyYou[0] ?? '');
   // 「见底」档要直接催
   check(critLines.some((l) => /充(一)?下|该充|充点|充值/.test(l)), '「见底」档直接催他充钱');
 }
 
-console.log('\n【3】私聊余额话术统一点名undefined');
+console.log('\n【3】私聊余额话术统一点名<主人>');
 {
   check(typeof balance.stripNameForAt === 'undefined', 'stripNameForAt 已删除（不再去掉名字）');
   for (const tier of ['low', 'critical']) {
     const lines = balance.allLines(tier);
-    check(lines.every((l) => /undefined/.test(l)), `${tier} 档每条都带undefined`, lines.find((l) => !/undefined/.test(l)) ?? '');
+    check(lines.every((l) => /<主人>/.test(l)), `${tier} 档每条都带<主人>`, lines.find((l) => !/<主人>/.test(l)) ?? '');
   }
 }
 
@@ -174,7 +174,7 @@ console.log('\n【5】★ 余额提醒只发送给主人私聊');
   bot.selfId = '10000002';
   await sleep(600);
 
-  await bot.sendToPrivate(owner, 'undefined，账上真见底了，充一下吧');
+  await bot.sendToPrivate(owner, '<主人>，账上真见底了，充一下吧');
   await sleep(300);
 
   const sends = got.filter((m) => m.action === 'send_private_msg');
@@ -184,7 +184,7 @@ console.log('\n【5】★ 余额提醒只发送给主人私聊');
   if (sends[0]) {
     check(String(sends[0].params?.user_id) === owner, `私聊收件人是主人（${owner}）`, `实际 ${sends[0].params?.user_id}`);
     const text = sends[0].params?.message?.[0]?.data?.text ?? '';
-    check(/undefined/.test(text), '私聊正文使用undefined称呼', text);
+    check(/<主人>/.test(text), '私聊正文使用<主人>称呼', text);
     check(/充|账/.test(text), '私聊正文是在催充值', text);
   }
 

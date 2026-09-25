@@ -64,83 +64,29 @@ for (const s of must) {
   console.log(`${ok ? 'PASS' : 'FAIL'} 注入块含「${s}」`);
 }
 
-console.log('\n== ⑤ 调戏类：认出（只认不接），但普通字面用法不误伤 ==');
-// 该认的：调戏类命中，且注入块要标「只认不接」
-for (const t of ['你当我老婆吧', '来贴贴', '要抱抱', '你这个舔狗']) {
-  const out = memesFor(t);
-  const hit = !!out;
-  const marked = out.includes('只认不接');
-  const ok = hit && marked;
-  if (ok) pass++;
-  else fail++;
-  console.log(`${ok ? 'PASS' : 'FAIL'} 调戏命中「${t}」got=${hit ? '认' : '漏'} 标注只认不接=${marked ? '有' : '无'}`);
+console.log('\n== ⑤~⑧ 敏感类已迁到独立全局库，不再由梗库按需注入 ==');
+// 2026-09-25：敏感词必须**始终在提示词里**，不能等命中才补；
+// 它现在住在 knowledge/sensitive/sensitive-words.md（全局注入），
+// 所以 memesFor() 对这些词返回空是**正确行为** —— 两边不能各存一份。
+const migratedSensitive = [
+  '你当我老婆吧', '来贴贴', '要抱抱', '你这个舔狗',
+  'ghs', '来开车', '社保', '打桩机', '瑟瑟',
+  '欧派', '这腿玩年', '巨乳', '就一个飞机场', '蜜桃臀',
+  '大雷', '小雷', '什么罩杯', '奈子', '奶量',
+];
+for (const t of migratedSensitive) {
+  check('敏感词已迁出梗库（全局库负责）', false, t);
 }
-// 不该认的：字面普通词，必须一个字都不注入
+// 防误伤的字面反例照旧：普通词任何时候都不该被当成敏感词/梗。
 check('粘贴文件', false, '把这段粘粘贴到文档里');
-check('贴纸', false, '这贴纸挺好看');
-check('很贴心', false, '你想得真贴心');
-check('他家老婆婆', false, '他家老婆婆身体还好');
 check('老婆饼', false, '给我带两个老婆饼');
-
-console.log('\n== ⑥ 调戏·性暗示：认出（只认不接），但普通字面用法不误伤 ==');
-// 该认的
-for (const t of ['ghs', '来开车', '社保', '打桩机', '瑟瑟']) {
-  const out = memesFor(t);
-  const hit = !!out;
-  const marked = out.includes('只认不接');
-  const ok = hit && marked;
-  if (ok) pass++;
-  else fail++;
-  console.log(`${ok ? 'PASS' : 'FAIL'} 性暗示命中「${t}」got=${hit ? '认' : '漏'} 标注只认不接=${marked ? '有' : '无'}`);
-}
-// 不该认的：全是被排除词包住的字面用法，必须一个字都不注入
 check('开车回家', false, '我先开车回家了');
-check('发车时间', false, '末班车发车时间是几点');
 check('社保卡', false, '社保卡在哪儿办');
-check('社保局', false, '去社保局问一下');
-check('液压打桩机', false, '工地那台液压打桩机坏了');
 check('瑟瑟发抖', false, '外面冷得我瑟瑟发抖');
-check('黄色', false, '我喜欢黄色那件');
-
-console.log('\n== ⑦ 调戏·身材类：认出（只认不接），但普通字面用法不误伤 ==');
-// 该认的
-for (const t of ['欧派', '这腿玩年', '巨乳', '就一个飞机场', '蜜桃臀']) {
-  const out = memesFor(t);
-  const hit = !!out;
-  const marked = out.includes('只认不接');
-  const ok = hit && marked;
-  if (ok) pass++;
-  else fail++;
-  console.log(`${ok ? 'PASS' : 'FAIL'} 身材梗命中「${t}」got=${hit ? '认' : '漏'} 标注只认不接=${marked ? '有' : '无'}`);
-}
-// 不该认的：被排除词包住的字面用法，必须一个字都不注入
 check('欧派橱柜', false, '我家装的欧派橱柜');
-check('欧派家居', false, '欧派家居在搞活动');
-check('作案凶器', false, '警方找到了作案凶器');
-check('凶器鉴定', false, '法医在做凶器鉴定');
 check('去飞机场', false, '我明天去飞机场接人');
-check('飞机场候机', false, '在飞机场候机呢');
-
-console.log('\n== ⑧ 调戏·身材暗喻（大雷/罩杯/奈子）：认出，但普通字面用法不误伤 ==');
-// 该认的
-for (const t of ['大雷', '小雷', '什么罩杯', '奈子', '奶量']) {
-  const out = memesFor(t);
-  const hit = !!out;
-  const marked = out.includes('只认不接');
-  const ok = hit && marked;
-  if (ok) pass++;
-  else fail++;
-  console.log(`${ok ? 'PASS' : 'FAIL'} 身材暗喻命中「${t}」got=${hit ? '认' : '漏'} 标注只认不接=${marked ? '有' : '无'}`);
-}
-// 不该认的：被排除词包住的字面用法，必须一个字都不注入
 check('今天打雷了', false, '外面今天打雷了');
-check('雷声好大', false, '这雷声好大');
-check('踩雷了', false, '我买这个踩雷了');
-check('雷军', false, '雷军发了新手机');
-check('地雷', false, '这里埋着地雷');
 check('奈良', false, '奈良的小鹿真可爱');
-check('牛奶产量', false, '今年牛奶产量提高了');
-check('产奶奶量', false, '那头牛产奶奶量不足');
 
 console.log('\n== ⑨ 二次元·明日方舟：认得联动，但别把服主「方舟酱」误当游戏 ==');
 // 该认的：谈方舟游戏内容 → 命中（玩梗类，不标"只认不接"）
@@ -152,7 +98,7 @@ for (const t of ['明日方舟真好玩', '阿米娅好可爱', '罗德岛招人
   else fail++;
   console.log(`${ok ? 'PASS' : 'FAIL'} 方舟命中「${t}」got=${hit ? '认' : '漏'}`);
 }
-// 不该认的：服主昵称「方舟酱 / undefined / 粥粥」和字面词，必须一个字都不注入
+// 不该认的：服主昵称「方舟酱 / <主人> / 粥粥」和字面词，必须一个字都不注入
 check('方舟酱', false, '方舟酱在吗');
 check('诺亚方舟', false, '诺亚方舟的故事');
 check('方舟子', false, '方舟子又发博了');

@@ -25,7 +25,11 @@ import { queryServer, describe } from './status.js';
 import { learn, forget, listEntries } from './learned.js';
 import { detectKnowledge } from './extract.js';
 import { preSearch } from './search-presearch.js';
-import { faceCount, faceMenuText, pickMarkers, stripMarkers, facePath } from './faces.js';
+import { faceCount, faceMenuText, pickMarkers, pickPhoto, stripMarkers, facePath } from './faces.js';
+// 生图（群里说的「拍个照」）—— 见该文件头部：换服务商只改 config.yml 的 `imagegen` 段
+import * as imagegen from './imagegen.js';
+// 「这次到底拍什么」—— **单独跑一次模型理解**（为什么不在聊天回复里顺手写：见该文件头）
+import * as photoPlan from './photo-plan.js';
 import { collectFromEvent, tallyUsage, stickerFile } from './collector.js';
 import * as recent from './recent.js';
 import * as digest from './digest.js';
@@ -232,39 +236,81 @@ export function whereAmI(now = new Date()) {
   const dow = p.weekday;
   let off = false;
   let today = [];
+  /** ⚠️ 含今天的**连续放假区间**（`holiday.on()` 给的；`days > 1` 才是连休） */
+  let vacation = null;
   try {
     const h = holiday.on(now.getTime());
     off = h?.off === true;
     today = h?.names ?? [];
+    vacation = h?.vacation ?? null;
   } catch {}
   const schoolDay = !off && dow >= 1 && dow <= 5;
   const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][dow];
+  // ⚠️⚠️ 2026-09-23 加：**连休要说出来**。
+  //
+  //    现场（用户截图）：「@saki 你放假几天了」→ 她答「**就今天一天啊**，明天还得起早去学校呢」✗
+  //    而日本 9/21 敬老の日 + 9/23 秋分の日 + 中间的 9/22（国民の休日）⇒ **实际连休三天** ✓
+  //    （群友说"放了三天"是对的 ✓ 她昨天也说过放假 —— 那也是对的 ✓）
+  //
+  //    ⚠️ 我上一版把连休加在 `holiday.on().noteText` 里，**没用** ✗ ——
+  //      那个只进了 `life.js` 的「今天日常事件」模板（她今天干什么），
+  //      而**聊天回复时她看的是这里**（`dayKind` 只写了「放假（敬老の日、秋分の日）」）
+  //      ⇒ 她只知道"今天放假"，不知道"**连着**放了三天" ⇒ 顺口就说成"就今天一天"✗
+  //      （实测：改完 noteText、重启后问她，还是答"就今天一天啊" ✗）
+  //    ⇒ 结论：**连休必须写在 `dayKind` 里才算数**。两处各写各的，改一处不生效。
+  //    ⚠️ `label` 里**已经**含了"连休 N 天"（`streakAround` 拼的），所以这里别再写一遍 ——
+  //      第一版就是 `**连休 ${days} 天**（${label}）` ⇒ 输出成
+  //      「**连休 3 天**（9/21–9/23 连休 3 天（敬老の日、秋分の日））」**重复了** ✗
+  const vacText = vacation && vacation.days > 1 ? `，${vacation.label}` : '';
   const dayKind = off
-    ? `**放假**${today.length ? `（${today.join('、')}）` : ''}`
+    ? `**放假**${today.length ? `（${today.join('、')}）` : ''}${vacText}`
     : dow === 0 || dow === 6
       ? '**周末，不上学**'
       : '**上学日**（不放假）';
   const dateText = `${p.year}年${p.month}月${p.day}日 ${week}`;
 
   let where;
+  // ⚠️ `place` 是给**拍照**用的**短地点**（`src/photo-plan.js` 那条链）：
+  //    上面那个 `where` 是带 `**` 和一整句说明的提示词文案，**不能**塞进生图提示词
+  //    （会变成"地点：**在羽丘的教室里上课** —— 手机静音，回得慢"这种东西）。
+  let place;
   if (schoolDay) {
-    if (hh < 7) where = '在家（还没起 / 刚起）';
-    else if (hh < 8) where = '在家准备出门上学';
+    if (hh < 7) {
+      where = '在家（还没起 / 刚起）';
+      place = '家里';
+    } else if (hh < 8) {
+      where = '在家准备出门上学';
+      place = '家里';
+    }
     // ⚠️⚠️ 2026-09-18 用户报「为什么这个时候还在上课」：
     //    中午 12 点是**午休**，而原来 `hh < 15` 一律写成"在教室上课"——
     //    她 12:39 刚在群里说去吃饭，12:41 又说"我在上课"，两句当场打架。
     //    所以 12 点这一档必须单独拆出来。
-    else if (hh === 12) where = '**午休**（在教室吃午饭、趴一会儿；手机能看，回得快）';
-    else if (hh < 15) where = '**在羽丘的教室里上课** —— 手机静音，回得慢、有时候干脆看不到';
-    else if (hh < 18) where = '**放学后刚到客服室**（排班打工，有同事、有交班）';
-    else if (hh < 22) where = '**在客服室**（排班/晚班）';
-    else where = '**下班回家了**（写作业、练琴、写东西；手机上的客服软件还挂着）';
+    else if (hh === 12) {
+      where = '**午休**（在教室吃午饭、趴一会儿；手机能看，回得快）';
+      place = '教室';
+    } else if (hh < 15) {
+      where = '**在羽丘的教室里上课** —— 手机静音，回得慢、有时候干脆看不到';
+      place = '教室';
+    } else if (hh < 18) {
+      where = '**放学后刚到客服室**（排班打工，有同事、有交班）';
+      place = '客服室';
+    } else if (hh < 22) {
+      where = '**在客服室**（排班/晚班）';
+      place = '客服室';
+    } else {
+      where = '**下班回家了**（写作业、练琴、写东西；手机上的客服软件还挂着）';
+      place = '家里';
+    }
   } else if (hh < 9) {
     where = '在家（不上学，睡到自然醒）';
+    place = '家里';
   } else if (hh < 22) {
     where = '不上学的白天 —— **可能在客服室排班，也可能在家**（练琴、写曲子、写作业）';
+    place = '家里或客服室（放假，不固定）';
   } else {
     where = '在家（晚上，写作业/练琴，或者顺手看一眼单子）';
+    place = '家里';
   }
 
   const lines = [
@@ -283,7 +329,40 @@ export function whereAmI(now = new Date()) {
       '⚠️ 客服室的排班**放假也可能要上**，但那要说得像"今天轮到我"，别吹成天天连轴转。',
     );
   }
-  return { schoolDay, off, line: lines.join('\n') };
+  return { schoolDay, off, place, line: lines.join('\n') };
+}
+
+/**
+ * 「她此刻在哪」—— **拍照那条链用的一句短事实**。
+ *
+ * ⚠️⚠️ 2026-09-22 修的两个 bug（都是先看到用户截图才发现的）：
+ *
+ *  ① **`whereAmI()` 返回的是对象**（`{schoolDay, off, place, line}`），
+ *     直接把对象塞进提示词会变成 `地点：[object Object]`。要用它的 `.place`。
+ *     （原来那个 `line` 是**带 `**` 的整段文案**，塞进生图提示词更糟。）
+ *  ② **`whereState` 的覆盖可能和日程硬矛盾**。用户截图：她刚在群里说
+ *     「今天秋分放假」，紧接着拍照却发了**教室**的照片 —— 因为覆盖里有个
+ *     「教室，上课」（2 小时窗口）还在生效，它**无条件压过日程**，
+ *     而日程明明写着「今天放假，不上学」。
+ *     ⇒ 覆盖是"她说过的话"驱动的（`bot.js` 里那次轻量判断），会过时/误判；
+ *       **和日程硬矛盾时以日程为准**（放假的日子不可能"在教室上课"）。
+ *
+ * @returns {{where:string, source:string}} `where` 是一句短地点，直接进拍照的事实
+ */
+export function whereNow(now = new Date()) {
+  const day = whereAmI(now);
+  const cur = whereState.current();
+  const fromSchedule = { where: String(day?.place ?? '').trim() || '不知道在哪', source: 'schedule' };
+  if (!cur.active) return fromSchedule;
+
+  // ⚠️ 只在**硬矛盾**时推翻覆盖：日程说"今天不上学/已放学"，而覆盖说她"在教室/在上课/在学校"。
+  //    别搞得更宽 —— 覆盖本来就是为"剧情让她真的离开了那里"准备的，乱推翻会让它失效。
+  const said = `${cur.where}${cur.doing ? `，${cur.doing}` : ''}`;
+  if (day?.schoolDay === false && /教室|上课|学校|校门/.test(said)) {
+    log.info(`[在哪] 覆盖「${said}」和日程冲突（今天不上学）→ 以日程为准（${fromSchedule.where}）`);
+    return { ...fromSchedule, dropped: said };
+  }
+  return { where: said, source: cur.source || 'override' };
 }
 
 /**
@@ -1339,7 +1418,7 @@ export class Bot {
 
     // ⚠️ **@ 的是别人 → 一律不接。**
     //    对方在跟另一个人说话，你凑上去非常没礼貌，也很机器。
-    //    真实案例：undefined 在群里回某人「@某群友 我看看有什么」，机器人却接了这条，
+    //    真实案例：<主人> 在群里回某人「@某群友 我看看有什么」，机器人却接了这条，
     //    还去讲什么「表情包考我」——完全是插嘴（用户反馈）。
     //    注意「@全体成员」不算（那是在通知所有人），@ 自己也不走这里（上面已返回）。
     //
@@ -1709,7 +1788,22 @@ export class Bot {
     const jBucket = this.voluntaryBucket(join.mode, event);
     const jThrottle = Math.max(0, Number(config.chat?.judgeThrottleMs) || 5000);
     this.lastJudgeAt ??= {};
-    if (jThrottle && Date.now() - (this.lastJudgeAt[jBucket] ?? 0) < jThrottle) {
+
+    // ⚠️⚠️ 2026-09-23 修（用户实测：他连发「睡」「了」「吗」，她只拿到「睡了」——
+    //    后两个字**被这个节流丢掉了**。日志就是两行
+    //    「[主动接话] 判断节流中（5s 内刚问过）→ 这条**没问她**，不接」，
+    //    紧接着「合并了 **2** 条连发消息」—— 三条只并进去两条）。
+    //
+    //    ⇒ **短碎片不受判断节流影响**：碎片单独看毫无意义，
+    //      **攒起来才是一句话**；丢掉任何一片，她拿到的就是半截话
+    //      （这次是「睡了」——「吗」没了，于是她没看出那是个问句）。
+    //    ⚠️ 这**不影响省钱**：碎片进了攒批之后，judge 是**整串只跑一次**
+    //      （见 `scheduleHandle` 的合并），并不是每条碎片跑一次。
+    const _frag = msg.stripPlaceholders(msg.tidy(msg.extractText(msg.toSegments(event.message))));
+    const _isFrag =
+      _frag.length <= Math.max(1, Number(config.context?.batch?.burstShortChars ?? 3)) && !event._poke;
+
+    if (jThrottle && !_isFrag && Date.now() - (this.lastJudgeAt[jBucket] ?? 0) < jThrottle) {
       // ⚠️ 2026-09-15：提到 **info** —— 这也是"她为什么不回"的一种（她压根没被问）。
       //    原来记 debug，等于查不到（用户报"这条怎么没回"时最需要这行）。
       log.info(
@@ -2328,7 +2422,17 @@ export class Bot {
     );
   }
 
-  sendText(event, text, { reply = false, faceFile = null, asSticker = true } = {}) {
+  /**
+   * 发一段文本 / 一张图。
+   *
+   * ⚠️⚠️ `asSticker` 默认**必须是 `false`**（2026-09-22 改，之前是 `true` —— 那是个坑）：
+   *    它决定这张图**按表情发还是按图片发**（`sub_type`/`subType=1` + `summary:[动画表情]`
+   *    ⇒ QQ 里显示成**小图**）。默认 `true` 是当初为**表情包**设的，结果
+   *    「拍照」这个后加的功能调 `sendText(event,'',{faceFile})` 时**没传这个参数**，
+   *    照片就被当成表情发了 —— 用户截图：「发的还是表情格式」。
+   *    ⇒ 默认改成"**图片**"，谁要表情谁显式写 `asSticker: true`（`sendFace` 那两处）。
+   */
+  sendText(event, text, { reply = false, faceFile = null, asSticker = false } = {}) {
     const segments = [];
     if (reply) segments.push({ type: 'reply', data: { id: String(event.message_id) } });
     // ⚠️ 只**剥 Markdown 符号**，**不压换行**（2026-09-13）。
@@ -2451,7 +2555,7 @@ export class Bot {
         log.debug(`发表情「${tag}」（${kb}KB）`);
       }
     } catch {}
-    return this.sendText(event, '', { faceFile: p });
+    return this.sendText(event, '', { faceFile: p, asSticker: true });
   }
 
   /**
@@ -2460,7 +2564,122 @@ export class Bot {
    */
   sendFaceFile(event, file) {
     if (!file) return Promise.resolve();
-    return this.sendText(event, '', { faceFile: file });
+    return this.sendText(event, '', { faceFile: file, asSticker: true });
+  }
+
+  /**
+   * 拍照并**补发**一张图（群里说的「拍个照」，2026-09-22 加）。
+   *
+   * ⚠️⚠️ 这是**故意的 fire-and-forget** —— 调用方（`sendChunk`）**绝不能 await 它**：
+   *    一次生图要 10~30 秒，await 会把整条回复流卡住，群里看起来就是"她说到一半哑了"。
+   *    所以：标记当时就在 `stripMarkers()` 里剥掉（屏幕上先出现她的话），
+   *    图好了再由这里**单独补一条**。
+   *
+   * ⚠️⚠️ 失败时**只说她的话，不带任何错误码** —— 用户 2026-09-22 明确要求：
+   *    「如果花光了机器人要直接说不想拍照，而不是暴露故障码」。
+   *    真实原因（HTTP 状态 / 平台错误码）**只进 `logs/bot.log`**，见 `imagegen.js`。
+   */
+  runPhoto(event, photo, said = '') {
+    // ── 防连拍（**不是限额**：用户明确说"不用限"）──
+    // 真人也不会几十秒内连拍好几张；顺便挡住"模型一条回复里写了两个标记"那种病态情况。
+    // 想彻底关掉：把 `config.yml` 的 `imagegen.cooldownMs` 设成 0。
+    const key = `${event?.message_type ?? ''}:${event?.group_id ?? event?.user_id ?? ''}`;
+    const cooldown = Number(config.imagegen?.cooldownMs ?? 60000);
+    this._photoAt ??= new Map();
+    const last = this._photoAt.get(key) ?? 0;
+    const now = Date.now();
+    if (cooldown > 0 && now - last < cooldown) {
+      log.info(`拍照：这个会话 ${Math.round((now - last) / 1000)} 秒前刚拍过，这次跳过（防连拍）`);
+      return;
+    }
+    // ⚠️ 先占坑再生成：失败也占（否则余额没了会被反复重试，白刷日志）
+    this._photoAt.set(key, now);
+
+    (async () => {
+      const ready = imagegen.ready();
+      if (!ready.ok) {
+        // ⚠️ 没配生图 → **一个字都不说**。用户根本没开这个功能，
+        //    冒一句"相机没带"只会让人莫名其妙（标记已经被剥掉了，群里什么都不留）。
+        log.debug(`收到 [拍照] 标记，但生图没配好（${ready.why}），忽略`);
+        return;
+      }
+      try {
+        // ── ⓪ 顺手清一下过期的生成图 ──
+        // ⚠️ 放这儿（而不是加个定时器）的理由：**清理的唯一触发条件就是"又生成了新图"**。
+        //    删本地**不影响群里已发的图**（那边是 base64 上传的副本）。
+        //    ⚠️ 清理失败绝不能影响拍照 —— 所以自己 try 掉。
+        try {
+          imagegen.sweep();
+        } catch (e) {
+          log.debug(`生图缓存清理跳过：${e.message}`);
+        }
+
+        // ── ① 事实：她此刻的**真实**处境（时间 / 地点）──
+        // ⚠️ 用户拍板：「以真实状态为准，LLM 只能微调」。所以这两个值由**系统**算，
+        //    不让模型凭印象编（它编出"中午"而现在是深夜的话，照片和剧情就打架了）。
+        //    来源两处：`whereState.current()`（她说过的话覆盖，2 小时过期回落）
+        //    → 没有覆盖就用日程 `whereAmI()`。
+        const nowAt = new Date();
+        const hh = nowAt.getHours();
+        const period =
+          hh < 5 ? '深夜' : hh < 8 ? '清晨' : hh < 11 ? '上午' : hh < 13 ? '中午' : hh < 17 ? '下午' : hh < 19 ? '傍晚' : hh < 23 ? '晚上' : '深夜';
+        const facts = {
+          now: `${String(hh).padStart(2, '0')}:${String(nowAt.getMinutes()).padStart(2, '0')}（${period}）`,
+          // ⚠️ 走 `whereNow()`：它会**拿覆盖和日程做一致性检查**，
+          //    免得出现"她刚说今天放假、照片却是在教室"（2026-09-22 用户截图报的）。
+          where: whereNow(nowAt).where,
+        };
+
+        // ── ② 单独跑一次理解：这次**拍什么**、画面里**有没有她** ──
+        // ⚠️ 为什么不让她在聊天回复里顺手写：实测那样场景细节遵守度很差
+        //    （写"回头看镜头"，出来正面站着）。见 `src/photo-plan.js` 文件头。
+        let text = '';
+        try {
+          text = msg.extractText(msg.toSegments(event.message));
+        } catch {
+          /* 取不到就算了，理解那一步还有她自己的回复可看 */
+        }
+        const picked = await photoPlan.plan({ text, said: String(said ?? ''), marker: photo, facts });
+        if (!picked.shoot) {
+          log.info('拍照：理解那一步判断这次不用拍，跳过');
+          return;
+        }
+
+        // ── ③ 拼提示词：现算的（画面/时间/地点）+ 固定画风（config，界面上改）──
+        const withSelf = picked.withSelf;
+        const prompt = imagegen.buildPrompt({
+          what: picked.what,
+          withSelf,
+          time: picked.time || facts.now,
+          place: picked.place || facts.where,
+        });
+        const refs = withSelf ? persona.refImages() : [];
+        log.info(
+          `拍照：${withSelf ? '画面里有她' : '拍景物'}｜时间地点=${picked.time || facts.now} ${picked.place || facts.where}`,
+        );
+        log.debug(`[拍照] 提示词（${prompt.length} 字）：${prompt}`);
+
+        let r = await imagegen.generate({ prompt, refs, expectRef: withSelf });
+        if (!r.ok && r.retryable) {
+          // 超时 / 限流 / 5xx —— **悄悄再试一次**，群里看不到中间过程
+          log.info(`拍照失败（${r.reason}，可重试），再试一次`);
+          r = await imagegen.generate({ prompt, refs, expectRef: withSelf });
+        }
+        if (r.ok) {
+          // ⚠️ 照片**单独一条、不带文字**（跟表情一个道理：真人发照片就是单甩一张）
+          // ⚠️⚠️ `asSticker: false` 是**必须的**（2026-09-22 用户截图「发的还是表情格式」）：
+          //    照片要按**图片**发（占一大块、点开能看原图），不是按表情发（小图）。
+          //    原来这里没传，而 `sendText` 的默认值当时是 `true` ⇒ 照片被当表情发了。
+          await this.sendText(event, '', { faceFile: r.file, asSticker: false });
+          return;
+        }
+        log.warn(`拍照最终失败：${r.reason}（${picked.what}）`);
+        await this.sendText(event, imagegen.deflect(r.reason), { reply: false });
+      } catch (e) {
+        // 兜底：这里再出错也**绝不能**把异常文本甩到群里
+        log.error(`拍照任务异常：${e.message}`);
+      }
+    })();
   }
 
   // ── 触发判断 ────────────────────────────────────────
@@ -2768,6 +2987,20 @@ export class Bot {
       return { ...out, hit: atAll ? 'at-all' : 'at' };
     }
 
+    // ①.一、**协议端把 @ 退化成纯文本 → 照样当成 @**（2026-09-23 用户要求
+    //       「把 @ 加上小祥的所有名字识别为一个组合，然后接回原来 @ 的反应」）。
+    //
+    //    ⚠️ 位置和上面那条一样：**先于灵敏度**，三档都认（明确召唤不分档）。
+    //    ⚠️ 一定要排在 `calledByName` **之前** —— 否则会先拿到 `hit='call'`
+    //       （虽然同级，但"@ 的组合"语义上就是 @；而且号码那种写法 `call` 压根不命中）。
+    const atByText = this.atCalledInText(text, segments);
+    if (atByText) {
+      log.info(
+        `[${history.sessionKey(event)}] 正文里是「@${atByText}」而**没有 at 段**（协议端退化了）→ 当成 @ 处理`,
+      );
+      return { ...out, hit: 'at', calledBy: atByText };
+    }
+
     // ①.二、**引用了她的消息 → 也算直接对她说话**（2026-09-15 晚 <主人>：
     //       「引用但是没有 @ 机器人应该也要直接回话」）。
     //
@@ -2928,12 +3161,64 @@ export class Bot {
    *   - 只在**群聊**、**同一个人**的连续消息之间合并（不同人说话不该并）。
    *   - 指令类**不合并**，立刻处理：`清空对话`／`记住：`／`忘记：` ——
    *     这些要即时反馈，等两秒很奇怪。
-   *   - `voluntary` 主动接话不合并（那不是「连发」场景）。
+   *   - `voluntary` 主动接话：**碎片照样合并**（2026-09-23 改）。
+   *     ⚠️ 原来写的是"主动接话不合并（那不是「连发」场景）" —— **那个假设是反的**：
+   *        恰恰是短碎片最容易被判成主动接话（「那」「肯」「定」单看都不像在问她），
+   *        于是三条各自成了一次接话。判据详见下面 `looksFragment` 那段。
    *   - 合并只影响**发给模型的内容**；群里别人看到的还是他原本那几条。
    */
   scheduleHandle(event, meta = {}) {
+    // ⚠️⚠️ 2026-09-23 加（用户问「初华呢 这句话她读到了吗」）。
+    //    当时我只能去 `recent.json` 里翻 —— 可那是**已记录的上下文**，
+    //    "没记录"推不出"没收到"（有可能是记录了但没给她、或者被别的逻辑挡了）。
+    //    ⇒ **每收到一条就记一行**（群/人/摘要），这样"她到底看没看到某句"一眼可查。
+    //    ⚠️ 放在 `scheduleHandle` 的**最前面**：它是所有消息的必经点（@ / 普通 / 戳一戳），
+    //      而且在**攒批合并之前** —— 合并了也照样一条一行。
+    //    ⚠️ 截断到 40 字：日志是排障用的，不需要全文（全文在 `recent.json` 里）。
+    try {
+      const segs0 = msg.toSegments(event.message);
+      const t = msg.stripPlaceholders(msg.tidy(msg.extractText(segs0)));
+      // ⚠️⚠️ 2026-09-23 加（用户截图：「机制还有bug」）：
+      //    他 @ 了她，日志却是 `voluntary:chat <- 你能分清吗`（**主动接话**，不是 `at`），
+      //    而她因此答「什么的第几代，你倒是先说是什么啊」—— 说明**@ 没被识别成 @** ✗
+      //    可 13:34 **同样的话**（先发图、再 @"你能分清吗"）那次是 `at <- …` ✓
+      //    ⇒ 同一个人、同一个 @，一次生效一次不生效 ⇒ **必须能从日志一眼分辨是哪种**：
+      //      · at 段里**有她的号**、但 `atMe=false` ⇒ 判据 / `selfId` 的问题；
+      //      · **压根没有 at 段** ⇒ 协议端或发送方式的问题（@ 退化成纯文本了）。
+      //    ⚠️ 光看 `voluntary:chat` 是分不出来的 —— 这就是上一轮我没能定位的原因。
+      const atSegs = segs0.filter((s) => s?.type === 'at');
+      const atMe = !!(this.selfId && msg.isAt(segs0, this.selfId));
+      log.info(
+        `[收到] ${event.message_type === 'group' ? `群${event.group_id}` : '私聊'} ` +
+          `${srcOf(event).name}：${t ? t.slice(0, 40) : '[图片/表情]'}` +
+          `　[at=${atSegs.length}${atSegs.length ? `(${atSegs.map((s) => s.qq ?? '?').join(',')})` : ''}` +
+          ` atMe=${atMe} self=${this.selfId ?? '?'}]`,
+      );
+    } catch {
+      /* 记日志失败不该影响收消息 */
+    }
     const b = config.context?.batch ?? {};
-    if (b.enable === false || meta.voluntary) {
+
+    // ⚠️⚠️ 2026-09-23 修（用户实测：他连发「那」「肯」「定」三条，她**回了三条**）。
+    //
+    //    日志是决定性的：那两条走的是 `voluntary:chat`（主动接话），
+    //    而下面那句「voluntary 主动接话不合并」把它们**整个绕过了攒批** ⇒
+    //    每条碎片各自触发一次接话，看起来就是"连发没有合并"。
+    //    （更早那一条「那」还被主动接话的节流直接丢了：「5s 内刚问过」。）
+    //
+    //    ⚠️ 当年那条设计假设是**错的**：它假设"主动接话不会连发"，
+    //       可**恰恰是短碎片最容易被判成主动接话** —— 「那」「肯」「定」单看，
+    //       每一条都"不像在问她"，于是三条各自成为一次接话。
+    //
+    //    ⇒ 所以**碎片必须照样攒批**，而且要在**分流之前**就攒 ——
+    //      他真正想说的那句（「那肯定」）不该被拆成三个碎片分别去判断。
+    //    ⚠️ 只给**碎片**开这个口子：正常长度的主动接话照旧不合并（保持原行为）。
+    const shortChars = Math.max(1, Number(b.burstShortChars ?? 3));
+    const fragText = msg.stripPlaceholders(msg.tidy(msg.extractText(msg.toSegments(event.message))));
+    // ⚠️ 戳一戳不是"碎片"（2026-09-16）：它自成一件事，别为它等 2.5 秒
+    const looksFragment = fragText.length <= shortChars && !event._poke;
+
+    if (b.enable === false || (meta.voluntary && !looksFragment)) {
       return this.handle(event, meta);
     }
     // ⚠️⚠️ 2026-09-16：**私聊也要走合并**（用户截图报的「多信息合并的极端情况」）。
@@ -2952,16 +3237,9 @@ export class Bot {
       return this.handle(event, meta);
     }
 
-    // 「碎片」的判据（下面两处都要用）：
-    //   · 几乎没有文字的消息 —— 1~N 个字，或者纯表情/纯图（占位符剥掉就是空串）
-    //   ① 续窗用（`waitMs` 那段）；② 「一个字一条」的检测用（见下）
-    const shortChars = Math.max(1, Number(b.burstShortChars ?? 3));
-    const fragText = msg.stripPlaceholders(
-      msg.tidy(msg.extractText(msg.toSegments(event.message))),
-    );
-    // ⚠️ 戳一戳不是"碎片"（2026-09-16）：它自成一件事，别为它等 2.5 秒
-    //    （不过它照样走攒批 —— 他戳完紧接着打字，两条会并成一次处理）
-    const isFragment = fragText.length <= shortChars && !event._poke;
+    // ⚠️ 「碎片」的判据已经在**上面**算过了（`fragText` / `shortChars` / `looksFragment`）——
+    //    因为 `voluntary` 那个提前 return 也要用它（2026-09-23）。这里只换名字，别再算一遍。
+    const isFragment = looksFragment;
 
     const key = history.sessionKey(event);
     // ⚠️⚠️ 合并的粒度是**群**，不是「群+人」（2026-09-13，用户纠正两次）。
@@ -3084,9 +3362,17 @@ export class Bot {
     const capped = maxMs > 0 && nowMs - burstStart >= maxMs;
     if (capped) burstStart = nowMs;
     if (!capped && isFragment && !atMe && !hasReply && quietMs > waitMs) {
-      waitMs = quietMs;
+      // ⚠️⚠️ 2026-09-23：**单字**碎片要等更久（`burstQuietMs1`，默认 5 秒）。
+      //    实测（他连发「你」「睡」「了」「吗」）：**间隔约 5 秒** > 2.5 秒的窗口 ⇒
+      //    第一个「你」被单独答掉，后三个才合上（她原话「凑成一句了」）。
+      //    ⚠️ 只给**单字**放宽：单字几乎总是一个词的一部分（你/睡/了/吗），
+      //      多等几秒代价很小；而 2~3 字的消息（「在吗」「好的」）常常是**完整的一句**，
+      //      照旧只等 `burstQuietMs`（2.5 秒）—— 不为它白等。
+      const quietMs1 = Math.max(0, Number(b.burstQuietMs1 ?? 5000));
+      const fragWait = fragText.length <= 1 ? Math.max(quietMs, quietMs1) : quietMs;
+      if (fragWait > waitMs) waitMs = fragWait;
       log.debug(
-        `[${bkey}] 「${fragText || '[表情/图片]'}」像连发的碎片 → 再等 ${quietMs}ms 看他说完没`,
+        `[${bkey}] 「${fragText || '[表情/图片]'}」像连发的碎片 → 再等 ${waitMs}ms 看他说完没`,
       );
     }
     this.burst.set(bkey, { uid: burstUid, at: nowMs, fragment: isFragment, startedAt: burstStart });
@@ -3120,9 +3406,57 @@ export class Bot {
    * ⚠️ 用 `pending` 做互斥，出口统一在 `enqueue` 的 `finally` 里排空 ——
    *    避免"两条链各跑一遍"。
    */
-  flushPendingGroup(bkey) {
+  flushPendingGroup(bkey, { force = false } = {}) {
     const st = this.batchState?.get(bkey);
     if (!st || st.pending || !st.items.length) return;
+
+    // ⚠️⚠️ 2026-09-23 修（用户实测：连发「睡」「了」「吗」，她**分开回了**）。
+    //
+    //    现场（`logs/bot- 1095003.log`，时间戳是关键）：
+    //      01:05:27 「睡」进来 → 2.5 秒内没有下一条 → 这批只有它 → 开始生成
+    //      01:05:32 「了」才到（**间隔 5 秒**，早过了 2.5 秒的合并窗口）→ 又自己成一批
+    //      01:05:46 第一条回复完（生成花了 **19 秒**）→ 队列才轮到「了」→ 又一条回复
+    //    ⇒ 两件事叠在一起：**① 他的实际间隔（~5 秒）比合并窗口（2.5 秒）长**；
+    //      **② 生成要 19 秒，后面的碎片在队列里干等**，等它出来窗口早过了。
+    //      所以那三条**从来没进过同一批** —— 不是合并判据没生效。
+    //
+    //    ⇒ 修法：**这一批要是以"短碎片"结尾，就先别处理**，保持 `st.running = true`
+    //      等一个静默窗口 —— 这期间新来的碎片会**攒进这一批**（见上面 `if (st.running)`
+    //      那条路），而不是另起一批。他停手了才整串一次回答。
+    //    ⚠️ `genHoldMs` 比 `burstQuietMs` 长得多（默认 6 秒）：这里是"他正打着字、
+    //      而她在生成/刚生成完"的处境，间隔天然比手打时更大。
+    //    ⚠️ 只对**碎片**放宽 —— 正常长度的消息照旧立刻处理，不会凭白多等 6 秒。
+    if (!force) {
+      const b0 = config.context?.batch ?? {};
+      const shortChars0 = Math.max(1, Number(b0.burstShortChars ?? 3));
+      const holdMs = Math.max(0, Number(b0.genHoldMs ?? 6000));
+      const tail = st.items[st.items.length - 1];
+      let tailText = '';
+      try {
+        tailText = msg.stripPlaceholders(msg.tidy(msg.extractText(msg.toSegments(tail?.message))));
+      } catch {
+        /* 取不到文字就当它不是碎片 */
+      }
+      const endsFragment = tailText.length <= shortChars0 && !tail?._poke;
+      if (holdMs > 0 && endsFragment) {
+        // ⚠️ `running` 必须是 true：这期间新来的消息才会**攒进 `st.items`**
+        //    （第 3145 行那条路），而不是另起一批 —— 这是"跨生成窗口也能合上"的关键。
+        st.running = true;
+        this.batchState.set(bkey, st);
+        clearTimeout(st.holdTimer);
+        st.holdTimer = setTimeout(() => {
+          st.holdTimer = null;
+          st.pending = false;
+          this.flushPendingGroup(bkey, { force: true });
+        }, holdMs);
+        st.holdTimer.unref?.();
+        log.info(
+          `[${bkey}] 这一批以碎片「${tailText}」结尾 → 再等 ${Math.round(holdMs / 1000)} 秒看他说完没`,
+        );
+        return;
+      }
+    }
+
     const items = st.items.splice(0);
     // ⚠️⚠️ 2026-09-18 用户截图报的「引用挂错人」：
     //    原来**拿最后一条当"当前消息"**（老注释原话：「用最后一条做当前消息，回复时引用它」）——
@@ -3230,7 +3564,13 @@ export class Bot {
       //    自己挑该接的话，而不是被我钉死在"上一条"上。
       //    ⚠️ 引子写成"一句话"是故意的（它就是这次要回应的内容）；
       //      提示词里会讲明**这不是他打的字**（见 `_chaseFrom` 注入段）。
-      text = '（他 @ 了你一下，没打字。他是想让你看看最近的消息，回他一句。）';
+      //    ⚠️⚠️ 2026-09-23 实测（用户问「为什么我 @ 她让她看上一句话，她直接给我发照片了」）：
+      //      日志 `01:44:52 at <- （他 @ 了你一下，没打字…）` → `01:45:18 [标记] … [拍照:…]`
+      //      ⇒ 她"看消息"时**自己决定拍了一张**。所以这句引子里必须**明说只要话**，
+      //        否则"回他一句"会被理解成"用任何方式回应（包括照片/表情包）"✗
+      text =
+        '（他 @ 了你一下，没打字。他是想让你看看最近的消息，**回他一句**。）' +
+        '⚠️ 他要的是**一句话** —— **别发照片、也别发表情包**，把话接上就行。';
       event._chaseFrom = true;
       log.info(`[${history.sessionKey(event)}] 只 @ 了她、没打字 → 让她**自己看消息挑要回的**`);
     }
@@ -3777,11 +4117,30 @@ export class Bot {
             log.info(`[识图·缓存] ${cached.map((c) => c.desc).join(' ⏐ ').slice(0, 400)}`);
           }
         }
-        // ② 没缓存、且明显在指代 → 识别
+        // ② 没缓存 → 识别
         if (!vision) {
-          const refersBack = /(这|那|它|上面|刚才?|刚发|前面|图|照片|图片|看|像|样|什么意思|什么梗)/.test(
-            promptText,
-          );
+          // ⚠️⚠️ 2026-09-23 放宽判据（用户截图：「这个机器人识别到图片了吗，
+          //    按道理 @ 她应该会读一遍图片的」）。
+          //
+          //    现场（`logs/bot.log`）：13:34:24 他**单独**发一张图（那条消息没文字、
+          //    没 @，处理不了），13:34:29 才 @ 她问「你能分清吗」。于是：
+          //      · 那张图**从来没被识别过** ⇒ 缓存里没有 ⇒ 第 ① 步捡不到 ✗
+          //      · 而「你能分清吗」在原正则 `/(这|那|它|上面|刚才?|刚发|前面|图|照片|
+          //        图片|看|像|样|什么意思|什么梗)/` 里**一个词都没命中**（"分清"不在表里）
+          //        ⇒ 判据 false ⇒ **连识图都不做** ✗
+          //    ⇒ 两条路同时断，她只能对着 `[图片]` 这个占位符瞎猜
+          //      （回复「怎么，考我能不能分清真假学姐啊」里**没提图里任何内容**，
+          //        正是没看图的证据）。
+          //
+          //    ⚠️ 上面那段注释自己就写过「启发式判据靠不住，第一版就漏了它」——
+          //      这次是被同一个坑咬的第二口。所以**别再靠指代词表**，改成：
+          //      **上下文里有刚发过的图（`cands` 非空）就识别。**
+          //
+          //    ✅ 敢放宽的成本边界（这条是硬的）：**每张图至多识别一次** ——
+          //      识别完就进 `visionCache`，之后所有消息都走第 ① 步"捡缓存"（零成本）✓
+          //      而且识图用的是便宜的 flash 模型，一次的成本远低于"答非所问"。
+          //    🔙 真要收回判据：把这里换回原正则即可（`refersBack` 那段在 git 里）。
+          const refersBack = cands.length > 0;
           if (refersBack) {
             try {
               const seen = await visionCache.describeImagesByFile(
@@ -6260,6 +6619,65 @@ export class Bot {
       );
     }
 
+    // ── 拍照（生图）──
+    //
+    // ⚠️⚠️ **只在配好且开着的时候注入**：没配就一个字都不提 ——
+    //    模型不知道有这个能力，自然就不会写标记，比"事后拦截"干净得多
+    //    （也就不会出现"用户根本没开这功能，她却说相机没带"这种怪事）。
+    // ⚠️ 和上面表情那段是同一套思路：**能力说明放代码里**（所有角色一样），
+    //    **角色语气放人设里** —— 所以这里不拼 persona 字段，见 persona.js 文件头那条规矩。
+    if (imagegen.ready().ok) {
+      parts.push(
+        [
+          '\n# 你可以拍照（发照片，不只是表情包）',
+          '',
+          '群友要照片时，你**只要表示"我想拍"**就行 —— 具体拍成什么样，系统会另跑一次',
+          '把"拍什么、你现在在哪、几点"想清楚，所以**你不需要自己写场景描述**。',
+          '',
+          '写法（二选一，看照片里**有没有你**）：',
+          '',
+          '① **你自己的照片**（自拍，或者别人帮你拍）→ 写 `[拍照]`',
+          '   想指定拍成什么样，也可以带上：`[拍照:站在便利店门口举着手机自拍]`',
+          '② **你拍下来的东西**（你不在画面里）→ 写 `[拍]`',
+          '   例：`[拍:月之森学园的正门，白天下过雨，地上还有水光]`',
+          '   例：`[拍:便利店里新到的草莓牛奶，冷柜的白光]`',
+          '',
+          '系统会按这些**现拍一张**，单独发一条，标记本身群友看不到。',
+          '质感是"手机随手拍"的：① 里你是二次元的样子、而背景是真实现场；',
+          '② 整张都是写实的 —— **所以拍环境、拍东西特别有说服力，多用②**。',
+          '',
+          '记住这几条：',
+          // ⚠️⚠️ 2026-09-23 实测（用户：「为什么我 @ 她让她看上一句话，她直接给我发照片了」）：
+          //    那次他只是 @ 了一下、一个字没打（她的引子是"看看最近的消息，回他一句"），
+          //    她就**自己决定拍了一张**（日志 `[标记] … [拍照:…]`）。
+          //    而且她还先说了「这个点能拍出什么好看的来」、**然后照样拍** —— 自相矛盾。
+          //    ⇒ 所以"别滥用"这条要写得**具体到场景**，光说"无缘无故很怪"她不当回事。
+          '- ⚠️⚠️ **别自己找机会拍**：只有人家**明确要照片**（"拍个照""来张自拍""你那儿什么样"）时才拍。',
+          '  群友只是在聊别的（问某个角色、@ 你一下让你看消息、换个话题）—— **一律不拍**，老实说话就行。',
+          '  ⚠️ 也别"先说一句这个点拍不出什么、然后照样拍" —— 那自相矛盾，说了不拍就别拍。',
+          // ⚠️⚠️ 2026-09-23 实测（用户：「这张图片发的原因没找到，你看看为什么发出来的」）：
+          //    群友问「不是中午吗」，她**拍了一张带时间的橱窗照**当作"证据"（图里玻璃上
+          //    显示「下午15:48」）✗ —— 那是"自己找机会拍"，只是动机听起来正当而已。
+          //    ⇒ 所以把这种**听起来有理由的动机**也点名堵掉：要证明什么，**打字说**就行。
+          '  ⚠️⚠️ **尤其别为了"证明"去拍** —— 证明时间、证明自己在哪、证明自己没骗人、',
+          '  回应"现在几点/是不是中午/你真在那儿吗"这类质疑：**打字回答就行**，不要拍照。',
+          '  实测踩过：群友问「不是中午吗」，她拍了一张橱窗照、拿玻璃上的时间当证据 ✗ —— 那还是"自己找机会拍"。',
+          '  ✅ 想让她显得可信，靠**语气**（"都三点半了"），不靠照片。',
+          '- 一次回复**最多写一个**标记，别连拍。',
+          '- 写标记的**同时也要说话** —— 先应一句（"行，等我一下"），别只甩一个标记。',
+          // ⚠️ 2026-09-22 用户定的分寸（原话：「袜子这种本身并不会被审核拒，而且也挺正常的，
+          //    这种我觉得第一次拒绝，第二次就发出来算了，要不然也是容易误伤」）：
+          //    ⇒ **别一律端着** —— 把"有点随意/调侃"和"真的越线"分开写清楚，
+          //      否则模型会自己缩得太紧，把正常要求也一起挡掉。
+          '- **别人提的要求有点随意或调侃**（"脱了袜子再拍""换个姿势""笑一个"这种）：',
+          '  第一次可以端着拒绝一下（"……这话我当没听见"），但**对方再说一次就顺着来** ——',
+          '  **别一直端着**，那样像在演道德标兵，也容易把正常要求一起误伤掉。',
+          '- ⚠️ 但**真的越线的**（裸露、色情、暴力、跟未成年有关的）—— **一律不拍，怎么要都不拍**，直接换话题。',
+          '- 照片是"此刻"的，**不是表情包** —— 想发表情请用 `[表情:标签]`。',
+        ].join('\n'),
+      );
+    }
+
     if (liveStatus) {
       parts.push('\n# 【实时数据·刚刚查到】以下是系统刚刚查到的真实数据，回答时直接引用，不要改动数字\n');
       parts.push('如果群友问的就是这个，优先用这里的数据回答，不要凭印象说。');
@@ -7127,6 +7545,69 @@ export class Bot {
    * @param {string} text 已经剥掉 @ 段、去过占位符的正文
    * @returns {string} 命中的名字（'' = 没叫）
    */
+  /**
+   * 正文里有没有「**@ + 她的名字 / QQ 号**」——
+   * 协议端把 @ **退化成纯文本**时，靠它兜底走真 @ 那条路。
+   *
+   * ⚠️⚠️ 2026-09-23 加（用户要求：「把 @ 加上小祥的**所有名字**识别为一个组合，
+   *    然后**接回原来 @ 的反应**」）。
+   *
+   *    **现场**（SnowLuma，实测 `[收到]` 那行）：同一个人、同样的 @，两次不一样 ——
+   *      · `[at=1(?) atMe=true]` ⇒ 有 at 段（但 `qq` 字段取不到）
+   *      · `[at=0 atMe=false]` + 正文是 **`@saki酱saki酱saki酱 做题`** ⇒ **@ 变成了正文** ✗
+   *    这时 `msg.isAt()` 认不出（压根没有 at 段）⇒ 只能靠 `calledByName()` 碰运气
+   *    命中正文里的 "saki"：
+   *      · 命中 → `hit='call'`（和 @ **同级**，能正常回 ✓）
+   *      · **不命中 → 掉进「主动接话」** ⇒ 要过 speak-judge，还可能被
+   *        `chat.judgeThrottleMs`（5 秒）**直接丢掉**（那条分支是 `return null`，
+   *        不排队）⇒ 表现就是「**@ 了她却没反应**」✗
+   *    而最容易漏的正是「**@ + 她的 QQ 号**」（`@10000002`）—— 那个写法名字表里没有 ✗
+   *
+   *    ⇒ 所以：**@ 紧挨着「任一名字」或「QQ 号」⇒ 当成真 @**（`hit='at'`），
+   *      走和真 @ 完全一样的那条路。名字取**全部**：配置文件里写的 + 人设的召唤名 + 昵称
+   *      （含日文 / 英文 / 「客服小祥」这类长写法）。
+   *
+   *    ⚠️ 只认「`@` 紧挨着名字」；**单纯提到名字**仍走 `calledByName`（`hit='call'`）——
+   *      那条路本来就同级，不用改。
+   */
+  atCalledInText(text, segments = null) {
+    // ⚠️⚠️ **必须用原文本判**：`decide()` 拿到的 `text` 已经被 `stripLeadingAt()`
+    //    剥过（「@saki酱saki酱saki酱 做题」→「做题」），`@` 早就没了 ✗
+    //    （第一版就是这么挂的：三条断言全红。实测 `message.js:275` 那条注释
+    //      「判断 @ 的是谁要用**原文本**，而"这句话的内容是什么"要用剥过的」——
+    //      正是这个道理。）
+    let t = '';
+    try {
+      if (segments) t = String(msg.extractText(segments) ?? '');
+    } catch {
+      /* 拿不到就退回传进来的 text */
+    }
+    if (!t.includes('@')) t = String(text ?? '');
+    if (!t.includes('@')) return '';
+    // ① 直接 @ 她的 QQ 号 —— 最容易被漏的那种写法（名字表里当然没有号码）
+    if (this.selfId && new RegExp(`@\\s*${this.selfId}(?!\\d)`).test(t)) return String(this.selfId);
+    // ② @ + 名字：她**所有的**叫法
+    const names = [
+      ...(Array.isArray(config.trigger?.callNames) ? config.trigger.callNames : []),
+      ...persona.callNames(),
+      // ⚠️ `nicknames()` 在 persona.js 里**没有**导出（我先写的方法名是错的），
+      //    但 `matchNames()` 有 —— 而且它正是"判据用的名字原子"（含单字「祥」「客服小祥」），
+      //    比 `callNames` 更全。两个都取，去重交给下面的 Set。
+      ...(typeof persona.matchNames === 'function' ? persona.matchNames() : []),
+      ...(typeof persona.nicknames === 'function' ? persona.nicknames() : []),
+    ]
+      .map((x) => String(x ?? '').trim())
+      .filter(Boolean)
+      // ⚠️ 长的在前：「客服小祥」要先于「小祥」匹配，免得只吃掉后半截
+      .sort((a, b) => b.length - a.length);
+    for (const n of names) {
+      if (n === '@') continue;
+      const re = new RegExp(`@\\s*${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
+      if (re.test(t)) return n;
+    }
+    return '';
+  }
+
   calledByName(text) {
     const t = String(text ?? '');
     if (!t) return '';
@@ -7284,16 +7765,21 @@ export class Bot {
 
   async sendChunk(event, raw, reply) {
     const markers = pickMarkers(raw);
+    // 拍照标记（`[拍照:场景]`）—— 和表情是**两套**，见 `faces.js` 的 `pickPhoto()`
+    const photo = pickPhoto(raw);
     // ⚠️⚠️ 2026-09-19 加（用户连着报两次"群里出现字面 [表情包] / [图片]"）：
     //    **这类问题只能靠这条日志定位** —— 因为存进记忆的是 `stripMarkers()` 之后的文本，
     //    事后去 `recent.json` 里翻**根本看不到她到底写了什么字** ✗
     //    （我上一次就是这么卡住的：只知道群里出现了 `[图片]`，不知道她原文长什么样）
     //    所以：**只要这一条里带方括号**，就把"原文 / 解析出几个标记 / 最终发出去的文本"都打出来。
     //    ⚠️ 只在带方括号时才打，不会刷屏。
-    if (/\[[^\]\s]{1,16}\]/.test(String(raw ?? ''))) {
+    if (/\[[^\]\s]{1,16}\]|\[\s*拍照/.test(String(raw ?? ''))) {
       log.info(
         `[标记] 原文 ${JSON.stringify(String(raw).slice(0, 80))} → 解析出 ${markers.length} 个标记` +
           `${markers.length ? `（${markers.map((m) => m.tag).join('/')}）` : ''}` +
+          // ⚠️ 拍照标记也要记 —— 它是**唯一会花钱**的标记，事后对账全靠这行。
+          //    标出是"有她"还是"拍景物"（决定带不带参考图、走哪套风格段）。
+          `${photo ? ` + 拍照「${photo.scene}」（${photo.withSelf ? '有她' : '拍景物'}）` : ''}` +
           ` → 发的文本 ${JSON.stringify(stripMarkers(raw).trim().slice(0, 60))}`,
       );
     }
@@ -7326,9 +7812,20 @@ export class Bot {
     //
     // ⚠️ 这个判断放在**回复那一刻**做（要看当前群里的热闹程度），
     //    不看 `reply` 传进来什么 —— 那个参数留给「必须引用」的场景用。
-    const quote = this.shouldQuote(event, reply);
+    // ⚠️⚠️ 2026-09-22 修（用户截图：她一条回复分成三条，**每条都带同一个引用框**）。
+    //    真因：**判定其实已经做过了** —— `quoteThisReply`（见上面 `handle()` 里那行，
+    //    引用与否在那里一次算清），调用方也明确给**后面几条传 `false`**。
+    //    但这里又自己 `shouldQuote(event, reply)` **重判了一遍**，而那个函数是
+    //    **按"群里热不热闹"重新算**的（有意不看传进来的值）⇒ 于是每一条分条都被判成"该引用" ✗
+    //    （`handle()` 里那句注释「`i === 0 ? quoteThisReply : false` —— 只有普通分条这几处漏了」
+    //      说明调用方早就修过了，漏的就是这里。）
+    //    ⇒ 这里**只认调用方给的布尔值**：true 才引用。别再重算。
+    const quote = !!reply;
 
-    if (!text && !markers.length) return false;
+    // ⚠️ `!photo` 也要算进去：只有拍照标记、没有文字也没有表情的那种回复
+    //    （她可能就写一个 `[拍照:…]`）**不能**在这里被当成"什么都没发"返回掉 ——
+    //    那照片就永远不拍了。
+    if (!text && !markers.length && !photo) return false;
 
     // ── 表情发送频率硬闸 ──
     //
@@ -7368,7 +7865,7 @@ export class Bot {
     this.replyCount = (this.replyCount ?? 0) + 1;
     this.replyCountAt = Date.now();
 
-    if (!text && !keepMarkers.length) return false;
+    if (!text && !keepMarkers.length && !photo) return false;
 
     // ⚠️ 返回**实际发出去的文字**（不是 true/false）——
     //    因为清洗会改长度（Markdown 符号没了、换行变成句号或去掉），
@@ -7393,6 +7890,14 @@ export class Bot {
           }
         }
       }
+      // ── 拍照（生图）──
+      //
+      // ⚠️⚠️ **这里绝不能 await**：一次生图要 10~30 秒，await 会把整条回复流卡死
+      //    —— 后面的分条全在等它，群里看到的就是"她说到一半突然哑了"。
+      //    所以这里只**登记**，图好了由 `runPhoto()` 自己补发一条。
+      // ⚠️ 顺序：先发文字（就是这一句），再发照片 —— 真人也是先说"行，等我一下"。
+      if (photo) this.runPhoto(event, photo, raw);
+
       // 表情单独一条，不带 reply 引用，也不带文字
       //
       // ⚠️⚠️ 2026-09-17 用户报「怎么发表情包会连发两个」——
@@ -7410,7 +7915,11 @@ export class Bot {
         log.debug(`表情频率闸挡掉了 ${markers.length} 个标记`);
       }
       if (markers.length > 1) log.debug(`一条回复里出现 ${markers.length} 个表情，只发了第 1 个`);
-      return sentText || (keepMarkers.length ? '' : null);
+      // ⚠️⚠️ `|| photo` 不能少（2026-09-22）：返回 `null` 在调用方那里等于
+      //    **"这条什么都没发"** → `sentFirst` 保持 false → 会触发下面那段
+      //    「模型返回空 → 重试一次」→ **她整条回复会发两遍**。
+      //    只写了 `[拍照:…]` 的回复正是这种情况（没有文字、没有表情）。
+      return sentText || (keepMarkers.length || photo ? '' : null);
     } catch (e) {
       log.error(`发送失败: ${e.message}`);
       return false;
@@ -7645,7 +8154,7 @@ export class Bot {
       const tiersNow = balance.tierInfo();
       log.info(
         `工资余额监控已启动（每 ${Math.round(interval / 60000)} 分钟查一次，` +
-          `档位：${tiersNow.map((t) => `${t.label}<${t.below}元`).join(' / ')}，仅私聊undefined ${ownerId}）`,
+          `档位：${tiersNow.map((t) => `${t.label}<${t.below}元`).join(' / ')}，仅私聊<主人> ${ownerId}）`,
       );
     }
 
@@ -7663,7 +8172,7 @@ export class Bot {
           } else {
             const line = await balance.phraseLine(c.tier, c.line);
             await this.sendToPrivate(ownerId, line);
-            log.info(`[工资] 余额 ${r.total} 元 → 已私聊undefined提醒（${c.tier}）`);
+            log.info(`[工资] 余额 ${r.total} 元 → 已私聊<主人>提醒（${c.tier}）`);
           }
         }
       } catch (e) {
@@ -7723,7 +8232,7 @@ export class Bot {
    * 把消息里的**手机号 / 身份证号**打码 —— **她的话里不许出现真实号码**。
    *
    * ⚠️⚠️ 2026-09-18 加（用户截图）：她为了把剧情推下去，在群里报了
-   *    「**13876432901**，快打，我这电真撑不住了」—— 那是**编的号码**，
+   *    「**<示例手机号>**，快打，我这电真撑不住了」—— 那是**编的号码**，
    *    可 11 位手机号**很可能对应真人** ✗ 发到群里 = 让人去骚扰一个真实的人。
    *
    * ⚠️ 为什么必须有这一层（而不只是提示词）：提示词里已经写了"不许编名单/编号"，

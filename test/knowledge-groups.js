@@ -19,7 +19,7 @@
  *
  * 用法: node test/knowledge-groups.js
  */
-import { writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,6 +56,18 @@ writeFileSync(
 writeFileSync(
   join(ROOT, TMP, 'anime', 'bangdream.md'),
   '# 二次元常识\n\nBanG Dream / MyGO 的常识都在这儿。\n',
+  'utf8',
+);
+// 敏感词库（2026-09-25 加）：独立子目录 + **全局注入** —— 不看群、不看触发词。
+mkdirSync(join(ROOT, TMP, 'sensitive'), { recursive: true });
+writeFileSync(
+  join(ROOT, TMP, 'sensitive', 'sensitive-words.md'),
+  [
+    '# 敏感词（测试用）',
+    '',
+    '测试条目：遇到敏感词只认不接，不重复、不引申、不顺着说。',
+    '',
+  ].join('\n'),
   'utf8',
 );
 // 共享群记忆：里面夹一个"只在 699 用"的标签块（模拟"复制出来之后原文还留着"）
@@ -108,6 +120,27 @@ console.log('\n【1】★★ `groups/<群号>.md` 只给那个群');
   check(!b.includes('猫尾不打烊'), '★★ **别的群一个字都看不到 699 的人**（＝正确屏蔽）');
   check(!/【这个群自己的资料】/.test(b), '★ 别的群也不会带上"群自己的资料"那一段');
   check(b.includes('小夏KID'), '★ 但它照样看得到共享的群记忆（MC 群自己的人还在）');
+}
+
+console.log('\n【1b】★★ 敏感词库：独立子目录，但**无条件全局注入**');
+{
+  const name = 'sensitive/sensitive-words.md';
+  const picked = K.selectFor('今天天气怎么样', { groupId: G699 }).names;
+  check(picked.includes(name), '★★ 普通闲聊也会选中敏感词库（不靠关键词命中）');
+  const picked2 = K.selectFor('随便聊聊', { groupId: GMC }).names;
+  check(picked2.includes(name), '★ 换个群照样选中（不按群筛选）');
+  for (const gid of [G699, GMC, '']) {
+    const t = K.knowledgeText({ only: picked, groupId: gid });
+    check(
+      t.includes('只认不接'),
+      `★ 只带 selectFor 结果时，${gid ? `群 ${gid}` : '私聊'}的提示词里也有敏感词规则`,
+    );
+  }
+  const raw = readFileSync(join(ROOT, TMP, 'sensitive', 'sensitive-words.md'), 'utf8');
+  check(
+    !raw.includes('数据文件，不进聊天知识'),
+    '★★ 文件头没有「不进聊天知识」声明（写了会被加载器跳过）',
+  );
 }
 
 console.log('\n【2】★★ 共享文件里的「群标签块」按群生效');
@@ -183,13 +216,22 @@ console.log('\n【5】★ 界面/观察那边的接线（源码层面）');
 console.log('\n【6】★★ 真实知识库的现状（699 那份确实建起来了）');
 {
   // 用**真实** knowledge/ 目录看一眼（只读，不改）
+  // ⚠️ 2026-09-25 调整：真实的群资料库在 `.gitignore` 里、换机器 checkout 本来就没有 ——
+  //    以前这里直接 `readFileSync` 真实 groups/<群号>.md，缺文件就整套测试崩掉（ENOENT），
+  //    搞得「①~⑤ 全绿」也拿不到结果。缺文件就跳过本节（只报数量），不算失败、不崩。
   const real = join(ROOT, 'knowledge');
-  const g = readFileSync(join(real, 'groups', `${G699}.md`), 'utf8');
-  check(g.includes('猫尾不打烊') && g.includes('喵喵三三'), '★★ 699 那份里有它的人（复制过来了）');
-  check(/游戏常识/.test(g), '★ 而且留了「游戏常识（待补）」的位置（用户：总结好几个游戏之后再补常识）');
-  const gm = readFileSync(join(real, 'group-memory.md'), 'utf8');
-  check(!gm.includes('猫尾不打烊'), '★★ 共享文件里已经看不到 699 的人（别的群不会再看到）');
-  check(gm.includes('一条没丢'), '★ 共享文件里留了说明（说明搬哪儿去了、备份在哪儿）');
+  const gfile = join(real, 'groups', `${G699}.md`);
+  const memfile = join(real, 'group-memory.md');
+  if (!existsSync(gfile) || !existsSync(memfile)) {
+    console.log('  ⏭️ 真实群资料库在本机不存在（被 .gitignore 排除）—— 跳过本节，不算失败');
+  } else {
+    const g = readFileSync(gfile, 'utf8');
+    check(g.includes('猫尾不打烊') && g.includes('喵喵三三'), '★★ 699 那份里有它的人（复制过来了）');
+    check(/游戏常识/.test(g), '★ 而且留了「游戏常识（待补）」的位置（用户：总结好几个游戏之后再补常识）');
+    const gm = readFileSync(memfile, 'utf8');
+    check(!gm.includes('猫尾不打烊'), '★★ 共享文件里已经看不到 699 的人（别的群不会再看到）');
+    check(gm.includes('一条没丢'), '★ 共享文件里留了说明（说明搬哪儿去了、备份在哪儿）');
+  }
 }
 
 console.log('\n【7】★★ "连不上"的说法必须能把**服务器库**带进来（2026-09-15 晚补的坑）');
@@ -211,11 +253,18 @@ console.log('\n【7】★★ "连不上"的说法必须能把**服务器库**带
   check(hit('服务器进不去') === true, '★ 老判据（服务器/进不去）没被改坏');
   check(hit('今天午饭吃什么') === false, '★ 无关闲聊**不会**白白带上（省提示词）');
   // 内容层面：那三步顺序必须写清楚（用户定的：不用加速器 → 查自己网络 → 再问管理员）
-  const srv = readFileSync(join(ROOT, 'knowledge', 'hzymtr-server.md'), 'utf8');
-  check(/不需要加速器/.test(srv), '★★ 资料里写明了「不需要加速器」（这服直连）');
-  check(/先查[^\n]{0,8}网络/.test(srv), '★★ 而且写明"先查自己网络"');
-  check(/再问管理员/.test(srv), '★ 最后一步是"一直进不去再问管理员"');
-  check(/跟备份一点关系都没有/.test(srv), '★ 仍然写着"跟备份没关系"（上次那条没丢）');
+  // ⚠️ 2026-09-25 调整：`knowledge/hzymtr-server.md` 同样被 .gitignore 排除 ——
+  //    真实文件不存在就跳过这半节（模板里本来就没写这几句），不算失败、不崩。
+  const srvFile = join(ROOT, 'knowledge', 'hzymtr-server.md');
+  if (!existsSync(srvFile)) {
+    console.log('  ⏭️ 真实服务器库在本机不存在（被 .gitignore 排除）—— 跳过内容断言，不算失败');
+  } else {
+    const srv = readFileSync(srvFile, 'utf8');
+    check(/不需要加速器/.test(srv), '★★ 资料里写明了「不需要加速器」（这服直连）');
+    check(/先查[^\n]{0,8}网络/.test(srv), '★★ 而且写明"先查自己网络"');
+    check(/再问管理员/.test(srv), '★ 最后一步是"一直进不去再问管理员"');
+    check(/跟备份一点关系都没有/.test(srv), '★ 仍然写着"跟备份没关系"（上次那条没丢）');
+  }
   // ⚠️ 这里读的是**真实**的人设包（不是上面那份临时的）——
   //    这条断言盯的是"用户实际的人设里有没有这段话"，所以必须在搬走之前读。
   check(

@@ -42,6 +42,16 @@ const GROUP_DIR = join(DIR, 'groups');
  */
 const ANIME_DIR = join(DIR, 'anime');
 /**
+ * 敏感词库（`knowledge/sensitive/<文件名>.md`）—— 2026-09-25 加，独立于共用库和动画库。
+ *
+ * ⚠️ **全局注入**：不按群、角色、关键词筛选，`selectFor()` 无条件带上它。
+ *    目的是让模型**随时知道哪些词是雷、怎么绕**，不能等消息里先命中才补规则。
+ * ⚠️ 子目录故意不放进根目录扫描：这里是**独立库**，不是共用库的一份文件。
+ * ⚠️ 文件头**不能写数据文件声明** —— 写了会被 `load()` 当成不进聊天的知识跳过。
+ *    敏感词的唯一来源从 `memes.md` 迁到这里（梗库仍是"按需注入"，不再重复一套）。
+ */
+const SENSITIVE_DIR = join(DIR, 'sensitive');
+/**
  * 私聊记忆目录（2026-09-17 加）。
  *
  * 用户要求：「**机器人和群友的私聊也应该和群里一样，记下性格和事件**」（附了私聊截图）。
@@ -156,6 +166,17 @@ function load() {
       if (collected.some((c) => c.name.toLowerCase() === n.toLowerCase())) continue;
       collected.push({ name: n, file: join(DIR, n), from: 'knowledge' });
     }
+    // ── 敏感词库（`knowledge/sensitive/<文件名>.md`）：独立第三类，**全局注入** ──
+    // ⚠️ 名字带 `sensitive/` 前缀，和 `anime/<库名>.md` / `groups/<群号>.md` 同一个风格，
+    //    这样界面分组、路径白名单、按需选择都能各自认得，又不会混进根目录的共用库。
+    if (existsSync(SENSITIVE_DIR)) {
+      for (const n of readdirSync(SENSITIVE_DIR)) {
+        if (!n.toLowerCase().endsWith('.md')) continue;
+        const rel = `sensitive/${n}`;
+        if (collected.some((c) => c.name === rel)) continue;
+        collected.push({ name: rel, file: join(SENSITIVE_DIR, n), from: 'knowledge' });
+      }
+    }
     // persona 放最前面，其余按文件名排序
     collected.sort((a, b) => {
       const pa = a.name.toLowerCase().startsWith('persona') ? 0 : 1;
@@ -234,6 +255,10 @@ function load() {
     );
     if (animeKept.length) {
       log.info(`动画库 ${animeKept.length} 份（**由人设声明**）：${animeKept.map((f) => f.name).join(', ')}`);
+    }
+    const sensitiveKept = files.filter((f) => f.name.startsWith('sensitive/'));
+    if (sensitiveKept.length) {
+      log.info(`敏感词库 ${sensitiveKept.length} 份（**全局注入**）：${sensitiveKept.map((f) => f.name).join(', ')}`);
     }
     if (groupFiles.size) {
       log.info(
@@ -640,7 +665,30 @@ export function selectFor(text, opts = {}) {
   const picked = [];
   const skipped = [];
 
-  skipped.push('hzymtr-server.md');
+  // ── 服务器库（`hzymtr-server.md`）：问进服/排障/规则/存档时才读 ──
+  // ⚠️ 2026-09-25 修：HEAD 里这里只剩一句 `skipped.push()`、没有任何 picked 判据，
+  //    于是「连不上/超时/加速器/登录」**永远带不进**服务器库（test/knowledge-groups【7】从基线就 4 红）。
+  //    判据两条：①通用词（进服/排障/登录/加速器/超时…）②消息里出现库里写过的词（`mentionsAnyTerm`）。
+  //    这样库里以后加新条目会自动生效，不用同时改正则 —— 和 anime 库同一套思路。
+  // ⚠️ 关键词故意留「加速器」：正是用户要纠正的那类问题（这服直连、**不需要加速器**）。
+  //    不认它，问的人反而看不到正确答案。
+  const srv = files.find((f) => f.name === 'hzymtr-server.md');
+  if (srv) {
+    const needServer =
+      /服务器|进服|进不去|连不上|连接|超时|加速器|登录|登陆|白名单|崩了|卡顿|存档|备份|版本|更新|MOD|模组|IP|地址|端口|掉线|延迟|ping/i.test(
+        t,
+      ) || mentionsAnyTerm(t, srv.name);
+    if (needServer) picked.push(srv.name);
+    else skipped.push(srv.name);
+  } else {
+    skipped.push('hzymtr-server.md');
+  }
+
+  // ── 敏感词库：**无条件全局注入**（2026-09-25）────────────────────
+  // 不看群、角色、触发词 —— 这些规则必须"一直在她眼前"，
+  // 等消息里出现敏感词才临时补，模型早就已经顺着接下去了。
+  // 走 `files` 而不是写死文件名：以后往 sensitive/ 加文件自动生效。
+  for (const s of files.filter((f) => f.name.startsWith('sensitive/'))) picked.push(s.name);
 
   // ⚠️⚠️ 2026-09-17 修（<主人> 报的：「699 群有群友让机器人介绍另一个群友，但是机器人说不知道。
   //    **应该先对应上名字**，直接调用群知识库来回答」）。

@@ -199,6 +199,34 @@ export function saveAvatar(id, buf, ext) {
   return { file: name, bytes: buf.length };
 }
 
+/**
+ * 换人设包里的**生图参考图**（立绘 / 全身图，2026-09-22 加）。
+ *
+ * ⚠️ 和头像**是两个文件、两个字段**，别合并：
+ *   · `avatar.png`（`identity.qq.avatar`）→ 会被交给协议端当**真号头像**，是正方形小图；
+ *   · `ref.png`（`identity.image.refs[0]`）→ 只喂给**生图 API** 当人物参考。
+ *   头像往往太小/太糊，当参考图画出来的脸会飘 —— 所以要一张正经立绘。
+ * ⚠️ 文件名不叫 `avatar`，就是为了让 `toDataUrl()` / 白名单两条路不会互相踩到。
+ */
+export function saveRefImage(id, buf, ext) {
+  const dir = packDir(id);
+  if (!existsSync(dir)) throw bad(`没有人设包「${id}」`);
+  const e = String(ext ?? '').toLowerCase();
+  if (!['.png', '.jpg', '.jpeg', '.webp', '.bmp'].includes(e)) throw bad(`参考图格式不支持：${e || '(空)'}`);
+  if (!buf || !buf.length) throw bad('图片是空的');
+  const name = e === '.jpeg' ? 'ref.jpg' : `ref${e}`;
+  writeFileSync(join(dir, name), buf);
+  const cur = readPack(id);
+  // ⚠️ 覆盖时**先删掉旧的其它扩展名**，不然 `identity.image.refs` 指新文件、
+  //    旧文件还躺在包里，下次看目录会以为是两张
+  for (const other of ['ref.png', 'ref.jpg', 'ref.webp', 'ref.jpeg', 'ref.bmp']) {
+    if (other !== name) try { rmSync(join(dir, other), { force: true }); } catch { /* 删不掉就算了 */ }
+  }
+  saveIdentity(id, { ...cur.identity, image: { ...(cur.identity.image || {}), refs: [name] } });
+  log.info(`人设「${id}」的生图参考图已更新：${name}（${(buf.length / 1024).toFixed(1)} KB）`);
+  return { file: name, bytes: buf.length };
+}
+
 /** 写一个包的 identity.json（**先备份**；`id` 字段强制对齐目录名） */
 export function saveIdentity(id, obj) {
   const dir = packDir(id);
@@ -222,6 +250,17 @@ export function saveIdentity(id, obj) {
   writeFileSync(idFile, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
   log.info(`人设「${id}」已保存：${next.name} / 自称 ${next.selfName}`);
   return next;
+}
+
+/** `_template` 里的数组是给模型看的说明/示例，不是新人设的真实值。
+ *  从模板创建时保留结构但清空所有数组，避免“判断……要用的全部写法”等
+ *  说明文字被界面和机器人当成真实名字/关键词。 */
+function clearTemplateArrays(value) {
+  if (Array.isArray(value)) return [];
+  if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) value[key] = clearTemplateArrays(child);
+  }
+  return value;
 }
 
 /** 读一个包的某份 md */
@@ -319,8 +358,11 @@ export function createPack(id, from = TEMPLATE) {
       // ⚠️ `id` 必须换成新目录名，否则新包里的 id 还指着来源包（不一致最难查）
       obj.id = String(id);
       // ⚠️ **只从 `_template` 复制时**才清掉模板说明文字；
-      //    从真实角色复制时名字要**保留** —— 用户就是想要"另一个 saki"，然后自己改。
-      if (fromName === TEMPLATE) obj.name = String(obj.name ?? '').replace(/^角色全名.*$/, '') || '';
+      //    从真实角色复制时名字和所有数组都要**保留** —— 用户就是想要"另一个 saki"，然后自己改。
+      if (fromName === TEMPLATE) {
+        obj.name = String(obj.name ?? '').replace(/^角色全名.*$/, '') || '';
+        clearTemplateArrays(obj);
+      }
       writeFileSync(join(target, 'identity.json'), `${JSON.stringify(obj, null, 2)}\n`, 'utf8');
     }
   } else {

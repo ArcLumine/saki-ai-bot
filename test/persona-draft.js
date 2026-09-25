@@ -112,36 +112,67 @@ console.log('\n【4】★★ 模板字段清单（"按模板填"的唯一依据 
   check(!!tpl.qq && 'nickname' in tpl.qq && 'avatar' in tpl.qq, '`qq` 段有 nickname / avatar');
 }
 
-console.log('\n【5】★ 动画库选项的校验（全部要在**联网之前**拦住）');
+console.log('\n【5】★★ 动画库起草的前置校验（全部要在**联网之前**拦住）');
 {
   let threw = '';
   try {
-    await pd.draft({ name: 'x', id: 'abc', animeMode: 'reuse', animeLib: '根本不存在的库' });
+    await pd.draftAnimeLib({ name: '../bad', work: '测试作品' });
   } catch (e) {
     threw = e.message;
   }
-  check(/不存在/.test(threw), '★ 「复用」一个不存在的库被拒', threw);
+  check(/库名/.test(threw), '非法库名被拒', threw);
+
+  threw = '';
+  try {
+    await pd.draftAnimeLib({ name: 'webui-test-anime', work: '  ' });
+  } catch (e) {
+    threw = e.message;
+  }
+  check(/作品名/.test(threw), '空作品名被拒', threw);
+
+  threw = '';
+  try {
+    await pd.draftAnimeLib({ name: '', work: '测试作品', mode: 'manual' });
+  } catch (e) {
+    threw = e.message;
+  }
+  check(/库名/.test(threw), '手动模式空库名也被拒', threw);
+
+  const manualSuffix = `manual-${process.pid}`;
+  const manualTemplate = await pd.draftAnimeLib({
+    name: `webui-${manualSuffix}-empty`,
+    work: '测试作品',
+    mode: 'manual',
+  });
+  check(
+    manualTemplate.ok === true && manualTemplate.content.includes('## 二、主要角色'),
+    '手动模式不联网也能生成可编辑骨架',
+  );
+  check(manualTemplate.content.includes('（待补）'), '主要角色留空时使用待补占位，不拦截创建');
+
+  const manualWithRoles = await pd.draftAnimeLib({
+    name: `webui-${manualSuffix}-roles`,
+    work: '测试作品',
+    characters: '角色甲、角色乙',
+    mode: 'manual',
+  });
+  check(
+    manualWithRoles.content.includes('角色甲') && manualWithRoles.content.includes('角色乙'),
+    '主要角色填写后会写进手动模板',
+  );
 
   const libs = pd.availableAnimeLibs();
   if (libs.length) {
     threw = '';
     try {
-      await pd.draft({ name: 'x', id: 'abc', animeMode: 'new', animeName: libs[0] });
+      await pd.draftAnimeLib({ name: libs[0], work: '测试作品' });
     } catch (e) {
       threw = e.message;
     }
-    check(/已经存在/.test(threw), '★ 「新建」一个已存在的库名被拒（提示去选"复用"）', threw);
+    check(/已经存在/.test(threw), '已存在的库名被拒（不会覆盖）', threw);
   } else {
-    check(true, '（现在一个库都没有，跳过"新建已存在的库"这条）');
+    check(true, '（现在一个库都没有，跳过“已存在”这条）');
   }
-
-  threw = '';
-  try {
-    await pd.draft({ name: 'x', id: 'abc', animeMode: 'new', animeName: '  ' });
-  } catch (e) {
-    threw = e.message;
-  }
-  check(/名字/.test(threw), '★ 「新建」但没给库名被拒', threw);
 }
 
 console.log(
