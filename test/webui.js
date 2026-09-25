@@ -288,6 +288,23 @@ async function main() {
       /class="kpreview" id="k-preview"/.test(html),
     '知识文件默认打开预览，预览按钮排在编辑按钮前面',
   );
+  check(
+    /id="p-doc-mode-prev"[\s\S]*id="p-doc-mode-edit"/.test(html) &&
+      /class="kedit-body hidden" id="p-doc-editwrap"/.test(html) &&
+      /class="kpreview" id="p-doc-preview"/.test(html) &&
+      /function personaDocMode\(m\)/.test(html) &&
+      /function personaDocPreview\(\)/.test(html) &&
+      /function personaDocReload\(\)/.test(html) &&
+      /function personaDocDirty\(on = true\)/.test(html),
+    '人设文档也有文件、预览/编辑、重新读取和未保存提示',
+  );
+  const saveDocStart = html.indexOf('async function personaSaveDoc()');
+  const saveDocEnd = html.indexOf('// 联网自动填', saveDocStart);
+  const saveDocSrc = html.slice(saveDocStart, saveDocEnd);
+  check(
+    saveDocSrc.includes('await personaLoadDoc()') && !saveDocSrc.includes('personaOpen(PJ.id)'),
+    '人设文档保存后只重读当前文档，不重置身份页其它未保存输入',
+  );
   // 弹层必须是**不透明**的 —— 卡片(--card)是半透明毛玻璃，弹层不能跟着它透（用户报过"能看见背后"）
   check(
     /--pop-bg:#f4f8ff; --pop-item:#ffffff; --pop-item-hover:#eaf1fd/.test(html) &&

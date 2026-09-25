@@ -220,10 +220,6 @@
   .card h2{font-size:15px;margin:0 0 6px;font-weight:600;letter-spacing:.2px}
   .card .hint{color:var(--dim);font-size:13px;margin:0 0 12px}
   /* 说明用的表格 */
-  .tbl{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
-  .tbl th,.tbl td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
-  .tbl th{background:rgba(255,255,255,.40);font-weight:600;white-space:nowrap;color:var(--dim)}
-  .tbl td:last-child{white-space:nowrap;color:var(--dim)}
   /* 分群灵敏度列表 */
   .gr-list{display:flex;flex-direction:column;gap:8px;margin-top:6px}
   .gr-row{display:flex;align-items:center;gap:12px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.34)}
@@ -325,9 +321,9 @@
      ④ 这些类只用**布局/间距/字号**，不碰颜色 ⇒ 深浅两套主题自动都对。
      ══════════════════════════════════════════════════════════════ */
   /* 间距 */
-  .mt4{margin-top:4px} .mt6{margin-top:6px} .mt8{margin-top:8px}
+  .mt6{margin-top:6px} .mt8{margin-top:8px}
   .mt10{margin-top:10px} .mt12{margin-top:12px} .mt14{margin-top:14px}
-  .mt20{margin-top:20px} .mb8{margin-bottom:8px}
+  .mb8{margin-bottom:8px}
   .m0{margin:0} .m6y{margin:6px 0} .m6y0{margin:6px 0 0}
   .m0b6{margin:0 0 6px} .m0b8{margin:0 0 8px} .m18y6{margin:18px 0 6px}
   .m14y6{margin:14px 0 6px} .wauto-m0{width:auto;margin:0} .wauto{width:auto}
@@ -447,7 +443,6 @@
   /* ⚠️ 兜底：`color-scheme:dark` 是主力（见上面那段注释），
      但个别浏览器认了 color-scheme、`option` 却仍然用系统色 → 再钉一层。 */
   body.dark select option,body.dark select optgroup{background:#141b29;color:var(--text)}
-  body.dark .tbl th{background:rgba(255,255,255,.07)}
   body.dark .gr-row{background:rgba(255,255,255,.06)}
   body.dark .blob{opacity:.40;filter:blur(30px)}
   body.dark .blob.m{opacity:.34;filter:blur(24px)}
@@ -502,12 +497,6 @@
   .kmap .v b{color:var(--accent);font-weight:600}
   @media (max-width:820px){.kmap{grid-template-columns:1fr}}
   /* 知识文件卡：左边窄（选文件 + 说明）｜右边宽（编辑器） */
-  .kedit{display:grid;grid-template-columns:minmax(220px,1fr) 2.2fr;gap:16px;align-items:start}
-  @media (max-width:820px){.kedit{grid-template-columns:1fr}}
-  .kedit .left{min-width:0}
-  .kedit .left label{display:block}
-  .kedit .left select{width:100%}
-  .kedit textarea{min-height:480px}
   /* 字数提示：跟在编辑器下面，跟 k-desc 分开（k-desc 是服务端给的说明，不动它） */
   .kcount{font-size:12px;color:var(--dim2);margin:6px 0 0;text-align:right}
   /* 「它学到的」搜索框：复用既有 input 样式，只加宽度限制 */
@@ -719,7 +708,6 @@
   .gridfull .fld{min-width:0}
   .grid2 .fld,.grid3 .fld{min-width:0}
   .fld.full{grid-column:1/-1}
-  .fld .hlabel{font-size:12px;color:var(--dim);margin:3px 0 0;line-height:1.5}
   /* P5：Tag Input。⚠️ 真正的值**始终存在旁边的 hidden input 里**（`、`-分隔），
      所以 `personaCollectIdentity()` 那几行**一个字都不用改** —— 标签只是 nicer 的皮。 */
   .tags{display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-height:34px;
@@ -1513,22 +1501,34 @@
     <div class="card">
       <h2>人设文档</h2>
       <p class="hint">
-        改完保存立即生效（不用重启）。<span class="mono">cast.md</span> / <span class="mono">life-events.md</span> /
+        先选文件，再看预览；要修改再点编辑。改完保存立即生效（不用重启）。<br>
+        <span class="mono">cast.md</span> / <span class="mono">life-events.md</span> /
         <span class="mono">quest-ideas.md</span> 是这个角色<b>专属的数据</b>（名册、日常事件库、剧情点子），
         它们不进聊天提示词，但剧情和日常事件要用。
       </p>
       <div class="row">
         <div>
-          <label>选择文件</label>
+          <label>文件</label>
           <select id="p-doc" onchange="personaLoadDoc()"></select>
         </div>
       </div>
-      <label>内容</label>
-      <textarea id="p-doc-text" rows="20" class="code"></textarea>
-      <div class="btns">
-        <button class="act" onclick="personaSaveDoc()">保存</button>
+      <div class="kmodes" style="margin:0 0 8px">
+        <div class="seg">
+          <button type="button" class="on" id="p-doc-mode-prev" onclick="personaDocMode('prev')">预览</button>
+          <button type="button" id="p-doc-mode-edit" onclick="personaDocMode('edit')">编辑</button>
+        </div>
+        <span class="kcount" id="p-doc-count"></span>
+        <span class="kdirty" id="p-doc-dirty" title="有未保存的改动">●</span>
+        <span class="spacer2"></span>
+        <button class="ghost" onclick="personaDocReload()">重新读取</button>
+        <button class="act" onclick="personaSaveDoc()" id="p-doc-save">保存</button>
         <span class="msg" id="msg-pd"></span>
       </div>
+      <div class="kedit-body hidden" id="p-doc-editwrap">
+        <div class="kgutter" id="p-doc-gutter">1</div>
+        <textarea id="p-doc-text" class="code" spellcheck="false" oninput="personaDocDirty()"></textarea>
+      </div>
+      <div class="kpreview" id="p-doc-preview"></div>
     </div>
 
     <!-- ⚠️ 2026-09-23 第四轮：删除人设从**第 3 张卡挪到最底下**（危险操作不该夹在中间），
@@ -6314,15 +6314,71 @@ async function personaDelete() {
   }
 }
 
+function personaDocCount() {
+  const text = $('p-doc-text')?.value ?? '';
+  const el = $('p-doc-count');
+  if (el) el.textContent = `${text.length} 字`;
+}
+
+function personaDocGutter() {
+  const text = $('p-doc-text')?.value ?? '';
+  const el = $('p-doc-gutter');
+  if (el) el.textContent = Array.from({ length: Math.max(1, text.split(/\r?\n/).length) }, (_, i) => i + 1).join('\n');
+}
+
+function personaDocPreview() {
+  const text = $('p-doc-text')?.value ?? '';
+  const el = $('p-doc-preview');
+  if (el) el.innerHTML = text ? kMarkdown(text) : '<p class="empty">这个文件还没有内容</p>';
+}
+
+function personaDocDirty(on = true) {
+  const d = $('p-doc-dirty');
+  if (d) d.classList.toggle('on', !!on);
+  const save = $('p-doc-save');
+  if (save && !save.disabled) save.textContent = on ? '保存 ●' : '保存';
+}
+
+/** 人设文档：预览 / 编辑切换，和知识库页保持同一套交互。 */
+function personaDocMode(m) {
+  const isEdit = m !== 'prev';
+  $('p-doc-mode-edit').classList.toggle('on', isEdit);
+  $('p-doc-mode-prev').classList.toggle('on', !isEdit);
+  $('p-doc-editwrap').classList.toggle('hidden', !isEdit);
+  $('p-doc-preview').classList.toggle('hidden', isEdit);
+  if (isEdit) personaDocGutter();
+  else personaDocPreview();
+}
+
+async function personaDocReload() {
+  if (await personaLoadDoc()) pjShow($('msg-pd'), true, '已重新读取');
+}
+
 async function personaLoadDoc() {
   const path = $('p-doc').value;
   if (!path) {
     $('p-doc-text').value = '';
-    return;
+    personaDocCount();
+    personaDocDirty(false);
+    personaDocMode('prev');
+    return false;
   }
   const r = await api('/api/persona/doc?id=' + encodeURIComponent(PJ.id) + '&path=' + encodeURIComponent(path));
-  $('p-doc-text').value = r && r.ok ? r.text : '';
-  if (r && !r.ok) pjShow($('msg-pd'), false, r.error || '读不出来');
+  if (!r || !r.ok) {
+    $('p-doc-text').value = '';
+    personaDocCount();
+    personaDocDirty(false);
+    personaDocMode('prev');
+    $('p-doc-preview').textContent = '（读取失败：' + (r?.error || '未知错误') + '）';
+    pjShow($('msg-pd'), false, r?.error || '读不出来');
+    return false;
+  }
+  $('p-doc-text').value = r.text || '';
+  personaDocCount();
+  personaDocDirty(false);
+  personaDocMode('prev');
+  $('msg-pd').textContent = '';
+  return true;
 }
 
 async function personaSaveDoc() {
@@ -6335,8 +6391,10 @@ async function personaSaveDoc() {
     body: JSON.stringify({ id: PJ.id, path, text: $('p-doc-text').value }),
   });
   if (r && r.ok) {
-    pjShow($('msg-pd'), true, r.reloaded ? '✅ 存好了，已热重载（没重启）' : '✅ 存好了');
-    await personaOpen(PJ.id);
+    // 只重读当前文档；不要 personaOpen()，否则会把身份卡里尚未保存的输入一起重置。
+    const message = r.reloaded ? '✅ 存好了，已热重载（没重启）' : '✅ 存好了';
+    await personaLoadDoc();
+    pjShow($('msg-pd'), true, message);
   } else {
     pjShow($('msg-pd'), false, (r && r.error) || '保存失败');
   }

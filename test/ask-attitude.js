@@ -8,6 +8,7 @@
 import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync } from 'node:fs';
+import yaml from 'js-yaml';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -19,14 +20,16 @@ const GROUP = '200000001';
 const OWNER = { id: '10000001', role: 'owner', name: '<主人>' };
 const MEMBER = { id: '30003', role: 'member', name: '某群友' };
 
-// 用真实 config.yml，只改连接
-writeFileSync(
-  join(ROOT, 'config.attitude-probe.yml'),
-  readFileSync(join(ROOT, 'config.yml'), 'utf8')
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${PORT}`)
-    .replace(/accessToken:\s*"[^"]*"/, `accessToken: "${TOKEN}"`),
-  'utf8',
-);
+// 用真实 config.yml 生成一份隔离的探针配置：只改连接和白名单，不碰真实配置。
+const probeCfg = yaml.load(readFileSync(join(ROOT, 'config.yml'), 'utf8')) ?? {};
+probeCfg.onebot ??= {};
+probeCfg.onebot.url = `ws://127.0.0.1:${PORT}`;
+probeCfg.onebot.accessToken = TOKEN;
+probeCfg.trigger ??= {};
+probeCfg.trigger.allowGroups = [...new Set([...(probeCfg.trigger.allowGroups ?? []).map(String), GROUP])];
+probeCfg.trigger.allowPrivateUsers = [...new Set([...(probeCfg.trigger.allowPrivateUsers ?? []).map(String), OWNER.id])];
+probeCfg.trigger.groupRespondTo = { ...(probeCfg.trigger.groupRespondTo ?? {}), [GROUP]: 1 };
+writeFileSync(join(ROOT, 'config.attitude-probe.yml'), yaml.dump(probeCfg, { lineWidth: 120, noRefs: true }), 'utf8');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const replies = [];

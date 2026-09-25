@@ -41,20 +41,31 @@ const FILE = join(KNOWLEDGE_DIR, 'holidays.md');
 let list = [];
 let loadedAt = 0;
 
-/** 农历月日（`闰` 会被识别出来） */
+/** 农历月日（`闰` 会被识别出来）；也接受 `zonedParts()` 的年月日对象。 */
 export function lunarMD(date) {
   try {
+    const d = date instanceof Date
+      ? date
+      : (() => {
+          const year = Number(date?.year);
+          const month = Number(date?.month);
+          const day = Number(date?.day);
+          if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+          // 用本地中午构造：我们要的是“机器人时区里的这个年月日”，不是转换时间戳。
+          return new Date(year, month - 1, day, 12, 0, 0);
+        })();
+    if (!d) return null;
     const parts = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
       month: 'numeric',
       day: 'numeric',
-    }).formatToParts(date);
+    }).formatToParts(d);
     const m = String(parts.find((p) => p.type === 'month')?.value ?? '');
-    const d = Number(parts.find((p) => p.type === 'day')?.value);
-    if (!m || !Number.isFinite(d)) return null;
+    const day = Number(parts.find((p) => p.type === 'day')?.value);
+    if (!m || !Number.isFinite(day)) return null;
     const leap = m.includes('闰');
     const month = Number(m.replace(/[^\d]/g, ''));
     if (!month) return null;
-    return { month, day: d, leap };
+    return { month, day, leap };
   } catch {
     return null;
   }

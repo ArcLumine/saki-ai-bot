@@ -11,6 +11,7 @@
 import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync } from 'node:fs';
+import yaml from 'js-yaml';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -35,7 +36,15 @@ const questions = args.length ? [args.join(' ')] : DEFAULT_QUESTIONS;
 
 // 用真实 config.yml 生成一份探针配置（只改连接相关）
 const cfgFile = 'config.probe.yml';
-const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+const probeCfg = yaml.load(readFileSync(join(ROOT, 'config.yml'), 'utf8')) ?? {};
+probeCfg.onebot ??= {};
+probeCfg.onebot.url = `ws://127.0.0.1:${PORT}`;
+probeCfg.onebot.accessToken = TOKEN;
+probeCfg.trigger ??= {};
+probeCfg.trigger.allowGroups = [...new Set([...(probeCfg.trigger.allowGroups ?? []).map(String), '200000001'])];
+probeCfg.trigger.allowPrivateUsers = [...new Set([...(probeCfg.trigger.allowPrivateUsers ?? []).map(String), ASKER])];
+probeCfg.trigger.groupRespondTo = { ...(probeCfg.trigger.groupRespondTo ?? {}), '200000001': 1 };
+const base = yaml.dump(probeCfg, { lineWidth: 120, noRefs: true });
 writeFileSync(
   join(ROOT, cfgFile),
   base

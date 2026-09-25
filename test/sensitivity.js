@@ -151,6 +151,11 @@ async function setup(level, basePort, groupId = GROUP) {
   writeFileSync(CFG, cfgText, 'utf8');
 
   const parsed = yaml.load(cfgText);
+  parsed.trigger ??= {};
+  parsed.trigger.allowGroups = [GROUP, GROUP2];
+  parsed.trigger.allowPrivateUsers = ['10000001'];
+  parsed.trigger.groupRespondTo = {};
+  writeFileSync(CFG, yaml.dump(parsed, { lineWidth: 120, noRefs: true }), 'utf8');
   if (!String(parsed.onebot?.url).includes(String(WS_PORT))) throw new Error('onebot.url 没换掉');
   if (!String(parsed.llm?.baseURL).includes(String(LLM_PORT))) throw new Error('llm.baseURL 没换掉');
   if (Number(parsed.trigger?.respondTo) !== level) throw new Error('respondTo 没换掉');
