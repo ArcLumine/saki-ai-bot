@@ -11,7 +11,8 @@
  * 因为用户要的是「精确识别所有细节」，默认用 flash；想省钱可以在配置里换 chat。
  */
 import { readFileSync } from 'node:fs';
-import { config } from './config.js';
+import { config, reasoningField } from './config.js';
+import { llmFetch } from './llm.js';
 import { log } from './log.js';
 // ⚠️ 2026-09-15 补：识图也是**直接 fetch** 的，原来**没记账**。
 //    图片会占不少输入 token（一张图 + 提示词），不记账的话
@@ -278,7 +279,8 @@ export async function describeImageDetailed(image, opts = {}) {
     // ⚠️ 推理模型（flash）的思考过程会计入 completion_tokens。
     //    给少了会出现「思考完了但正文被截断成空」——踩过这个坑。
     max_tokens: opts.maxTokens ?? preset.maxTokens,
-    temperature: 0.2, // 描述要稳，不要发挥
+    temperature: 0.2,
+    ...reasoningField(),
     messages: [
       {
         role: 'user',
@@ -298,7 +300,7 @@ export async function describeImageDetailed(image, opts = {}) {
   //    思考纯粹是白烧时间和 token（用户抱怨过识图 30 秒太慢）。
   //    deepseek-flash 支持这个参数；老模型不认就被服务端忽略，无副作用。
   try {
-    const r = await fetch(`${baseURL}/chat/completions`, {
+    const r = await llmFetch(`${baseURL}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

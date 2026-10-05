@@ -1,4 +1,4 @@
-import { config, thinkingField } from './config.js';
+import { config, thinkingField, reasoningField } from './config.js';
 import { log } from './log.js';
 import * as spend from './spend.js';
 // ⚠️ 2026-09-21：人设文案从 `personas/<id>/identity.json` 来（见 src/persona.js）。
@@ -54,6 +54,8 @@ const isNetErr = (e) =>
   /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|timeout|aborted/i.test(
     `${e?.message ?? ''} ${e?.cause?.code ?? ''}`,
   );
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** 用指定出口发一次请求 */
 function rawFetch(url, opts, mode) {
@@ -125,7 +127,7 @@ egressWatch.unref?.();
  * 带**自动切换出口**的 fetch（llm.js 里所有模型请求都走它）。
  * ⚠️ 换出口重试**只做一次**（两次都挂就是真挂，交给上层按故障处理）。
  */
-export async function llmFetch(url, opts = {}) {
+async function requestWithEgress(url, opts = {}) {
   if (egress === 'unknown') applyEgress((await proxyAlive()) ? 'proxy' : 'direct');
   const first = egress;
   try {
@@ -145,6 +147,77 @@ export async function llmFetch(url, opts = {}) {
   }
 }
 
+// ── 低 TPM 服务商的真机验收限速（生产默认关闭）─────────────────
+// Groq on-demand 会返回 x-ratelimit-remaining-tokens / x-ratelimit-reset-tokens。
+// 测试配置打开 adaptiveRateLimit 后：模型请求串行，并按响应头等待下一个窗口。
+let adaptiveQueue = Promise.resolve();
+let adaptiveNextAt = 0;
+
+async function adaptiveFetch(url, opts, attempt = 0) {
+  const wait = adaptiveNextAt - Date.now();
+  if (wait > 0) await sleep(wait);
+
+  const res = await requestWithEgress(url, opts);
+  const resetSeconds = Number(res.headers.get('x-ratelimit-reset-tokens'));
+  if (Number.isFinite(resetSeconds)) {
+    adaptiveNextAt = Date.now() + Math.ceil(Math.max(0.25, resetSeconds) * 1000);
+  }
+
+  if (res.status !== 429 || attempt >= 2) return res;
+  const body = await res.clone().text().catch(() => '');
+  const seconds = Number(body.match(/try again in\s+([\d.]+)s/i)?.[1] ?? 0);
+  const waitSeconds = Math.max(5, seconds + 3, Number.isFinite(resetSeconds) ? resetSeconds + 1 : 5);
+  adaptiveNextAt = Date.now() + Math.ceil(waitSeconds * 1000);
+  log.warn(`[模型限速] Groq 429，${Math.ceil(waitSeconds)} 秒后重试（${attempt + 1}/2）`);
+  return adaptiveFetch(url, opts, attempt + 1);
+}
+
+/**
+ * 把请求 body 里 `messages[].content` 的称呼占位符填成真称呼。
+ *
+ * ⚠️⚠️ **这里必须是最底层的那一道**（2026-09-28 改）：之前填值挂在 `streamChat` 里，
+ *    结果漏了一大片 —— `quickAck` / `phrase` / `phraseMoney` / `ping` / `extract.js`
+ *    都是**直接 `llmFetch`** 的，压根不走 `streamChat`。
+ *    而提示词里**确实**有字面量 `<主人>` 在那几条路上（工资短语、教学抽取），
+ *    尖括号对模型就是"这是占位符"的信号，它会照着吐出来。
+ *    ⇒ 放在 `llmFetch`：所有出口都从这儿过，**新增出口也不会漏**。
+ *
+ * ⚠️ 代价：body 里有占位符时多一次 JSON.parse/stringify —— 相对一次模型请求可以忽略；
+ *    没有占位符时先做正则快筛、**原样返回**，一次字符串扫描而已。
+ */
+function fillOwnerTermsInBody(opts = {}) {
+  const body = opts?.body;
+  if (typeof body !== 'string' || !body) return opts;
+  // 快筛：没有占位符就别碰 body（绝大多数请求走这条路）
+  if (!/<主人>|\{\{\s*owner\s*\}\}|【主人】/.test(body)) return opts;
+  try {
+    const j = JSON.parse(body);
+    if (!Array.isArray(j?.messages)) return opts;
+    let n = 0;
+    j.messages = j.messages.map((m) => {
+      if (!m || typeof m.content !== 'string') return m;
+      const c = persona.fillOwnerTerms(m.content);
+      if (c === m.content) return m;
+      n++;
+      return { ...m, content: c };
+    });
+    if (n) log.debug(`[称呼] ${n} 条消息里的「<主人>」占位符已填成真称呼`);
+    return { ...opts, body: JSON.stringify(j) };
+  } catch {
+    // ⚠️ body 不是 JSON（比如别的接口）就**原样发** —— 宁可漏填，也不能为了填值把请求搞坏
+    return opts;
+  }
+}
+
+/** 带自动切换出口；低 TPM 测试配置下再串行排队并自动处理 429。 */
+export function llmFetch(url, opts = {}) {
+  const fixed = fillOwnerTermsInBody(opts);
+  if (config.llm?.adaptiveRateLimit !== true) return requestWithEgress(url, fixed);
+  const run = adaptiveQueue.then(() => adaptiveFetch(url, fixed));
+  adaptiveQueue = run.catch(() => {});
+  return run;
+}
+
 // 注意：不要在模块顶层解构 config.llm —— 那样会把配置固化在加载时，
 // 管理界面改了模型或 Key 之后就不生效了。统一在函数里现读。
 const llmCfg = () => config.llm;
@@ -157,6 +230,13 @@ const llmCfg = () => config.llm;
  *        按次覆盖参数：解题模式要更大的上限；
  *        用来**关掉思考链**（压缩故事线就靠它 —— 见 2026-09-18 那条注释）
  * @returns {AsyncGenerator<string>}
+ */
+/**
+ * ⚠️ 2026-09-28：这里**不再**填称呼占位符了 —— 挪到了 `llmFetch`（见上面那段）。
+ *    原因：填在这层只覆盖走 `streamChat` 的调用，而 `quickAck` / `phrase` /
+ *    `phraseMoney` / `ping` / `extract.js` 都是**直接 llmFetch** 的，
+ *    提示词里确实有字面量 `<主人>` 会从那几条路漏给模型。
+ *    现在统一在 `llmFetch` 收口 —— 本函数走它，所以**照样被填**。
  */
 export async function* streamChat(messages, outerSignal, opts = {}) {
   const llm = llmCfg();
@@ -217,6 +297,8 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
         messages,
         temperature: llm.temperature,
         max_tokens: maxTokens,
+        ...thinkingField(),
+        ...reasoningField(),
         // ⚠️ 关掉思考链（2026-09-18）：flash 的**思考链计入 completion_tokens**，
         //    压缩故事线时它烧掉 7479/8000，正文只写了 819 字就被截断 → 整次作废。
         stream: true,
@@ -281,7 +363,8 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
           if (!delta) continue;
           // 推理模型的思维链单独放在 reasoning_content 里，不发给用户。
           // ⚠️ 但要记一下「有没有思考过」—— 用来判断正文为空是不是被思考吃光了。
-          if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+          if ((typeof delta.reasoning_content === 'string' && delta.reasoning_content)
+            || (typeof delta.reasoning === 'string' && delta.reasoning)) {
             sawReasoning = true;
           }
           const text = delta.content;
@@ -437,6 +520,7 @@ export async function quickAck(p = {}) {
         temperature: 1.0,
         max_tokens: 200,
         ...thinkingField(),
+        ...reasoningField(),
         stream: false,
       }),
       // 这句话本身不能慢 —— 它就是为了"显得没卡住"，自己卡住就没意义了
@@ -533,6 +617,7 @@ export async function phrase(p = {}) {
         temperature: 1.0,
         max_tokens: maxTokens,
         ...thinkingField(),
+        ...reasoningField(),
         stream: false,
       }),
       signal: AbortSignal.timeout(timeoutMs),
@@ -764,6 +849,7 @@ export async function ping() {
       //    自检会**误报「模型不可用」**（明明它是好的）。给足 + 关思考。
       max_tokens: 200,
       ...thinkingField(),
+      ...reasoningField(),
       stream: false,
     }),
     signal: AbortSignal.timeout(llm.timeout),

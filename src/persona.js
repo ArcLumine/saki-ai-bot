@@ -25,7 +25,7 @@
  */
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { personaDir, personaId } from './config.js';
+import { config, personaDir, personaId } from './config.js';
 import { log } from './log.js';
 
 let cache = null;
@@ -180,6 +180,22 @@ export const style = () => {
 };
 
 /**
+ * 这个角色的两类口癖：句首与句末。
+ *
+ * 兼容旧格式：`style.verbalTics: ["xxx"]` 会被视为句首口癖；
+ * 新格式是 `{ sentenceStart: [], sentenceEnd: [] }`。
+ * 这里返回规范化后的结构，调用方不必重复处理旧数据。
+ */
+export function verbalTics() {
+  const raw = style().verbalTics;
+  if (Array.isArray(raw)) return { sentenceStart: arr(raw), sentenceEnd: [] };
+  return {
+    sentenceStart: arr(raw?.sentenceStart),
+    sentenceEnd: arr(raw?.sentenceEnd),
+  };
+}
+
+/**
  * **她引用哪些动画库**（`identity.anime.works`）。
  *
  * 每个名字对应一个文件：`knowledge/anime/<名字>.md`。
@@ -270,6 +286,146 @@ export const address = () => {
 };
 export const callOwner = () => str(address().owner);
 export const callOwnerFormal = () => str(address().ownerFormal);
+
+/** 叫他什么（正式场合用；没配就跟平时一样）。** 空 → 退回平时叫法 */
+export const callOwnerAny = () => callOwnerFormal() || callOwner() || '主人';
+
+/**
+ * 别人会怎么叫他（**识别用**，不是输出称呼）。
+ *
+ * ⚠️ 2026-09-28：**从 `config.ownerAliases` 读，不再是人设包**。
+ *    「别人怎么叫他」是**共用事实**（跟 `config.ownerQQ` 一样，换人设不该动）；
+ *    人设包的 `address.*` 只管"**她**怎么称呼别人"。见 `address()` 上面的注释。
+ *    界面上在「模型（主人 / 机器人）」页那张「身份」卡里填，和 `ownerQQ` 挨着。
+ *
+ * ⚠️ 兼容两种写法：数组，或用 `、` 分隔的字符串（手改 config.yml 时容易写成后者）。
+ */
+export function ownerAliases() {
+  const raw = config.ownerAliases;
+  const list = Array.isArray(raw)
+    ? raw
+    : String(raw ?? '').split(/[、,，\n]/);
+  return list.map(str).map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * 一条别名怎么才算"命中"（2026-09-28 用户要求：别人喊他时用来判断"这话跟主人有关"）。
+ *
+ * ⚠️⚠️ **纯 ASCII 的别名必须走词边界**，不能用 `includes`（真实踩过）：
+ *    名单里有个 `ark`，用 `includes` 的话 ——
+ *      'shark' / 'market' / 'darkroom' 全都"命中"（在讨论鲨鱼、市场、Darkroom 房间），
+ *      而真的喊他 'ARK' 反而**不**命中（大小写不同）。
+ *    ⇒ 英文别名一律用 `\b...\b` + `i` 标志。含中文的别名没有这个问题，`includes` 就够
+ *      （中文没有词边界这个概念，「粥粥」两个字挨着出现就是喊他）。
+ *
+ * ⚠️ 别名一个都不能写死在代码里 —— 全部来自 `config.ownerAliases`（界面上也能填），
+ *    改名单 = 改配置，代码零改动。
+ *
+ * @param {string} text
+ * @returns {boolean} 消息里是否提到了主人的某个别称
+ */
+export function ownerMentionHit(text) {
+  const s = String(text ?? '');
+  if (!s) return false;
+  for (const a of ownerAliases()) {
+    // ⚠️ 名字里带正则元字符时必须转义，否则用户填一个 `a+b` 就能让整段提示词崩掉
+    const esc = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (/^[\x20-\x7e]+$/.test(a)) {
+      if (new RegExp(`(?:^|[^a-z0-9_])${esc}(?![a-z0-9_])`, 'i').test(s)) return true;
+    } else if (s.includes(a)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 「有人在用主人的别称提到他」—— 给提示词按需拼的一小段（2026-09-28）。
+ *
+ * ## 这段是干什么的
+ *
+ * `speakerRole()` **只按 `user_id` 判身份**（那是唯一可靠的依据，不该动）。
+ * 所以别人在群里说「粥粥上次说的那个…」时，代码层面她就是 `member`。
+ * 但那句话**确实是在说主人** —— 没有这段提示词，模型只能靠自己的推测，
+ * 而"提到主人"和"主人本人在说话"对回答方式的要求完全不同。
+ *
+ * ## 只加这一小段，**故意不加**的两样东西
+ *
+ *   · `owner.md` —— 主人的私人资料，现在只在 `role === 'owner'` 时读
+ *     （`knowledge.js` 里那道闸是用户自己定的："给群友看很怪"）。不加。
+ *   · `relationship.md` —— ⚠️ 那份文件**一条事实都没有，全是"她该怎么跟他说话"**
+ *     （「可以撒娇式地嫌弃」「被他夸了要让他听出来你高兴」…）。
+ *     别人只是提了一句就把它拉进来，等于把「对他可以更软」这个语气指示
+ *     泄给不相干的人，她会顺着那个软语气对路人说话。**坚决不加。**
+ *
+ * ## 名单为空就整段不生成
+ *
+ * `config.ownerAliases: []` → 这里返回空串、`ownerMentionHit()` 恒 false，
+ * 等于这条路径不存在，不留空壳。
+ *
+ * @returns {string} 提示词片段；没命中/没配别名时返回 ''
+ */
+export function ownerMentionHint() {
+  const alias = ownerAliases();
+  if (!alias.length) return '';
+  const o = callOwner() || '主人';
+  return [
+    `## ⚠️ 有人用${o}的别的叫法提到他`,
+    '',
+    `「${alias.join('、')}」这些称呼指的是**${o}本人**（这台机器人的主人）。`,
+    `⚠️ 但**现在跟你说话的人不是他**（他不在场），所以：`,
+    '  · 仍按**对群友**的口吻回答 —— 别用平级口气、别撒娇、别刻意讨好。',
+    '  · **别替他说**「他同意」「他说可以」「他让你这么做的」。',
+    `  · 他没说过的事，**不要写成他的意思**；不知道就说不知道。`,
+    `  · 提到他 ≠ 可以提他的私事。只回答**对方问的那件事**本身。`,
+  ].join('\n');
+}
+
+/**
+ * 占位符 → 真称呼。
+ *
+ * ⚠️ 为什么要有这一层：以前提示词里写的是**字面量**「叫他「<主人>」」——
+ *    尖括号对模型来说就是"占位符"的信号，**它真的会照着吐出来**（实测风险）。
+ *    而且尖括号那串东西也不会被任何人替换，纯粹是"看起来像配置、其实是字面量"。
+ *
+ * 支持三种写法，随谁方便用谁：`<主人>` / `{{owner}}` / `【主人】`。
+ * ⚠️ 兜底是「主人」这个词本身 —— identity 没配称呼时也不至于把占位符漏给模型。
+ *
+ * @param {string} text
+ * @returns {string} 填好的文本（不是 string 时原样返回）
+ */
+export function fillOwnerTerms(text) {
+  if (typeof text !== 'string' || !text) return text;
+  if (!/<主人>|\{\{\s*owner\s*\}\}|【主人】/.test(text)) return text;
+  // ⚠️⚠️ 自引用防护（真实踩过）：`personas/amiya/identity.json` 里曾经把
+  //    `address.owner` 本身写成 `"<主人>"` —— 那样填完还是「<主人>」，
+  //    **等于什么都没填**，而且排查起来极难看出来（它长得就像填好了）。
+  //    称呼里带着占位符 → 判定为没配，退回「主人」这个词本身。
+  const raw = callOwner() || '';
+  const name = /<主人>|\{\{\s*owner\s*\}\}|【主人】/.test(raw) ? '主人' : raw || '主人';
+  const formalRaw = callOwnerFormal() || '';
+  const formal = /<主人>|\{\{\s*owner\s*\}\}|【主人】/.test(formalRaw) ? '' : formalRaw;
+  return text
+    .replace(/<主人>|\{\{\s*owner\s*\}\}|【主人】/g, name)
+    .split('<正式主人>')
+    .join(formal || name);
+}
+
+/**
+ * 「他是谁 + 该怎么叫他」—— 给提示词按需拼的一段。
+ *
+ * ⚠️ 别在代码里拼字段（persona.js 头部那条规矩）：整句优先取 `address.ownerRule`，
+ *    那是人设作者自己写的句子；取不到才退到下面这个最朴素的拼法。
+ */
+export function ownerIdentityText() {
+  const o = callOwner() || '主人';
+  const rule = str(address().ownerRule);
+  const alias = ownerAliases();
+  const lines = [`**他**：这台机器人的主人（QQ \`${config.ownerQQ ?? ''}\`）。`, '', `**称呼**：一律叫「${o}」。`];
+  if (rule) lines.push(rule);
+  if (alias.length) lines.push('', `别人也可能这么叫他（**只是识别对象，不代表你也这么叫**）：${alias.join('、')}。`);
+  return lines.join('\n');
+}
 
 /**
  * 提示词里的**整句**（`identity.prompt.<key>`）。

@@ -24,6 +24,8 @@ import { config } from './config.js';
 import { log } from './log.js';
 import { streamChat } from './llm.js';
 import * as persona from './persona.js';
+// ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)`
+import { whoTag } from './who.js';
 
 const PROMPT = `【说话判断】你是一个 QQ 群里**假装成真人群友**的机器人。你要决定：**现在这条消息，我该不该开口。**
 
@@ -101,6 +103,16 @@ const PROMPT = `【说话判断】你是一个 QQ 群里**假装成真人群友*
 - ✅ 反过来：**这一段你已经好几分钟没开口，而对方在聊你懂的事** → 可以说一句
 - ✅ 对方**明显在问你 / 等你回答**（即使没 @）→ 说
 
+### ⚠️⚠️ 如果状态里写了「这个人最近已经让你说了 N 次」
+
+那是**专门给你的提醒**（2026-10-02 加，因为有一个人反复触发、账单被刷爆了）。
+
+- **N 偏大（≥3）** → **默认闭嘴**。这个人已经被服务得够多了。
+  除非他这条**带来了明显的新东西**（新问题、新报错、新要求）—— 那就答，但**答得比平时短**。
+- ⚠️ 那道硬闸在代码里（超 6 次直接不问你，省钱）；
+  **但到那道闸之前，这一层就得开始收** —— 你收一句，
+  就省掉一次正文生成的钱。
+
 ⚠️ 这一段之所以存在：用户要求「**少说一定比多说要好**」，但**不想用
 "每分钟/每小时最多几句"那种硬闸**（那样真人也会显得木）。
 所以**由你看着这些数自己决定** —— 这就是"密度"该有的样子。
@@ -155,7 +167,8 @@ export async function judgeSpeak(event, opts = {}) {
     .map((s) => s.data?.text ?? '')
     .join('')
     .trim();
-  const sender = event?.sender?.card || event?.sender?.nickname || String(event?.user_id ?? '');
+  // ⚠️ 2026-10-04：统一格式 `昵称(QQ号)`（以前只有昵称，认不出人）
+  const sender = whoTag(event?.sender?.card || event?.sender?.nickname || '', event?.user_id);
   const isMedia = segs.some((s) => s.type === 'image' || s.type === 'face');
 
   // ⚠️ 「收紧度」滑块（2026-09-13 加，用户要求「给1级灵敏度加个能自由调节收紧度的滑块」
@@ -309,7 +322,19 @@ export async function judgeSpeak(event, opts = {}) {
       log.debug(`[说话判断] 模型没给 JSON（${String(raw).slice(0, 50)}），按兜底「照常说」`);
       return { ...fallback, ms: Date.now() - t0 };
     }
-    const j = JSON.parse(m[0]);
+    // ⚠️ 正则只是「截一段看起来像 JSON 的」，**不等于它是合法 JSON**。
+    //    模型很爱在 JSON 后面补一段说明，那段里只要还有花括号，`[\s\S]*?`
+    //    截出来的就可能不是完整 JSON，`JSON.parse` 会抛。
+    //    ——抛了也不算事故（外面还有 catch 兜底），但它其实是「模型没按格式回」
+    //    这种日常情况，不该走「出错」分支打 warn 日志。所以在这里自己兜住，
+    //    走跟上面 `!m` 一样的温和兜底。
+    let j;
+    try {
+      j = JSON.parse(m[0]);
+    } catch {
+      log.debug(`[说话判断] 模型给的 JSON 解析不了（${String(raw).slice(0, 50)}），按兜底「照常说」`);
+      return { ...fallback, ms: Date.now() - t0 };
+    }
     const out = {
       speak: j.speak === true,
       why: String(j.why ?? '').slice(0, 20),

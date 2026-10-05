@@ -2,18 +2,24 @@
  * 私聊验收：注入若干私聊提问，捕获机器人的真实回答，检查客服回答质量。
  * 不往群里发消息，不会打扰群友。
  *
- * 注意：NapCat 的 WS 服务端只接受一个客户端。运行前请先停掉正在跑的机器人，
- * 本脚本会自己起一个（用探针端口和探针 token，不碰 NapCat）。
+ * 本脚本用独立探针端口，不碰 NapCat；状态、锁和账单也都在 logs 下隔离，
+ * 因此无需停掉正在运行的机器人。
  *
  * 用法: node test/ask-private.js             跑内置问题集
  *       node test/ask-private.js "你的问题"   只问一个
  */
 import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import yaml from 'js-yaml';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import {
+  applyLiveLlmConfig,
+  liveProbeCleanup,
+  liveProbeEnv,
+  prepareLivePersona,
+} from './_live-llm.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 39401;
@@ -34,7 +40,7 @@ const DEFAULT_QUESTIONS = [
 const args = process.argv.slice(2);
 const questions = args.length ? [args.join(' ')] : DEFAULT_QUESTIONS;
 
-// 用真实 config.yml 生成一份探针配置（只改连接相关）
+// 从真实 config.yml 复制连接和白名单；聊天模型由测试辅助固定覆盖成 Groq。
 const cfgFile = 'config.probe.yml';
 const probeCfg = yaml.load(readFileSync(join(ROOT, 'config.yml'), 'utf8')) ?? {};
 probeCfg.onebot ??= {};
@@ -44,20 +50,12 @@ probeCfg.trigger ??= {};
 probeCfg.trigger.allowGroups = [...new Set([...(probeCfg.trigger.allowGroups ?? []).map(String), '200000001'])];
 probeCfg.trigger.allowPrivateUsers = [...new Set([...(probeCfg.trigger.allowPrivateUsers ?? []).map(String), ASKER])];
 probeCfg.trigger.groupRespondTo = { ...(probeCfg.trigger.groupRespondTo ?? {}), '200000001': 1 };
-const base = yaml.dump(probeCfg, { lineWidth: 120, noRefs: true });
-writeFileSync(
-  join(ROOT, cfgFile),
-  base
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${PORT}`)
-    // ⚠️⚠️ `accessToken` 在 `config.yml` 里是**不带引号**的（`accessToken: islbjh…`）。
-    //    这里原来要求**有引号**（`"[^"]*"`）→ **根本匹配不上** →
-    //    密钥没被换掉 → 探针服务器鉴权失败 → 机器人连上就被踢 →
-    //    表现为"机器人没连上来"。2026-09-14 写另一个探针时踩到的就是这个。
-    //    引号可有可无才是对的（`"?…"?`）。
-    .replace(/accessToken:\s*"?[^"\r\n]*"?/, `accessToken: "${TOKEN}"`)
-    .replace(/^ {2}debugInjectIds:\n(?: {4}- .*\n)+/m, ''),
-  'utf8',
-);
+applyLiveLlmConfig(probeCfg, ROOT);
+writeFileSync(join(ROOT, cfgFile), yaml.dump(probeCfg, { lineWidth: 120, noRefs: true }), 'utf8');
+const probeEnv = {
+  ...liveProbeEnv('ask-private'),
+  QQBOT_PERSONA_DIR: prepareLivePersona(ROOT, 'ask-private'),
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -121,7 +119,8 @@ async function ask(question) {
   // 所以要等到「连续一段时间没有新消息」才算说完。加硬上限防止挂死。
   const started = Date.now();
   const IDLE_MS = 6000;
-  const MAX_MS = 45000;
+  // Groq on-demand 只有 8000 TPM；低限额测试配置会按响应头等待下一窗口。
+  const MAX_MS = 180000;
   let last = Date.now();
   while (Date.now() - started < MAX_MS) {
     await sleep(300);
@@ -151,7 +150,7 @@ let bot = null;
   console.log(`探针 ws://127.0.0.1:${PORT}，启动机器人…\n`);
   bot = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
     cwd: ROOT,
-    env: { ...process.env, QQBOT_CONFIG: cfgFile },
+    env: { ...process.env, ...probeEnv, QQBOT_CONFIG: cfgFile },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
 
@@ -164,23 +163,27 @@ let bot = null;
   }
 
   const answers = [];
-  const outFile = join(ROOT, 'test', 'answers.json');
+  const outFile = join(ROOT, 'logs', 'ask-private-answers.json');
   const flush = () => writeFileSync(outFile, JSON.stringify(answers, null, 2), 'utf8');
   for (const q of questions) {
     answers.push({ q, a: await ask(q) });
     flush(); // 增量写盘，中途超时也不丢已问到的结果
     await sleep(1200);
   }
-  console.log(`\n回答已存到 test/answers.json`);
+  console.log(`\n回答已存到 logs/ask-private-answers.json`);
 })()
   .catch((e) => {
     console.error('出错:', e);
     process.exitCode = 1;
   })
   .finally(async () => {
-    try {
-      bot?.kill();
-    } catch {}
+    if (bot && bot.exitCode === null) {
+      const exited = new Promise((resolve) => bot.once('exit', resolve));
+      bot.kill();
+      await Promise.race([exited, sleep(5000)]);
+    }
     await new Promise((r) => wss.close(r));
+    liveProbeCleanup(ROOT, 'ask-private', probeEnv);
+    rmSync(join(ROOT, cfgFile), { force: true });
     process.exit(process.exitCode ?? 0);
   });

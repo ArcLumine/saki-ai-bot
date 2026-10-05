@@ -18,6 +18,9 @@ import { join } from 'node:path';
 import { config, ROOT } from './config.js';
 import { log } from './log.js';
 import * as persona from './persona.js';
+// ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)`（以前这儿只有昵称，认不出人）
+// ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)`（以前这儿只有昵称，认不出人）
+import { whoTag } from './who.js';
 
 const STATE_DIR = join(ROOT, 'state');
 // ⚠️ 路径可以用环境变量覆盖 —— **给测试用**（2026-09-14 加）。
@@ -156,7 +159,7 @@ export function materialText(limit = null) {
     .map((m) => {
       // ⚠️ 她自己说的要**明确标出来**（2026-09-15 深夜）——
       //    不然发说说时她认不出自己的话（踩过：「我说过这个词吗」）。
-      const who = m.self ? '**你自己在群里说的**（不是群友说的）' : m.name;
+      const who = m.self ? '**你自己在群里说的**（不是群友说的）' : whoTag(m.name, m.userId);
       return `${who}：${m.text}`;
     })
     .join('\n');

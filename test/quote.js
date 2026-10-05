@@ -277,17 +277,26 @@ console.log('\n【9】★★ 引用归引用，**不许再补一个 @**（用户
   check(!/atSeg|type: 'at'/.test(decideFn[0]), '★ `reply-me` 这条分支里没有 @');
 }
 
-console.log('\n【10】★★ 余额见底那条提醒的 @ **不许动**（用户：「@我充值的不要改」）');
+console.log('\n【10】★★ 余额提醒**改成私聊服主**，不再往群里 @（用户：「不要公开账户状态」）');
 {
   const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  // ⚠️ 2026-09-29 更新：这段断言原先钉的是「见底档在群里 @ 服主」，
+  //    那套**已经被改掉了** —— 现在余额提醒一律 `sendToPrivate(ownerId, …)`，
+  //    理由写在代码注释里：「不把账户状态泄露给当前群或私聊对象」。
+  //    ⇒ 群里那处 `at: c.tier === 'critical' ? …` 整段从 `bot.js` 消失了，
+  //    所以旧断言（源码正则找那行字面量）**必然挂**，而且挂得对。
+  //    这里改成钉住**新契约**：两处提醒都走私聊，且群里那条路**不许**再出现 at。
   check(
-    /at: c\.tier === 'critical' \? config\.ownerQQ : ''/.test(src),
-    '★★ 见底档（<2 元）照旧 @ 服主（`at: c.tier === \'critical\' ? config.ownerQQ : \'\'`）',
+    /await this\.sendToPrivate\(ownerId, line\)/.test(src),
+    '★★ 余额提醒**私聊服主**（`sendToPrivate(ownerId, line)`）而不是在群里 @',
   );
-  check(/atName: '<主人>'/.test(src), '★ 而且带上了 atName（QQ 客户端才显示得对）');
   check(
-    /偏低档不 @/.test(src),
-    '★★ 而且**只有见底档 @**：偏低档（现在按用户要求关掉了，代码留着）不 @',
+    !/at: c\.tier === 'critical'/.test(src),
+    '★★ 群里那条 `at: c.tier === \'critical\' ? ownerQQ : \'\'` 确实已经不在了',
+  );
+  check(
+    /偏低档不 @/.test(src) || /余额耗尽只私聊主人/.test(src),
+    '★★ 意图写进了注释：只私聊主人、不公开账户状态',
   );
 }
 

@@ -3,7 +3,7 @@
  *
  * ## 它干什么
  *   1. 用 `config.example.yml` 生成 `config.yml`（填 QQ 号 / API Key / token / 要监听的群）
- *   2. 把 `knowledge/*.example.md` 复制成真文件（**已存在就不动**，不会覆盖你写过的东西）
+ *   2. 把 `example/*.example.md` 复制成 `knowledge/` 下的真文件（**已存在就不动**，不会覆盖你写过的东西）
  *   3. 建好 `logs/` `state/` `manual/` 这些目录
  *   4. 把**生成出来的 token 写进 `安装信息.txt`** —— 手动装 NapCat 的人要拿它去填
  *
@@ -216,16 +216,26 @@ if (dryRun) {
 }
 
 // 知识库：模板 → 真文件（**已存在就跳过**，绝不覆盖用户写过的内容）
+// ⚠️ 2026-09-27：模板从 `knowledge/` 挪进了顶层 `example/`（用户要求"example 文件独立
+//    扔一个 example 文件夹"）。所以这里改成**扫 example/、仍写进 knowledge/**。
+//    老布局（模板还躺在 knowledge/ 里）也一起扫 —— 从旧版本升级上来时不会漏；
+//    同名真文件已存在时第二个目录会直接跳过，不会重复复制。
 const kdir = join(ROOT, 'knowledge');
+const edir = join(ROOT, 'example');
 const made = [];
-if (existsSync(kdir) && !dryRun) {
-  for (const f of readdirSync(kdir)) {
+const copyTemplates = (dir) => {
+  if (!existsSync(dir)) return;
+  for (const f of readdirSync(dir)) {
     if (!f.endsWith('.example.md')) continue;
     const target = join(kdir, f.replace(/\.example\.md$/, '.md'));
     if (existsSync(target)) continue;
-    copyFileSync(join(kdir, f), target);
+    copyFileSync(join(dir, f), target);
     made.push(basename(target));
   }
+};
+if (!dryRun) {
+  copyTemplates(edir); // 新布局
+  copyTemplates(kdir); // 老布局兜底
 }
 
 // 运行期目录

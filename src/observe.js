@@ -3,7 +3,7 @@
  *
  * 需求（用户原话）：「不能用『你记住』这种模式，只能暗中总结」。
  * 所以这个模块**完全不打扰群聊**：把群消息悄悄攒起来，攒够了在后台跑一次总结，
- * 把观察到的性格和大事写进 knowledge/group-memory.md。
+ * 把观察到的性格和大事写进 knowledge/observe/<群号>.md（2026-09-28 从共享的群资料库里拆出来）。
  *
  * ⚠️ 设计上的两个关键决定（都是为了避免踩坑）：
  *
@@ -37,14 +37,16 @@
  * | 性格不断细化 | 压缩提示词里**硬性要求**；代码再加一道**条数不许减少**的校验（减少了就拒绝写入） |
  * | 好感度不能修改 | 好感度**根本不在这里** —— 它在 `src/affinity.js` + `state/affinity.json`，这个模块**一个字都不碰**（连提示词里都不提它） |
  */
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { config, ROOT, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
-import { reloadKnowledge, groupFileName } from './knowledge.js';
+import { reloadKnowledge } from './knowledge.js';
 import { groupsOf } from './names.js';
 import { backupKnowledge } from './backup.js';
 import { streamChat } from './llm.js';
+// ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)`
+import { whoTag } from './who.js';
 
 /** 把流式输出收成一段文本 */
 async function collect(messages) {
@@ -53,7 +55,8 @@ async function collect(messages) {
   return out;
 }
 
-const FILE = join(KNOWLEDGE_DIR, 'group-memory.md');
+/** 观察记忆一律住 `knowledge/observe/`（2026-09-28：从"学到的知识"里拆出来） */
+const FILE = join(KNOWLEDGE_DIR, 'observe', '_shared.md');
 const BEGIN = '<!-- AUTO-OBSERVE:BEGIN -->';
 const END = '<!-- AUTO-OBSERVE:END -->';
 
@@ -142,7 +145,7 @@ export function note(event, text) {
     name: event.sender?.card || event.sender?.nickname || String(event.user_id),
     userId: String(event.user_id),
     // ⚠️ 2026-09-15 晚：**记住是哪个群的** —— 观察出来的东西要写进**那个群自己的资料库**
-    //    （`knowledge/groups/<群号>.md`），别再往共享的 group-memory.md 里混。
+    //    （`knowledge/groups/<群号>.md`），别再往共享文件里混。
     // ⚠️⚠️ 2026-09-17：私聊**优先归到他跟机器人共有的那个群**（用户要求"私聊和群用一套
     //    资料库"），见 `scopeForObservation` 的注释。查不到共有群才退回 `dm:<QQ号>`。
     groupId: scopeFor(event),
@@ -175,51 +178,56 @@ export function __targetFileFor(groupId, fromPrivate = false) {
   return targetFileFor(groupId, fromPrivate);
 }
 
-/** 这个群的观察该写进哪个文件：有群资料库就写它，私聊写 dm/，都没有才写共享的 group-memory.md */
+/**
+ * 这个 scope 的观察该写进哪个文件。
+ *
+ * ⚠️ 2026-09-28 大改：观察记忆**独立目录** `knowledge/observe/`，
+ *    跟"学到的知识"（`groups/` `dm/`）彻底分开 —— 以前两者写同一份文件、靠标记区隔开，
+ *    于是注入要互相摘、界面校验别扭、备份粒度也对不上（详见 knowledge.js 里那段注释）。
+ *
+ *    现在路径**永远由 scope 算出来**，不再"看哪个文件存在就往哪写"：
+ *      group:<群号> → `observe/<群号>.md`      （只在这个群注入）
+ *      dm:<QQ号>    → `observe/dm-<QQ号>.md`  （只在跟这个人私聊时注入）
+ *      认不出 scope → `observe/_shared.md`    （⚠️ 几乎不会发生；真发生了下面会 warn）
+ *
+ *    ⚠️ 这样比原来还安全一格：旧版最后会**回落**到共享的群资料库
+ *    —— 那是所有群都看得到的地方，写错一次就是泄漏（`test/dm-memory.js` 【3】盯的就是这个）。
+ *    现在那个回落口**没有了**：算不出 scope 就落 `_shared.md`，而 `_shared`
+ *    永远不会匹配到任何真群号，等于"宁可丢也不泄漏"。
+ *
+ * @param {string} groupId `group:<群号>` 或 `dm:<QQ号>`（见 `observe.scopeFor()`）
+ * @param {boolean} [fromPrivate] 保留给旧调用点/测试；现在不再影响选路
+ */
 function targetFileFor(groupId, fromPrivate = false) {
   const gid = String(groupId ?? '').trim();
-  if (gid) {
-    const name = groupFileName(gid);
-    if (name) return join(KNOWLEDGE_DIR, name);
-    // ⚠️ 2026-09-17：私聊的人**第一次**被总结时，`dm/<QQ号>.md` 还不存在，
-    //    而 `groupFileName()` 查的是**已加载**的表 → 查不到。
-    //    这里必须能把路径**算出来**，否则会掉进下面的 FILE 分支，
-    //    把**私聊内容写进共享的群记忆**里 —— 那是会被所有群看到的地方 ✗✗
-    if (gid.startsWith('dm:')) return join(KNOWLEDGE_DIR, 'dm', `${gid.slice(3)}.md`);
-    // ⚠️⚠️ 2026-09-17：**私聊归到群号、但那个群还没有自己的资料库文件** ——
-    //    这种情况**绝不能**掉回共享的 `group-memory.md`（所有群都看得到，等于泄漏）。
-    //    改成**就地给这个群建一份** `groups/<群号>.md`。
-    //    （这条是 `test/dm-memory.js` 【3】抓出来的 —— 我第一版就是这么漏的。）
-    if (fromPrivate) return join(KNOWLEDGE_DIR, 'groups', `${gid}.md`);
+  if (!gid) {
+    log.warn(`[观察] 认不出这是哪个群的观察（fromPrivate=${!!fromPrivate}）→ 落 _shared.md（不会被任何群读到）`);
+    return FILE;
   }
-  return FILE;
+  if (gid.startsWith('dm:')) return join(KNOWLEDGE_DIR, 'observe', `dm-${gid.slice(3)}.md`);
+  return join(KNOWLEDGE_DIR, 'observe', `${gid}.md`);
 }
 
-/** 把文件里的自动区替换成新内容；没有标记区就插在「怎么用」那节之前 */
+/** 把文件里的自动区替换成新内容；没有标记区就建骨架再写 */
 function patchFile(body, file = FILE) {
   let raw = '';
   try {
     raw = readFileSync(file, 'utf8');
-  } catch (e) {
-    // 群资料库第一次写：文件还不存在 → 用一份最小骨架起头
-    if (file !== FILE) {
-      // ⚠️ 2026-09-17：私聊记忆第一次写的时候 `knowledge/dm/` 目录还不存在 → 先建。
-      //    骨架也要跟群资料库分开（写错了的话，人一眼就能看出这是私聊的内容）。
-      const isDm = /[\\/]dm[\\/]/.test(file);
-      const isGroup = /[\\/]groups[\\/]/.test(file);
-      try {
-        mkdirSync(
-          isDm ? join(KNOWLEDGE_DIR, 'dm') : isGroup ? join(KNOWLEDGE_DIR, 'groups') : KNOWLEDGE_DIR,
-          { recursive: true },
-        );
-      } catch { /* 建不出来就等写盘那步自己报错 */ }
-      raw = isDm
-        ? '# 私聊记忆（跟这个人私聊时攒下来的）\n\n> 这份**只在跟这个人私聊时注入**，别的群、别的人都看不到。\n'
-        : '# 群资料（这个群自己的）\n\n> 这份**只给这个群用**，别的群看不到。\n';
-    } else {
-      log.warn(`[观察] 读不到 group-memory.md：${e.message}`);
-      return false;
-    }
+  } catch {
+    // ⚠️ 2026-09-28：观察记忆**一律**落在 `knowledge/observe/` 下（见 `targetFileFor`），
+    //    所以这里只需要建这一个目录 —— 以前那套"看是 dm/ 还是 groups/ 就给哪种骨架"
+    //    的分支全没了（路径现在由 scope 唯一决定，骨架也就只有一种，写不错）。
+    const isDm = /[\\/]observe[\\/]dm-/.test(file);
+    try {
+      mkdirSync(join(KNOWLEDGE_DIR, 'observe'), { recursive: true });
+    } catch { /* 建不出来就等写盘那步自己报错 */ }
+    // ⚠️ 2026-09-28（用户要求）：这条安全规则原来写在 group-memory.md 的手写区里，
+    //    那个文件已经删掉了。规则本身不能跟着文件一起丢 —— 它是**给观察用的护栏**，
+    //    所以放进代码生成的骨架：以后**任何**群/私聊新建观察文件都自带这一条。
+    const RULE = '> ⚠️ 别把群里的玩笑当成知识记住。\n';
+    raw = isDm
+      ? `# 私聊观察（跟这个人私聊时攒下来的）\n\n> 这一份**只在跟这个人私聊时注入**，别的群、别的人都看不到。\n${RULE}`
+      : `# 群观察（这个群自己暗中攒的）\n\n> 这一份**只在这个群注入**，别的群看不到。\n${RULE}`;
   }
 
   const block = [BEGIN, body.trim(), END].join('\n');
@@ -275,10 +283,20 @@ const PROMPT = `你在帮一个 QQ 群客服机器人**暗中积累**对群和�
 ## 输出格式（严格照做）
 
 ### 群友
-- 昵称：一句话描述这个人（爱好、说话风格、在意什么、怎么跟他打交道）
+- **昵称**（QQ 12345678）：一句话描述这个人（爱好、说话风格、在意什么、怎么跟他打交道）
 
 ### 大事
 - 日期或「最近」：一句话说清发生了什么
+
+## ⚠️⚠️ 关于 QQ 号（2026-09-28 加，用户要求）
+
+群昵称**会一直变**，QQ 号**不会变**。所以每条群友观察**必须带 QQ**：
+
+- **同一个 QQ 就是同一个人**。他改了昵称 → **只更新那一条**里的昵称，**绝不新增条目**。
+  （不这么要求的话，改一次昵称就多一条，同一个人最后七八条，提示词里全是重复。）
+- **两个人用了同一个昵称** → 靠 QQ 分开，各写各的，**不许合并成一条**。
+- 昵称和 QQ 对不上时**以 QQ 为准**（记录里都带着 \`[QQ xxx]\`，不会认错）。
+- 输入里某人这次没标 QQ → 那条就**别带 QQ**，原样写昵称就行。
 
 ## 硬要求
 
@@ -308,7 +326,7 @@ const PROMPT = `你在帮一个 QQ 群客服机器人**暗中积累**对群和�
  *
  * ⚠️ 另外**绝对不许**提到好感度 —— 那是 `src/affinity.js` 管的，
  *    存在 `state/affinity.json`，**不在这个文件里**。
- *    提示词里连提都不提，免得模型以为要在 group-memory.md 里维护一个数字。
+ *    提示词里连提都不提，免得模型以为要在观察区里维护一个数字。
  */
 const COMPRESS_PROMPT = `你在帮一个 QQ 群客服机器人**整理**它的群记忆（不是重新观察）。
 
@@ -319,6 +337,10 @@ const COMPRESS_PROMPT = `你在帮一个 QQ 群客服机器人**整理**它的�
 ### 「群友」这节 —— ⚠️ **只许细化，一条都不许删**
 
 - 每一条都是**性格特征**，是长期有用的东西，**再啰嗦也不许删**。
+- ⚠️⚠️ **合并只认 QQ，不认昵称**（2026-09-28 加，用户要求）：
+  群昵称会一直变、QQ 不会变。**同一个 QQ 的多条必须合并成一条**（哪怕昵称不同 —— 那是他改昵称了，
+  **不是换了个人**）；**不同 QQ 哪怕昵称一样，也必须各留各的**（那是重名，不是同一个人）。
+  条目格式照旧：- **昵称**（QQ 12345678）：描述。
 - 你可以做的是：
   · 把**同一个人的多条**合并成一条，但**信息只能变多不能变少**（细节全保留）
   · 把啰嗦的说法**改写得更准**（「爱刷屏」→「习惯连发多条短消息、爱复读别人的话」）
@@ -340,7 +362,7 @@ const COMPRESS_PROMPT = `你在帮一个 QQ 群客服机器人**整理**它的�
 照原样两节，标题还是 \`### 群友\` 和 \`### 大事\`：
 
 ### 群友
-- 昵称：描述
+- **昵称**（QQ 12345678）：描述
 
 ### 大事
 - 时间：发生了什么
@@ -365,7 +387,7 @@ export async function summarize(opts = {}) {
   if (!pending.length) return { ok: false, reason: '没有新消息' };
 
   // ⚠️⚠️ 2026-09-15 晚：**按群分开总结、分开写**。
-  //    原来是"所有群的消息攒一起 → 一次总结 → 写进共享的 group-memory.md" ✗
+  //    原来是"所有群的消息攒一起 → 一次总结 → 写进同一份共享文件" ✗
   //    → 699 群的人和事会被写进共享文件，**所有群都看得到**（<主人> 报的就是这个：
   //      「最开始的群只玩 mc，699 那个群群友玩的游戏很多」）。
   //    现在：每个群攒够自己那一份就单独跑一次，写进**那个群自己的资料库**
@@ -410,7 +432,11 @@ export async function summarize(opts = {}) {
       for (const m of batch) done.add(m);
       const file = targetFileFor(gid, list.some((m) => m.fromPrivate));
       const lines = batch
-        .map((m) => `${m.name}：${m.text}`)
+        // ⚠️ 2026-09-28：把 **QQ 一起喂进去**（用户要求：昵称会一直变、QQ 不会变，
+        //    只给昵称的话模型分不清"他改昵称了"和"换了个人"，观察区最后全是重复条目）。
+        //    `m.userId` 是 `note()` 一开始就存好的，那会儿没喂给模型 —— 就是这儿漏的。
+        //    ⚠️ 2026-10-04：格式跟群上下文统一成 `昵称(QQ号)`（以前是 `[QQ 号] 昵称`，顺序还是反的）
+        .map((m) => `${whoTag(m.name, m.userId)}：${m.text}`)
         .join('\n')
         .slice(0, 12000);
 
@@ -474,6 +500,7 @@ export async function summarize(opts = {}) {
 function parseSections(raw) {
   const people = [];
   const events = [];
+  const seenQq = new Set(); // ⚠️ 2026-09-28：同一个 QQ 不许出现两条
   let mode = '';
   for (const line of raw.split(/\r?\n/)) {
     const t = line.trim();
@@ -490,10 +517,29 @@ function parseSections(raw) {
     if (!item || item.length < 4) continue;
     // ⚠️ 性格（群友）**不设小上限**：用户要的是"不断细化"
     //    （原来这里限 5 条，等于把细节扔了）。只用一个宽松的护栏防刷屏。
-    if (mode === 'people' && people.length < 12) people.push(item);
+    if (mode === 'people' && people.length < 12) {
+      // ⚠️ 2026-09-28：**同一个 QQ 只留一条**（用户要求：昵称会一直变、QQ 不会变）。
+      //    模型要是没听提示词、把一个改过昵称的人写了两遍，这里兜住 ——
+      //    不兜的话观察区会越攒越臃肿（同一个人七八条），注入提示词全是重复内容。
+      const qq = qqOf(item);
+      if (qq) {
+        if (seenQq.has(qq)) continue;
+        seenQq.add(qq);
+      }
+      people.push(item);
+    }
     if (mode === 'events' && events.length < 3) events.push(item);
   }
   return { people, events };
+}
+
+/**
+ * 从一条观察里抠出 QQ 号（`- **昵称**（QQ 12345678）：描述`）。
+ * @returns {string} 没有就返回 ''（不猜、不从别处补）
+ */
+function qqOf(item) {
+  const m = /[（(]\s*QQ\s*:?\s*(\d{5,12})\s*[）)]/i.exec(String(item ?? ''));
+  return m ? m[1] : '';
 }
 
 /**
@@ -562,6 +608,38 @@ function merge(existing, parsed) {
  * @param {{force?:boolean}} opts
  * @returns {Promise<{ok:boolean, reason?:string, peopleBefore?:number, peopleAfter?:number}>}
  */
+/** 从 `observe/` 里挑一份**有内容可压**的文件（调用方没给 scope 时用） */
+function anyObserveFileWithContent() {
+  const dir = join(KNOWLEDGE_DIR, 'observe');
+  let names = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return FILE; // 目录还不存在 = 还没有任何观察
+  }
+  for (const n of names) {
+    if (!n.toLowerCase().endsWith('.md')) continue;
+    const f = join(dir, n);
+    if (currentObserved(f)) return f;
+  }
+  return FILE;
+}
+
+/**
+ * 按时间压缩：性格只许细化/合并（一条都不许删），大事压成按时间的小结。
+ *
+ * ⚠️ 2026-09-28：观察记忆**按 scope 分文件**之后，"压哪一份"必须显式选 ——
+ *    以前这里 `currentObserved()` 不带参数、默认读那**一个**共享文件；
+ *    拆开以后那样读到的是空的 → 一进来就「没什么可压」返回，连状态都不落盘
+ *    （`test/observe-compress.js` 就是这么崩的）。
+ *
+ *    现在：`opts.groupId` 给了就压那一份；没给就从**有内容**的那几份里挑一份。
+ *    ⚠️ 下面那个「距上次压缩 minIntervalMs」是**全局**冷却，所以一次最多压一份 ——
+ *    模型调用花销和拆分之前一样，不会因为多了几个文件就翻倍。
+ *
+ * @param {{force?:boolean, groupId?:string}} opts
+ *        `groupId` 用 `group:<群号>` / `dm:<QQ号>`（跟 `summarize` 同一套，见 `scopeFor()`）
+ */
 export async function compress(opts = {}) {
   if (config.observe?.enable === false) return { ok: false, reason: '观察功能已关闭' };
   if (config.observe?.compress?.enable === false) return { ok: false, reason: '压缩功能已关闭' };
@@ -576,7 +654,10 @@ export async function compress(opts = {}) {
     return { ok: false, reason: `距上次压缩还不到 ${Math.round(minGap / 3600000)} 小时（还有 ${left} 小时）` };
   }
 
-  const existing = currentObserved();
+  // ⚠️ 2026-09-28：压哪一份 —— 有 scope 就压那一份，没给就从有内容的里挑一份
+  const gid = String(opts.groupId ?? '').trim();
+  const target = gid ? targetFileFor(gid) : anyObserveFileWithContent();
+  const existing = currentObserved(target);
   if (!existing) return { ok: false, reason: '自动区还是空的，没什么可压' };
 
   const before = parseSections(existing);
@@ -625,7 +706,7 @@ export async function compress(opts = {}) {
       `> 最后更新：${new Date().toLocaleString('zh-CN')}（压缩整理）`,
     ].join('\n');
 
-    if (!patchFile(merged)) return { ok: false, reason: '写文件失败' };
+    if (!patchFile(merged, target)) return { ok: false, reason: '写文件失败' };
     reloadKnowledge();
 
     stats.compressRuns = (stats.compressRuns ?? 0) + 1;

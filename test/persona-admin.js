@@ -60,7 +60,12 @@ writeFileSync(
       nicknames: ['外号说明', '别人叫她任何一个'],
       matchNames: ['原子说明', '例：祥', '例：小祥'],
       anime: { works: ['例：bangdream'], keywords: ['作品说明', '明日方舟'] },
-      style: { verbalTics: ['口癖（例：倒）'] },
+      style: {
+         verbalTics: {
+           sentenceStart: ['句首口癖（例：其实）'],
+           sentenceEnd: ['句末口癖（例：呢）'],
+         },
+       },
     },
     null,
     2,
@@ -209,7 +214,8 @@ console.log('\n【5】写文档 + 新建 + 删除');
     ['selfNames', 'callNames', 'nicknames', 'matchNames'].every((k) => Array.isArray(bi[k]) && bi[k].length === 0) &&
       Array.isArray(bi.anime?.works) && bi.anime.works.length === 0 &&
       Array.isArray(bi.anime?.keywords) && bi.anime.keywords.length === 0 &&
-      Array.isArray(bi.style?.verbalTics) && bi.style.verbalTics.length === 0,
+      Array.isArray(bi.style?.verbalTics?.sentenceStart) && bi.style.verbalTics.sentenceStart.length === 0 &&
+     Array.isArray(bi.style?.verbalTics?.sentenceEnd) && bi.style.verbalTics.sentenceEnd.length === 0,
     '★★ 从 `_template` 复制时，模板数组说明全部清空，不再伪装成真实名字/关键词',
   );
 

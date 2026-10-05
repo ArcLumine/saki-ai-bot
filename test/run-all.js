@@ -23,6 +23,8 @@ import { spawn } from 'node:child_process';
 import { readdirSync, copyFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+// ⚠️ 2026-09-29：参数解析在 `test/_args.js`（纯函数；单测是 `test/run-all-cli.js`）
+import { parseArgs } from './_args.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -43,6 +45,11 @@ const SUITES = [
   'balance',
   'affinity',
   'qzone',
+  // ⚠️ 2026-09-29 加：大模型出口 JSON 的兜底（speak-judge / attribution-guard /
+  //    face-annotate 三处「正则截到 ≠ 能解析」），以及 webui 请求体不合法要 400。
+  //    ⚠️ 纯源码断言 + 纯函数，**不联网、不花钱**、几毫秒跑完。
+  //    （状态码那条另由 webui 套件真发一个坏 body 出去验，不是靠源码猜。）
+  'json-fallback',
   'observe-compress',
   'monthly-report',
   'context',
@@ -67,6 +74,10 @@ const SUITES = [
   //    而老的"自动切换"只换自己那个 dispatcher、**管不着全局代理** ⇒ 是假的。
   //    用户要求「要能自动识别并切换」。⚠️ 纯源码断言，不联网。
   'egress',
+  // ⚠️ 2026-10-04 加：「谁说的」统一格式 `昵称(QQ号)`（`src/who.js`）。
+  //   改造前全项目有 5 种写法表示同一个人，模型看到两种括号会当成两种语义。
+  //   纯函数、不联网、不花钱。
+  'who-tag',
   // ⚠️ 2026-09-15 加：对话状态机（他/别人/没在聊三态 + 喂给说话判断的那段状态）
   'dialogue',
   // ⚠️ 2026-09-15 加：掉线补看（10 分钟内的 @ / 关键词 / 服务器问题，三道防重闸）
@@ -85,11 +96,18 @@ const SUITES = [
   // ⚠️ 2026-09-21 加：人设**自动起草** —— 只测不联网那层（动画库清单 / 联网前校验 / 字数上限）。
   //    ⚠️ 起草本身要联网 + 调模型，**不进回归**：每跑一次就烧一次钱，网一断还红。
   'persona-draft',
+  // ⚠️ 2026-09-30 加：人设**共用层 / 专属层**的边界。
+  //    抽出 `personas/_shared/style.md` 那次，两类问题**都不会让任何现有测试变红**：
+  //      ① 批量替换把字压烂了（出现过「一个都能省」这种语义正好反掉的句子）
+  //      ② Saki 专属的东西（大小姐/高松灯/家道中落）漏在共用层里
+  //    所以专门钉住这两条边界。全离线、只读真实文件，不写盘、不用临时池。
+  'persona-layers',
   // ⚠️ 2026-09-15 晚加：好友/好感度接线（到线通知只发一次 + 被回应加分 + `/好感度` 出榜）。
   //    它一直在仓库里但**没进过回归名单**（用户要求加进来）。
   'friend',
   'follow-up',
   'tic',
+  'live-persona',
   'meal',
   // ⚠️ 2026-09-18：「她人在哪 / 在做什么」的状态机（跟 meal 同一类东西）
   'where',
@@ -129,6 +147,15 @@ const SUITES = [
   //   而且减2，因为加上来很容易」）。纯单元；【2】那组"不许误判"比【1】更重要 ——
   //   误伤表现为"一个老群友被莫名冷落"，他自己根本不知道哪儿错了。
   'insult',
+  // ★ 称呼统一（2026-09-28）：提示词里不再有字面量「<主人>」和旧叫法「服主」——
+  //   称呼一律从 `identity.address.owner` 填进来。盯两件事：① 拼出来的提示词里
+  //   **绝不能残留占位符**（模型会照着吐「<主人>」）；② 资料文件里的占位符真的被填了
+  //   （不填的话 `whoIsBrief` 认不出主人，表现为"我明明写了他，她说不认识"）。
+  'owner-term',
+  // ★ 群内「安静」指令（用户 2026-09-28）：主人一句话让她闭嘴，直到有人说解除。
+  //   纯单元、不起进程。盯两件事：① 整句相等才认（「小祥安静点」不能误触发）
+  //   ② 作用域/权限/落盘 —— 漏了任一样，表现都是"她安静错了地方"或"安静了却还在说话"。
+  'quiet',
   // ★ 私聊记忆（用户 2026-09-17）：「私聊也应该和群里一样记下性格和事件」
   //   +「私聊和群用一套资料库」。盯两件事：① 私聊归到**他共有的那个群**（不分裂成两份）
   //   ② 查不到共有群时**绝不能掉进共享的 group-memory.md**（那文件所有群都看得到）
@@ -155,13 +182,32 @@ const SUITES = [
   // ⚠️ 2026-09-22 加：玩梗库（`memesFor()` 无触发词就返回空串，绝不硬凑 ——
   //    用例里一半是"这话不是梗、别去接"的反例）。纯单元，不起进程、不联网。
   'memes',
+  // ⚠️ 2026-09-28 加：敏感词库「总规则常驻 + 词典撞库」。
+  //    盯的是"没命中时提示词里**一个词条都没有**" —— 改之前是整份 68 行
+  //    每条消息都带，而 knowledgeText 的 `chosen` 是全量文件、不看过滤，
+  //    那里漏掉一个排除就会悄悄把词典漏回常驻。纯单元，不起进程、不联网。
+  'sensitive-hit',
+  // ⚠️ 2026-09-28 加：safety/ 拦截层（送进 LLM 之前）。
+  //    盯的是"**一个字都不进提示词**"+"三个作用范围"+"私聊只在私聊生效"——
+  //    它跟 `safety/sensitive` 那层（给模型看的建议，软层）是两回事：这个是代码开关。
+  'safety',
+  'sealdice',
+  'dice-mode',
+  // ⚠️ 2026-09-29 加：`run-all.js` **自己的参数解析**（`--only` / `--jobs` / `--list`）。
+  //    盯两条最容易破的：①「`--only` 不能把 `--jobs` 的值当套件名吞掉」
+  //    ②「套件名写错时**绝不**静默只跑认识的那几个」——
+  //    这两个坑破起来都是**静默少跑几套 + 收尾仍写"全过"**，也就是假绿，比报错难查得多。
+  //    ⚠️ 纯离线：只 import 纯函数 + 读源码文本断言，**零 spawn**（所以它能进这个名单）。
+  'run-all-cli',
 ];
 
 /** 已知的、用户明确说过不用修的项目（不算失败） */
 const KNOWN_OK_FAILURES = ['上下文里有前面那句「我刚买了 OP」', '当前消息没有重复出现在上下文里'];
 
 const args = process.argv.slice(2);
-const jobsArg = args.indexOf('--jobs');
+// ⚠️ 2026-09-29：参数解析抽到 `test/_args.js`（**纯函数**，由 `test/run-all-cli.js`
+//    单测）。这里只拿结果 —— 规则和坑全在那儿钉着。
+const { only, jobs, list, error: argError, warnings } = parseArgs(args, SUITES);
 /**
  * 默认并发 = **2**。
  *
@@ -174,10 +220,18 @@ const jobsArg = args.indexOf('--jobs');
  *    并发 5 → 常有 1~2 套挂（100 秒）。回归**绿**比快 50 秒重要。
  *    想快点就自己传 `--jobs 5`，但要知道那点失败是噪音。
  */
-const jobs = Math.max(
-  1,
-  Number(jobsArg >= 0 ? args[jobsArg + 1] : 0) || 2,
-);
+const warn = (m) => console.log(`  ⚠️ ${m}`);
+for (const w of warnings) warn(w);
+if (argError) {
+  console.log(`\n❌ ${argError}\n`);
+  process.exit(2);
+}
+if (list) {
+  console.log(`\n套件 ${SUITES.length} 个：\n${SUITES.map((n) => `  · ${n}`).join('\n')}\n`);
+  process.exit(0);
+}
+/** 这次**真的要跑**的套件（没给 `--only` 就是全量） */
+const RUN = only ? SUITES.filter((n) => only.includes(n)) : SUITES;
 
 /**
  * ⚠️⚠️ **每个套件都发一份隔离的 state 路径**（2026-09-15 加，是个真 bug 的修法）。
@@ -215,6 +269,9 @@ function isolatedStateEnv(name) {
     QQBOT_QZONE_FILE: p('qzone'),
     QQBOT_DIGEST_FILE: p('digest'),
     QQBOT_AFFINITY_FILE: p('affinity'),
+    // ⚠️ 2026-09-28 加：`state/quiet.json`（群内「安静」指令）也得隔离 ——
+    //    不然一套件测「安静」就把真机器上的安静状态改了（服主下的令被冲掉）。
+    QQBOT_QUIET_FILE: p('quiet'),
     QQBOT_OBSERVE_FILE: p('observe'),
     QQBOT_STORYLINE_FILE: p('story'),
     QQBOT_LIFE_FILE: p('life'),
@@ -288,10 +345,59 @@ function isolatedKnowledgeDir(name) {
         copyFileSync(join(adir, f), join(abs, 'anime', f));
       }
     }
+    // ⚠️ 2026-09-29：**敏感词库不在这儿了** —— 它搬进了 `safety/sensitive/`（④ 搬家）。
+    //    原来这里会把 `knowledge/sensitive/` 一并复制（不复制的话 `sensitiveRules()`
+    //    恒为空、总规则那几条断言**假红**：单跑时绿、进了 run-all 就红）。
+    //    现在它由 `isolatedSafetyDir()` 给副本 —— 规则和词库**同一份来源**，
+    //    不会出现"规则读副本、词库读原件"那种半套半份（最难查的那类）。
     mkdirSync(join(abs, '_backup'), { recursive: true });
     return rel;
   } catch (e) {
     console.warn(`  ⚠️ 给 ${name} 准备 knowledge 副本失败：${e.message}`);
+    return null;
+  }
+}
+
+/**
+ * 给每个套件一份 `safety/` 副本（2026-09-29 加，和 `isolatedKnowledgeDir` 一个道理）。
+ *
+ * ## 为什么现在才需要
+ * `knowledge/sensitive/` 搬进 `safety/sensitive/` 之后，**敏感词的数据也住在规则目录里**
+ * 了。搬之前它在 `knowledge/` 下、有隔离；搬过来不给隔离 = **把隔离给撤了**，
+ * 套件一旦动 sensitive（webui 的编辑/校验、sensitive-hit 的口径）就会写到**真红线**上，
+ * 而且**没有任何报错** —— 下次真跑起来才发现规则变了（2026-09-15 真 persona 被写坏同型）。
+ *
+ * ⚠️ 根目录那三个 md（`global` / `group` / `injection`）**一起**复制：`safety.js` 只认
+ *    **一个**目录，"规则读副本、词库读原件"这种半套半份比不隔离还难查。
+ * ⚠️ 复制出来的字节和真文件**完全相同** ⇒ 隔离只影响"写"，不影响任何断言结果。
+ * ⚠️ 失败不致命（返回 null 就不设 env、退回读真目录，只打个 ⚠️）——
+ *    但**必须打出来**：悄悄退回去读真文件，就等于隔离静默失效。
+ */
+function isolatedSafetyDir(name) {
+  const safe = String(name).replace(/[^\w.-]/g, '_');
+  const rel = `logs/__safe-${safe}`;
+  const abs = join(ROOT, rel);
+  try {
+    rmSync(abs, { recursive: true, force: true });
+    mkdirSync(abs, { recursive: true });
+    const src = join(ROOT, 'safety');
+    if (existsSync(src)) {
+      for (const f of readdirSync(src)) {
+        if (!f.toLowerCase().endsWith('.md')) continue;
+        copyFileSync(join(src, f), join(abs, f));
+      }
+      const sdir = join(src, 'sensitive');
+      if (existsSync(sdir)) {
+        mkdirSync(join(abs, 'sensitive'), { recursive: true });
+        for (const f of readdirSync(sdir)) {
+          if (!f.toLowerCase().endsWith('.md')) continue;
+          copyFileSync(join(sdir, f), join(abs, 'sensitive', f));
+        }
+      }
+    }
+    return rel;
+  } catch (e) {
+    console.warn(`  ⚠️ 给 ${name} 准备 safety 副本失败：${e.message}（退回读真目录 —— 隔离失效）`);
     return null;
   }
 }
@@ -306,15 +412,31 @@ function runSuite(name) {
   return new Promise((resolve) => {
     const t0 = Date.now();
     const know = isolatedKnowledgeDir(name);
+    const safe = isolatedSafetyDir(name);
     const child = spawn(process.execPath, [join(HERE, `${name}.js`)], {
       cwd: ROOT,
       // ⚠️ 这些测试有的会调真实模型/真实网络，必须带上代理配置
       //    （跟 `_run-bot.bat` 里那套一致，别漏 NO_PROXY —— 漏了会砸掉本机请求）
       env: {
         ...process.env,
+        // ⚠️⚠️ 2026-09-28：**给子进程钉死 TZ**，否则回归结果随**开发机时区**变。
+        //
+        //    实测踩到的：这台机器的时区从 Asia/Shanghai 变成了 Central Standard Time，
+        //    `holiday` / `schedule` 两套立刻从绿变红（14 项 / 4 项），而代码一个字没动。
+        //    原因：这两套用 `new Date('2026-02-17T00:00:00')`（**本地时间**）造日期，
+        //    再由 `zonedParts()` 转到 `config.timeZone`（Asia/Tokyo）——
+        //    本地时区一变，落到哪一天/哪个钟点就跟着变（农历、午休、客服室全错位）。
+        //
+        //    为什么是 Asia/Shanghai：项目一直是按东八区开发/部署的（config.yml `timeZone`）。
+        //    钉死它 = 回归在任何机器上结果一致。⚠️ 只能**新增**在 `...process.env` 之后，
+        //    别放前面 —— 外面同名变量会盖掉它（那正是这里要防的事）。
+        TZ: 'Asia/Shanghai',
         // ⚠️ 隔离路径放在**后面**，保证它一定生效（别被外面同名变量盖掉）
         ...isolatedStateEnv(name),
         ...(know ? { QQBOT_KNOWLEDGE_DIR: know } : {}),
+        // ⚠️ 2026-09-29：`safety/` 也给副本（词库数据搬进去了）。放在后面同理：
+        //    保证一定生效，别被外面同名变量盖掉（盖掉 = 隔离静默失效）。
+        ...(safe ? { QQBOT_SAFETY_DIR: safe } : {}),
         HTTP_PROXY: process.env.HTTP_PROXY ?? 'http://127.0.0.1:7890',
         HTTPS_PROXY: process.env.HTTPS_PROXY ?? 'http://127.0.0.1:7890',
         NODE_USE_ENV_PROXY: '1',
@@ -358,9 +480,15 @@ async function pool(items, jobs, worker) {
   return results;
 }
 
-console.log(`\n并行跑回归（${jobs} 个并行，共 ${SUITES.length} 套）…\n`);
+// ⚠️ 筛选模式必须在**开头**就说清"还有别的套件这次没跑" —— 收尾那行容易被滚没，
+//    而"我明明只跑了两套却以为全绿"是最危险的一种误读。
+console.log(
+  only
+    ? `\n并行跑回归（**筛选** ${RUN.length} 套，${jobs} 个并行；其余 ${SUITES.length - RUN.length} 套这次没跑）…\n`
+    : `\n并行跑回归（${jobs} 个并行，共 ${RUN.length} 套）…\n`,
+);
 const t0 = Date.now();
-const results = await pool(SUITES, jobs, runSuite);
+const results = await pool(RUN, jobs, runSuite);
 const total = Math.round((Date.now() - t0) / 100) / 10;
 
 // 落盘每套的完整输出（失败时方便查）
@@ -381,7 +509,15 @@ for (const r of results) {
 
 const failed = results.filter((r) => !r.result.includes('全部通过'));
 console.log(`\n  总耗时 ${total} 秒（并行 ${jobs}）`);
-console.log(`  套件 ${results.length - failed.length}/${results.length} 全过`);
+// ⚠️ 两种收尾语都是**给人也给脚本看**的：
+//    · 全量：`套件 68/68 全过`（关键词**唯一**，别改 —— 脚本就靠这行判绿）
+//    · 筛选：明写"部分运行"，并且提醒 logs/ 里那些没跑的套件是**上一次的旧输出**
+console.log(
+  only
+    ? `  ⚠️ 部分运行 ${results.length - failed.length}/${results.length} 套全过` +
+      `（其余 ${SUITES.length - results.length} 套没跑，logs/ 里它们还是上一次的输出）`
+    : `  套件 ${results.length - failed.length}/${results.length} 全过`,
+);
 if (failed.length) {
   console.log(`  未过：${failed.map((r) => r.name).join(', ')}`);
   console.log(`  完整输出在 logs/test-<套件名>.log`);

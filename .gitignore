@@ -12,14 +12,24 @@ config.*-probe.yml
 logs/
 state/
 
-# ── 知识库里"活"的三个文件（含群友 QQ 号、服务器地址）───
-#    模板见 knowledge/*.example.md
+# ── 知识库里"活"的几个文件（含群友 QQ 号、服务器地址）───
+#    模板已挪到 example/（2026-09-27），即 example/*.example.md
 knowledge/group-memory.md
 knowledge/hzymtr-server.md
-knowledge/learned.md
+#    ★ 2026-09-27（B 方案）：`knowledge/learned.md` 那个全局单文件已废，改成分片：
+#       global.md（服主教的·全局）+ groups/<群号>.md + dm/<QQ号>.md（后两个本来就在下面）
+#       —— 三者都是活数据，一律不进仓库。
+knowledge/global.md
 knowledge/owner.md
 knowledge/groups/
 knowledge/dm/
+#    ★ 2026-09-28：观察记忆（`observe/<群号>.md` / `observe/dm-<QQ号>.md`）——
+#    机器人**自己暗中攒**的群友性格和群里大事，跟 `groups/` 一样是活数据，不进仓库。
+knowledge/observe/
+#    老布局的 `knowledge/learned.md` **也要留着忽略** —— 升级上来的机器上还可能有一份
+#    （`knowledge.js` / `webui.js` 仍然读它做兜底），里面是带 QQ 号的活数据，
+#    一旦取消忽略，`git status` 就会冒出来，容易被 `git add -A` 顺手带走。
+knowledge/learned.md
 knowledge/_backup*/
 
 # ── 表情库里"谁发过什么"的统计 ─────────────────────────

@@ -112,11 +112,11 @@ console.log('\n【5】空输入 / 乱输入不能抛异常');
   }
 }
 
-console.log('\n【6】★ 真实的 learned.md 必须通过校验（别把线上文件判成坏的）');
+console.log('\n【6】★ 真实的 global.md 必须通过校验（别把线上文件判成坏的）');
 {
-  const real = readFileSync(join(KNOW, 'learned.md'), 'utf8');
+  const real = readFileSync(join(KNOW, 'global.md'), 'utf8');
   const r = V(real);
-  check(r.ok === true, `线上 learned.md 通过校验（${r.entries} 条知识）`, r.error ?? '');
+  check(r.ok === true, `线上 global.md 通过校验（${r.entries} 条知识）`, r.error ?? '');
   // 顺带确认解析器和校验器的口径一致
   const entries = learned.listEntries();
   check(
@@ -141,8 +141,8 @@ console.log('\n【7】界面那边不许再写死只读（踩过：服务端放�
   check(/meta\?\.readonly === true/.test(src), '只读与否完全由服务端 meta.readonly 决定');
 
   const js = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
-  check(/readonly: false/.test(js), '服务端把 learned.md 的 readonly 设为 false');
-  check(/learnedValidate/.test(js), '保存 learned.md 时会过格式校验');
+  check(/readonly: false/.test(js), '服务端把学习档案（global.md）的 readonly 设为 false');
+  check(/learnedValidate/.test(js), '保存学习档案时会过格式校验');
   check(
     /reloadKnowledge\(\)/.test(js.split("'POST /api/reload'")[1] ?? ''),
     '★ /api/reload 里也重载了知识库（用户要求）',

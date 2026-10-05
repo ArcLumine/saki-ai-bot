@@ -15,11 +15,16 @@
  *   ③ 选择（`selectFor`）得挑对：699 聊明日方舟 → 带上 699 那份；别的群 → 什么都不带
  *   ④ 二次元库（anime.md）**两边都能用**（它不分群）
  *
- * ⚠️ 全离线：把知识库整个搬到临时目录（`QQBOT_KNOWLEDGE_DIR`），不碰真实 knowledge/。
+ * ⚠️ 全离线：知识库搬到 `QQBOT_KNOWLEDGE_DIR`、人设搬到 `QQBOT_PERSONA_DIR`、
+ *    词库搬到 `QQBOT_SAFETY_DIR`（2026-09-29 起词库住在 `safety/sensitive/`）——
+ *    三处都是临时目录，**一个字都不碰真实数据**。
  *
  * 用法: node test/knowledge-groups.js
  */
-import { writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
+// ⚠️ `readdirSync` 是 2026-09-30 加「扫人设目录」时补进来的 ——
+//    ⚠️ `node --check` **查不出未定义的函数引用**（语法完全合法），
+//    只会在真跑到那一行时 ReferenceError。所以这里必须一起 import。
+import { writeFileSync, mkdirSync, rmSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -58,14 +63,32 @@ writeFileSync(
   '# 二次元常识\n\nBanG Dream / MyGO 的常识都在这儿。\n',
   'utf8',
 );
-// 敏感词库（2026-09-25 加）：独立子目录 + **全局注入** —— 不看群、不看触发词。
-mkdirSync(join(ROOT, TMP, 'sensitive'), { recursive: true });
+// 敏感词库（2026-09-25 加）：独立子目录。2026-09-28 改成"总规则常驻 + 词典撞库"，
+// 所以夹具必须按**真实文件的结构**造 —— 有一节 `## 总规则` 供常驻，
+// 剩下的 `## 词条` 才是撞库的词典。（原来这份只有一段说明文字，
+// `sensitiveRules()` 取不到，总规则那几条断言就会假红。）
+// ⚠️⚠️ 2026-09-29：词库**搬进 `safety/sensitive/`**（④ 搬家）⇒ 夹具跟着搬，
+//    并且必须在 import 之前把 `QQBOT_SAFETY_DIR` 指到夹具目录 —— 否则
+//    `sensitiveRules()` 会去读**真词库**：断言可能照样绿，但那等于
+//    "拿真数据验夹具"，夹具坏了也发现不了（假绿的一种）。
+mkdirSync(join(ROOT, TMP, 'safety', 'sensitive'), { recursive: true });
 writeFileSync(
-  join(ROOT, TMP, 'sensitive', 'sensitive-words.md'),
+  join(ROOT, TMP, 'safety', 'sensitive', 'sensitive-words.md'),
   [
     '# 敏感词（测试用）',
     '',
-    '测试条目：遇到敏感词只认不接，不重复、不引申、不顺着说。',
+    '## 总规则（先看这个）',
+    '',
+    '- **只认不接**：不重复敏感词、不引申、不顺着说。',
+    '- 调戏 → 冷淡、装傻、岔开；键政 → 不站队、不评论、一笔带过。',
+    '- 每条自己的排除词是防误伤：没命中排除条件就按字面正常答。',
+    '',
+    '## 测试词条',
+    '',
+    '- 触发词：测试敏感词',
+    '- 类别：调戏',
+    '- 排除词：（无）',
+    '- 怎么处理：**不接**，冷淡带过',
     '',
   ].join('\n'),
   'utf8',
@@ -89,6 +112,23 @@ writeFileSync(
   ].join('\n'),
   'utf8',
 );
+// 观察区（2026-09-28 独立目录 `knowledge/observe/`）：QQ 号认人靠它
+mkdirSync(join(ROOT, TMP, 'observe'), { recursive: true });
+writeFileSync(
+  join(ROOT, TMP, 'observe', `${G699}.md`),
+  [
+    '# 群观察（这个群自己暗中攒的）',
+    '',
+    '<!-- AUTO-OBSERVE:BEGIN -->',
+    '### 群友',
+    '',
+    '- **测试人**（QQ 1234567890）：只拿 QQ 号问也要能认出是他。',
+    '',
+    '<!-- AUTO-OBSERVE:END -->',
+    '',
+  ].join('\n'),
+  'utf8',
+);
 writeFileSync(
   join(ROOT, TMP, 'groups', `${G699}.md`),
   [
@@ -106,6 +146,12 @@ writeFileSync(
 process.env.QQBOT_KNOWLEDGE_DIR = TMP;
 // ⚠️ 人设包也要搬走 —— 人设的 md 在那儿，不搬就加载不到（会变成"没性格"）
 process.env.QQBOT_PERSONA_DIR = join(ROOT, PERSONA_TMP);
+// ⚠️⚠️ 2026-09-29：词库现在在 `safety/sensitive/` ⇒ **safety 目录也得搬**（同上面两个）。
+//    必须在 `await import('../src/knowledge.js')` **之前**：`SAFETY_DIR` 在模块加载时
+//    就解析成常量了，之后再设不生效（跟 `recent.js` 那个坑同一个）。
+//    ⚠️ 必须是**相对路径**：`config.js` 写的是 `join(ROOT, env)`，传绝对路径会被
+//    再拼一次 ROOT（`QQBOT_RECENT_FILE` 踩过，见 test/safety.js 头部）。
+process.env.QQBOT_SAFETY_DIR = join(TMP, 'safety');
 
 const K = await import('../src/knowledge.js');
 
@@ -122,24 +168,47 @@ console.log('\n【1】★★ `groups/<群号>.md` 只给那个群');
   check(b.includes('小夏KID'), '★ 但它照样看得到共享的群记忆（MC 群自己的人还在）');
 }
 
-console.log('\n【1b】★★ 敏感词库：独立子目录，但**无条件全局注入**');
+console.log('\n【1b】★★ 敏感词库：总规则常驻 + 词典按需（2026-09-28 改）');
 {
+  // ⚠️⚠️ 这组断言**整个改写过**。原来钉的是「敏感词库**无条件全局注入**」——
+  //    `selectFor().names` 里必须有它、`knowledgeText` 里必须能读到全文。
+  //    用户要求改成撞库之后，那两条**恰好就是要拆掉的行为**：
+  //      · `picked` 装的是**文件名**，`knowledgeText` 照着它读盘 ⇒ 挑中它就等于
+  //        **整份 68 行词典**进来（撞库白做了）
+  //      · 所以现在**必须不再被挑中**，而且 `knowledgeText` 的 `chosen`
+  //        （它是全量文件、不看过滤）也必须把它排除掉
+  //    ⇒ 改成断言"**总规则在、词典不在**"，这才钉住新行为。
   const name = 'sensitive/sensitive-words.md';
   const picked = K.selectFor('今天天气怎么样', { groupId: G699 }).names;
-  check(picked.includes(name), '★★ 普通闲聊也会选中敏感词库（不靠关键词命中）');
-  const picked2 = K.selectFor('随便聊聊', { groupId: GMC }).names;
-  check(picked2.includes(name), '★ 换个群照样选中（不按群筛选）');
+  check(
+    !picked.includes(name),
+    '★★ selectFor **不再挑**敏感词库（挑中它 = 整份词典被读盘，撞库就白做了）',
+  );
   for (const gid of [G699, GMC, '']) {
-    const t = K.knowledgeText({ only: picked, groupId: gid });
+    const t = K.knowledgeText({ groupId: gid });
     check(
       t.includes('只认不接'),
-      `★ 只带 selectFor 结果时，${gid ? `群 ${gid}` : '私聊'}的提示词里也有敏感词规则`,
+      `★★ ${gid ? `群 ${gid}` : '私聊'}的提示词里**总规则仍在**（常驻）`,
+    );
+    // ⚠️ 这条最要紧：`chosen` 是全量文件、不看过滤 —— 那里漏一个排除，
+    //    整份词典就会**悄悄**回到每条消息的提示词里，而上面几条断言抓不到。
+    check(
+      !t.includes('社保（＝'),
+      `★★ ${gid ? `群 ${gid}` : '私聊'}的提示词里**没有词条**（词典按需注入）`,
     );
   }
-  const raw = readFileSync(join(ROOT, TMP, 'sensitive', 'sensitive-words.md'), 'utf8');
+  // ⚠️ 2026-09-29：夹具在 `TMP/safety/sensitive/`（词库搬进 safety/ 之后）。
+  const raw = readFileSync(join(ROOT, TMP, 'safety', 'sensitive', 'sensitive-words.md'), 'utf8');
   check(
     !raw.includes('数据文件，不进聊天知识'),
     '★★ 文件头没有「不进聊天知识」声明（写了会被加载器跳过）',
+  );
+  // ⚠️ 这条钉住"词典真的不常驻"：`chosen` 排除了 `sensitive/`（2026-09-29 起词库
+  //    连 `knowledge/` 都不在了，这条是**带保险**），而"测试敏感词"这个词条
+  //    **不会**出现在任何提示词里。
+  check(
+    !K.knowledgeText({ groupId: G699 }).includes('测试敏感词'),
+    '★★ 夹具里那个词条也不在提示词里（确认词典真的按需）',
   );
 }
 
@@ -213,6 +282,50 @@ console.log('\n【5】★ 界面/观察那边的接线（源码层面）');
   check(/scopeForGroup/.test(know), '★ 共享文件过一遍"群归属"过滤');
 }
 
+console.log('\n【9】★ 观察记忆按 QQ 认人（2026-09-28 <主人> 要求）');
+{
+  // ⚠️ 用户原话：「群昵称会一直变但是 qq 号不变。现在的 observe 机制只有昵称，
+  //    把 qq 号加进去以免混淆过载」。
+  //    这两条钉的是**认人**这一半（另一半"不因改昵称而重复"在 observe.js 的提示词里）：
+  //    ① 素材里带着 QQ；② 输出条目里带 QQ；③ 代码侧按 QQ 去重兜底；
+  //    ④ `whoIsBrief` 贴 QQ 号也能认出人。
+  const obs = readFileSync(join(ROOT, 'src', 'observe.js'), 'utf8');
+  const know = readFileSync(join(ROOT, 'src', 'knowledge.js'), 'utf8');
+
+  // ⚠️ 2026-10-04：格式跟着「统一 `昵称(QQ号)`」改了 —— 以前是 `[QQ ${m.userId}] ${m.name}`，
+  //    现在走 `who.js` 的 `whoTag()`，跟群上下文/引用行同一个写法。
+  check(
+    /whoTag\(\s*m\.name,\s*m\.userId\s*\)/.test(obs),
+    '① 喂给模型的素材每行都带 `昵称(QQ号)`',
+  );
+  check(!/\[QQ \$\{m\.userId\}\]/.test(obs), '① 旧的 `[QQ 号] 昵称` 写法已清干净');
+  check(/同一个 QQ 就是同一个人/.test(obs), '② 提示词要求"同一个 QQ 合并，绝不因改昵称新增"');
+  check(/function qqOf/.test(obs), '③ 代码侧有按 QQ 去重的兜底（模型不听话也不至于过载）');
+
+  const brief = K.whoIsBrief('1234567890 是谁', G699);
+  check(!!brief, '④ whoIsBrief 光靠 QQ 号也能认出这个人（不只认昵称）');
+  check(!/<主人>/.test(brief), '④ 返回的档案里没有占位符残留');
+}
+
+console.log('\n【10】★ group-memory.md 已删（手写部分改由每个群的 observe 承担）');
+{
+  // ⚠️ 断言的是**注入路径**，不是"源码里没有 group-memory"这三个字 ——
+  //    迁移函数（`migrateLegacyObserveFiles`）**故意保留**着，老机器升级要靠它自愈。
+  const know = readFileSync(join(ROOT, 'src', 'knowledge.js'), 'utf8');
+  const injectPart = know.slice(know.indexOf('export function selectFor'));
+  check(
+    !/f\.name\.includes\('group-memory'\)/.test(injectPart),
+    '★ selectFor 不再挑 group-memory.md（群资料走 groupFiles + observeFiles）',
+  );
+  check(/observeFiles\.get\(gid\)/.test(know), '★ 群友资料改从 observe/<群号>.md 取');
+  // 真实的 knowledge/ 里也不该再有这个文件（临时目录里那份是**故意造的**，
+  // 用来验迁移函数对老机器仍然有效）
+  check(
+    !existsSync(join(ROOT, 'knowledge', 'group-memory.md')),
+    '★ 真实知识库里没有 group-memory.md 了',
+  );
+}
+
 console.log('\n【6】★★ 真实知识库的现状（699 那份确实建起来了）');
 {
   // 用**真实** knowledge/ 目录看一眼（只读，不改）
@@ -267,10 +380,38 @@ console.log('\n【7】★★ "连不上"的说法必须能把**服务器库**带
   }
   // ⚠️ 这里读的是**真实**的人设包（不是上面那份临时的）——
   //    这条断言盯的是"用户实际的人设里有没有这段话"，所以必须在搬走之前读。
-  check(
-    /回滚点/.test(readFileSync(join(ROOT, 'personas', 'saki', 'persona.md'), 'utf8')),
-    '★ 人设里那条"别造词"也在（拿回滚点当反例）',
-  );
+  //
+  // ⚠️⚠️ 2026-09-30 改：`persona.md` 拆出了共用层 `personas/_shared/style.md`，
+  //    「别造词」那段搬过去了 ⇒ 硬读 `persona.md` 会**假红**。
+  //    顺手改成**扫人设目录（含 `_shared/`）**：这样它验的其实是
+  //    「别造词那条规则真的在提示词里」—— 比钉某个文件的路径更有意义，
+  //    而且以后再拆一次也不会红。
+  //    ⚠️ 别改回只读 `persona.md`：那等于把这条断言又钉死在"东西必须在那个文件里"，
+  //    下次有人再调整分层结构就会重演今天这个假红。
+  {
+    const readPersonaTree = () => {
+      const base = join(ROOT, 'personas');
+      const pdir = join(base, 'saki');
+      const parts = [];
+      for (const n of readdirSync(pdir)) {
+        if (n.toLowerCase().endsWith('.md')) parts.push(readFileSync(join(pdir, n), 'utf8'));
+      }
+      // ⚠️ 共用层在 **`personas/_shared/`（顶层）**，不在 `personas/saki/` 里 ——
+      //    它不属于任何一个人设包，切角色时不动。
+      const sdir = join(base, '_shared');
+      if (existsSync(sdir)) {
+        for (const n of readdirSync(sdir)) {
+          if (n.toLowerCase().endsWith('.md')) parts.push(readFileSync(join(sdir, n), 'utf8'));
+        }
+      }
+      return parts.join('\n');
+    };
+    check(
+      existsSync(join(ROOT, 'personas', '_shared', 'style.md')),
+      '★ 人设有共用层 `personas/_shared/style.md`（2026-09-30 拆出）',
+    );
+    check(/回滚点/.test(readPersonaTree()), '★ 人设里那条"别造词"也在（拿回滚点当反例）');
+  }
 }
 
 rmSync(join(ROOT, TMP), { recursive: true, force: true });

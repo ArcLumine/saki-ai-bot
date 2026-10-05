@@ -248,12 +248,36 @@ export function findByName(name, groupId = '') {
   if (m) pools.push(m);
   pools.push(nick);
   for (const pool of pools) {
-    for (const [uid, n] of pool) if (String(n ?? '').trim().toLowerCase() === q) return uid;
+    const found = [];
+    for (const [uid, n] of pool) {
+      if (String(n ?? '').trim().toLowerCase() === q) {
+        found.push(uid);
+        if (found.length > 1) break;
+      }
+    }
+    if (found.length === 1) return found[0];
+    // ⚠️⚠️ 2026-09-28：**两个人用同一个昵称**（真实痛点：「群昵称会一直变但是 qq 号不变」
+    //    —— 名字撞车时只按名字认人，一定会认错）。这里只吵一次，不改返回值：
+    //    猜错人比"认不出"糟糕得多（上层会如实说"没找到"，那是可接受的）。
+    if (found.length > 1) {
+      warnDupOnce(`${g || '(全局)'}「${q}」→ ${found.join(' / ')}`);
+    }
   }
   for (const pool of pools) {
     for (const [uid, n] of pool) if (String(n ?? '').trim().toLowerCase().includes(q)) return uid;
   }
   return '';
+}
+
+/** 同一个重名只吵一次（消息一条接一条，不然刷屏） */
+const dupWarned = new Set();
+function warnDupOnce(key) {
+  if (dupWarned.has(key)) return;
+  dupWarned.add(key);
+  log.warn(
+    `[人名] 群 ${key} 里有**不止一个人**用这个昵称 —— 以后按昵称认人会认错。` +
+      `用 QQ 号认人才准（观察记忆里现在也记 QQ 了）。`,
+  );
 }
 
 /**

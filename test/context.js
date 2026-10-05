@@ -140,6 +140,68 @@ console.log('\n【5】当前这条不重复出现（message_id 优先）');
   check(!txt.includes('在线几个人'), '按 message_id 排掉了当前这条');
 }
 
+console.log('\n【5b】★★ 引用行也带 QQ 号（2026-10-04）');
+{
+  // ⚠️ 背景：以前引用行只显示 `【引用XX说的】`（只有名字）。
+  //    群里昵称重名/改名很常见 ⇒ 模型分不清「引的是不是当前这个人」，
+  //    于是把话归错人（这正是 `remember()` 里那串「白天」案例的根因之一）。
+  //    现在 `replyTo` 连 userId 一起存，渲染成 `【引用XX(QQ)说的】`。
+  recent.clearAll();
+  say(G, '甲', '30001', '白天还在睡觉');
+  recent.remember(
+    {
+      message_type: 'group',
+      group_id: G,
+      user_id: '30002',
+      sender: { card: '乙' },
+      message_id: 777,
+      message: [{ type: 'reply', data: { id: '601' } }],
+    },
+    { text: '你跑美国了是吧', replyTo: { name: '甲', userId: '30001', text: '白天还在睡觉' } },
+  );
+  const txt = recent.contextText(G);
+  check(
+    txt.includes('【引用甲(30001)说的】'),
+    '引用行带上了被引那个人的 QQ 号',
+    txt.split('\n').pop() ?? '',
+  );
+  check(txt.includes('白天还在睡觉'), '被引的原文仍在（带号不能把原文挤掉）');
+
+  // 引用**自己**时不带号（她不需要知道自己的号）
+  recent.clearAll();
+  recent.remember(
+    {
+      message_type: 'group',
+      group_id: G,
+      user_id: '30002',
+      sender: { card: '乙' },
+      message_id: 778,
+      message: [{ type: 'reply', data: { id: '602' } }],
+    },
+    { text: '那你说', replyTo: { name: '谁', userId: '10000002', self: true, text: '随便' } },
+  );
+  const t2 = recent.contextText(G);
+  check(t2.includes('【引用你自己说的】'), '引用自己还是老样子');
+  check(!/【引用谁\(10000002）说的】/.test(t2), '引用自己不显示 QQ 号');
+
+  // ⚠️ 老数据没有 userId（字段是这次才加的）→ 必须**优雅降级**，别渲染出 `()`
+  recent.clearAll();
+  recent.remember(
+    {
+      message_type: 'group',
+      group_id: G,
+      user_id: '30002',
+      sender: { card: '乙' },
+      message_id: 779,
+      message: [{ type: 'reply', data: { id: '603' } }],
+    },
+    { text: '老数据', replyTo: { name: '甲', text: '旧引用' } },
+  );
+  const t3 = recent.contextText(G);
+  check(t3.includes('【引用甲说的】'), '缺 userId 时降级成不带号（老数据不炸）');
+  check(!t3.includes('甲()'), '不会渲染出空的括号');
+}
+
 console.log('\n【6】清空');
 {
   say(G, '甲', '30001', '清空前');

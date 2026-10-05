@@ -161,7 +161,21 @@ function normalize(s) {
 // ⚠️ 加场景要克制：每个场景都是一份 5 万字符的提示词，快照文件会变大。
 //    要覆盖的是**结构差异**（群/私聊、服主/群友、戳一戳、带图），不是随机多凑几个。
 const G = '200000001';
-const OWNER = '10000001';
+// ⚠️⚠️ 2026-09-28 修一个**一直存在的快照盲区**。
+//
+//    原来这里写死 `const OWNER = '10000001'`（假 QQ）—— 而 `ISOLATED` 只重定向了
+//    **state 文件**，**没碰 config**，所以 `config.ownerQQ` 仍是真主人。
+//    ⇒ 场景里那个 `10000001` 根本不是主人，`speakerRole()` 认不出来，
+//    所有 owner 专属分支（主人私聊段、亲密言语天花板…）**一个都没跑到**。
+//    后果：`private-owner` 和 `private-stranger` 快照**逐字节相同**，
+//    而且"主人私聊"那段从来没进过快照 ⇒ **这块没有回归保护**，
+//    我把那段改坏了快照也不会响。
+//
+//    ⇒ 改成**直接取真 ownerQQ**。快照会因此含真实 QQ —— 可以接受：
+//    `state/` 已被 gitignore（文件头就写了这条），且实测本来就已含真实 QQ/群号。
+//    （`G`/`MEMBER` 保持假值：它们只是普通群友，认不出主人正是我们要验的。）
+const { config: cfgSnap } = await import('../src/config.js');
+const OWNER = String(cfgSnap.ownerQQ || '10000001');
 const MEMBER = '30001';
 const seg = (t) => [{ type: 'text', data: { text: t } }];
 

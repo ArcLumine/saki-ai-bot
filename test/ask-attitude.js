@@ -3,14 +3,20 @@
  * 用群聊注入（因为身份靠 sender.role 判断，私聊里没有角色信息）。
  *
  * 用法: node test/ask-attitude.js
- * 注意：运行前请先停掉机器人（NapCat 只允许单客户端）。
+ * 用独立探针端口，不碰 NapCat；状态、锁和账单也都在 logs 下隔离，无需停真机器人。
  */
 import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import yaml from 'js-yaml';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import {
+  applyLiveLlmConfig,
+  liveProbeCleanup,
+  liveProbeEnv,
+  prepareLivePersona,
+} from './_live-llm.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 39901;
@@ -20,7 +26,8 @@ const GROUP = '200000001';
 const OWNER = { id: '10000001', role: 'owner', name: '<主人>' };
 const MEMBER = { id: '30003', role: 'member', name: '某群友' };
 
-// 用真实 config.yml 生成一份隔离的探针配置：只改连接和白名单，不碰真实配置。
+// 从真实 config.yml 复制连接和白名单；聊天模型由测试辅助固定覆盖成 Groq。
+const cfgFile = 'config.attitude-probe.yml';
 const probeCfg = yaml.load(readFileSync(join(ROOT, 'config.yml'), 'utf8')) ?? {};
 probeCfg.onebot ??= {};
 probeCfg.onebot.url = `ws://127.0.0.1:${PORT}`;
@@ -29,7 +36,12 @@ probeCfg.trigger ??= {};
 probeCfg.trigger.allowGroups = [...new Set([...(probeCfg.trigger.allowGroups ?? []).map(String), GROUP])];
 probeCfg.trigger.allowPrivateUsers = [...new Set([...(probeCfg.trigger.allowPrivateUsers ?? []).map(String), OWNER.id])];
 probeCfg.trigger.groupRespondTo = { ...(probeCfg.trigger.groupRespondTo ?? {}), [GROUP]: 1 };
-writeFileSync(join(ROOT, 'config.attitude-probe.yml'), yaml.dump(probeCfg, { lineWidth: 120, noRefs: true }), 'utf8');
+applyLiveLlmConfig(probeCfg, ROOT);
+writeFileSync(join(ROOT, cfgFile), yaml.dump(probeCfg, { lineWidth: 120, noRefs: true }), 'utf8');
+const probeEnv = {
+  ...liveProbeEnv('ask-attitude'),
+  QQBOT_PERSONA_DIR: prepareLivePersona(ROOT, 'ask-attitude'),
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const replies = [];
@@ -91,7 +103,7 @@ async function ask(who, text) {
 
   const started = Date.now();
   let last = Date.now();
-  while (Date.now() - started < 45000) {
+  while (Date.now() - started < 180000) {
     await sleep(300);
     if (replies.length) last = Date.now();
     if (replies.length && Date.now() - last > 6000) break;
@@ -112,10 +124,8 @@ async function main() {
     cwd: ROOT,
     env: {
       ...process.env,
-      QQBOT_CONFIG: 'config.attitude-probe.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
-      //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      ...probeEnv,
+      QQBOT_CONFIG: cfgFile,
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
@@ -158,9 +168,13 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    try {
-      bot?.kill();
-    } catch {}
+    if (bot && bot.exitCode === null) {
+      const exited = new Promise((resolve) => bot.once('exit', resolve));
+      bot.kill();
+      await Promise.race([exited, sleep(5000)]);
+    }
     await new Promise((r) => wss.close(r));
+    liveProbeCleanup(ROOT, 'ask-attitude', probeEnv);
+    rmSync(join(ROOT, cfgFile), { force: true });
     process.exit(process.exitCode ?? 0);
   });

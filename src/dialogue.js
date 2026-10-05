@@ -203,6 +203,22 @@ export function describe(conv, opts = {}) {
     `· 这一段：已经 ${Math.max(1, Math.round((snap.sinceMs || 0) / 60000))} 分钟了 —— ` +
       `**对方说了 ${snap.theirTurns} 句，你说了 ${snap.herTurns} 句**`,
   );
+  // ⚠️ 2026-10-02 加：**同一个人最近让你说了几次**。
+  //
+  //    ⚠️ 它和上面「这一段说了几句」不是一回事：那段对话状态**静默超过 10 分钟就清零**
+  //    （`ACTIVE_GAP_MS`），而刷屏的人可以连着 30 分钟不停发 —— 那段时间对话状态
+  //    早就换了新段，于是模型**看不出**"这个人已经问了我 6 次了"。
+  //    这个数来自 per-user 滑动窗口，专门治刷屏。
+  //
+  //    ⚠️ 写成"事实"而不是"标准"（和本文件一贯的规矩一样）：
+  //    到底该不该收住，交给 speak-judge 的提示词判断，**不在这儿写死**。
+  const pu = Number(opts.perUserHits) || 0;
+  if (pu > 0) {
+    lines.push(
+      `· ⚠️ **跟你说话的这个人，最近已经让你说了 ${pu} 次了**` +
+        (opts.perUserSoft ? '（已经偏多了）' : ''),
+    );
+  }
   return lines.join('\n');
 }
 

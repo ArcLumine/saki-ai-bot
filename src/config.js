@@ -49,6 +49,17 @@ export function thinkingField() {
   return { thinking: { type: 'disabled' } };
 }
 
+/**
+ * 可选的 OpenAI 兼容推理档位。
+ *
+ * 主要用于测试时走 Groq 的 GPT-OSS：它不能真正关闭推理，但支持
+ * `reasoning_effort: low|medium|high`。没配置时返回空对象，主模型行为不变。
+ */
+export function reasoningField() {
+  const mode = String(config.llm?.reasoningEffort ?? '').trim().toLowerCase();
+  return ['low', 'medium', 'high'].includes(mode) ? { reasoning_effort: mode } : {};
+}
+
 /** 允许用环境变量指向另一份配置，方便测试 */
 export const CONFIG_FILE = process.env.QQBOT_CONFIG
   ? join(ROOT, process.env.QQBOT_CONFIG)
@@ -80,6 +91,27 @@ export const CONFIG_FILE = process.env.QQBOT_CONFIG
  */
 export const KNOWLEDGE_DIR = process.env.QQBOT_KNOWLEDGE_DIR
   ? join(ROOT, process.env.QQBOT_KNOWLEDGE_DIR)  : join(ROOT, 'knowledge');
+
+/**
+ * `safety/` 目录 —— **硬拦截规则 + 敏感词库数据**（2026-09-29 合并过来的）。
+ *
+ * ## 为什么把 `knowledge/sensitive/` 挪进来
+ *
+ * 原来「敏感」被拆成两个地方，名字还都叫 sensitive，看的人天天搞混：
+ *   · `knowledge/sensitive/sensitive-words.md` —— **给模型看的建议**（软层，可能被看漏）
+ *   · `safety/*.md`                        —— **代码里的开关**（硬层，命中就不调模型）
+ * 现在数据都住在 `safety/` 下，一层目录说清"跟安全有关的都在这里"：
+ *   · `safety/global.md` / `group.md` / `injection.md` —— 硬拦截规则
+ *   · `safety/sensitive/<名>.md`                     —— 软层词库（`src/sensitive.js` 读）
+ * ⚠️ **软/硬的差别一个字都没变**：软层照样拼进提示词，硬层照样一个字都不进提示词。
+ *
+ * ⚠️ 跟 `KNOWLEDGE_DIR` 一样可以用 `QQBOT_SAFETY_DIR` **整份搬走**：
+ *    测试要能改它（`run-all.js` 给每个套件一份副本），否则套件会动真规则。
+ *    ⚠️ 以前 `safety/` **从来没隔离过** —— 和 2026-09-15 那次 `knowledge/` 事故同型。
+ */
+export const SAFETY_DIR = process.env.QQBOT_SAFETY_DIR
+  ? join(ROOT, process.env.QQBOT_SAFETY_DIR)
+  : join(ROOT, 'safety');
 
 /**
  * ⚠️ 2026-09-21 加：**人设包目录**（`personas/<id>/`）。
@@ -138,9 +170,16 @@ const DEFAULTS = {
     //    config.yml 里现在是 4000；这里保持同样的量级，
     //    免得哪天 config.yml 被重置/丢失就退回危险值。
     maxTokens: 8000,
+    // 某些服务（如 Groq GPT-OSS）用这个字段控制推理量；没配置时整个字段不发。
+    reasoningEffort: '',
+    // 仅供低 TPM 服务商的真机验收：0=完全不限制（生产默认）。
+    // 超过后只保留头尾，头部是身份/基础规则，尾部是本题状态与软提醒。
+    promptMaxChars: 0,
+    // 测试专用：按 Groq 的剩余 token 头自动等待并串行请求；默认关闭。
+    adaptiveRateLimit: false,
     // ⚠️ `thinking`（2026-09-23 加）：要不要在请求体里带 `thinking:{type:'disabled'}`。
-    //    默认 'disabled'（关掉思考链，和以前一样）；换 Gemini 跑测验时设 'off'
-    //    —— 那个字段 Gemini 会 400。见 `thinkingField()`。
+    //    默认 'disabled'（关掉思考链，和以前一样）；换兼容服务跑测验时设 'off'。
+    //    见 `thinkingField()` / `reasoningField()`。
     thinking: 'disabled',
     timeout: 60000,
     // ⚠️ 超时**上限**（2026-09-13 加）：
@@ -554,6 +593,12 @@ const DEFAULTS = {
     denyBeingBot: true,
   },
   ownerQQ: '',
+  // ⚠️ 2026-09-28：主人的**各种叫法**（识别用）。
+  //    为什么在这儿而不在人设包：`address.*` 管的是"**她**怎么称呼别人"（换角色要改），
+  //    而"别人怎么叫他"是**共用事实**，跟 `ownerQQ` 一样换人设不该动 ——
+  //    详见 `src/persona.js` 里 `address()` 那段注释。
+  //    ⚠️ 这些只是用来认出「这是不是在说他」，**不代表她要跟着这么叫**（那个是 address.owner）。
+  ownerAliases: [],
   botQQ: '',
   adminQQ: '',
   chunking: {
@@ -1011,6 +1056,47 @@ function load() {
   cfg.chat.maxVoluntaryQueue = Math.max(1, Math.round(Number(cfg.chat.maxVoluntaryQueue) || 1));
   // 主动接话轮到自己、真要发送前，如果已经被刷下去这么多条就放弃不发（默认 8）
   cfg.chat.voluntaryStaleAfter = Math.max(3, Math.round(Number(cfg.chat.voluntaryStaleAfter) || 8));
+  // ⚠️⚠️ 2026-10-02 加：**单人频率闸**（治「一个人刷屏刷爆 token」）。
+  //    ⚠️ 为什么必须按人：其它冷却全是**按群**的（`voluntaryBucket` = 场景@会话），
+  //       所以一个人连发 20 条时，**每一轮冷却都是刚过的**（群里别人没发言），
+  //       于是 20 条全部过闸、20 次全部烧模型调用 —— 这是真金白银的浪费。
+  //    ⚠️ 三个数都留成可调的（WebUI「回复与分条」卡片里），别写死：
+  //       什么算"话痨"因群而异，用户要能自己调。
+  cfg.chat.perUser ??= {};
+  cfg.chat.perUser.enable = cfg.chat.perUser.enable === true;
+  // 窗口下限 10 秒 —— 比这更短的窗口没有意义（统计不出刷屏，只是随机抖动）。
+  cfg.chat.perUser.windowMs = Math.max(10000, Number(cfg.chat.perUser.windowMs) || 300000);
+  cfg.chat.perUser.softLimit = Math.max(0, Math.round(Number(cfg.chat.perUser.softLimit) || 3));
+  // ⚠️ 硬阈值**强制 ≥ 软阈值+1**：否则 WebUI 里手滑存出矛盾配置
+  // （硬=2 软=5）会让"该省调用的"永远不触发、"该静默的"却先静默，行为反了。
+  cfg.chat.perUser.hardLimit = Math.max(
+    cfg.chat.perUser.softLimit + 1,
+    Math.round(Number(cfg.chat.perUser.hardLimit) || 6),
+  );
+  // ⚠️⚠️ 2026-10-03 加：**召唤频率闸**（治「换着花样点名刷屏」）。
+  //    ⚠️ 为什么必须单独一套：上面这个闸**根本覆盖不到召唤**。
+  //       召唤（@她 / 引用 / 正文点名 / 戳 / 关键词 / 服务器问题）在
+  //       `shouldJoinChat` **之外**就提前 `return` 了（L4162 那个 `mustReply` 名单），
+  //       进不了 `shouldJoinChatAsync` ⇒ 既不过 `checkPerUser` 也**不记账**
+  //       （`markVoluntary` 只在那个函数里调）⇒ 等于点名刷屏是条完全敞开的路。
+  //    ⚠️ 为什么不用内容指纹去重：用户明确指出「一个人换着不同法子点名也是问题」，
+  //       「小祥在吗 / 叫一下祥子 / 小祥?」哈希各不相同，去重挡不住。
+  //    ⚠️ 阈值**故意设得很高**（默认 10 次 / 2 分钟）：召唤是"真在问她"，
+  //       误伤比多花一次调用更伤。宁可放过刷屏，也不静默掉真急事。
+  //       代价写明（别以后当 bug 修）：2 分钟内召唤 11 次，第 11 次起会被静默。
+  cfg.chat.perUserCall ??= {};
+  cfg.chat.perUserCall.enable = cfg.chat.perUserCall.enable === true;
+  // 窗口下限 10 秒（同上：更短的窗口统计不出刷屏，只是随机抖动）。
+  cfg.chat.perUserCall.windowMs = Math.max(
+    10000,
+    Number(cfg.chat.perUserCall.windowMs) || 120000,
+  );
+  // ⚠️ 只有硬阈值、**没有软阈值**：召唤是「要么答要么静默」的二元决策，
+  //    没有"让判断自己收着"的中间态，喂给 judge 没意义。
+  cfg.chat.perUserCall.limit = Math.max(
+    1,
+    Math.round(Number(cfg.chat.perUserCall.limit) || 10),
+  );
   // ⚠️ **同一个人**接着说：窗口比 idleMs 长（默认 3 分钟），但**不能比 idleMs 短**，
   //    否则配置写错了会反倒更难接话。
   cfg.chat.followUp.sameUserMs = Math.max(
@@ -1359,6 +1445,94 @@ function load() {
   cfg.affinity.enable = cfg.affinity.enable !== false;
   /** 好感度到多少算「可以加好友了」 */
   cfg.affinity.friendThreshold = Math.min(100, Math.max(50, Number(cfg.affinity.friendThreshold) || 90));
+  /**
+   * 好感度到多少算「群里对他放松一档」（撒娇）—— 2026-09-30 用户要求。
+   *
+   * ⚠️ 与上面 `friendThreshold`（加好友那条线）是**两件独立的事**，故意不对齐：
+   *    用户原话「群聊还是大于 70 解锁但是大于 90 才能加好友」。
+   *    90 那条是"已经是自己人"；70 这条只是"常客级"——`MAX_STEP=3` + `DAY_CAP=8`，
+   *    要持续互动一阵子才挣得到，不是陌生人随手能到的。
+   *
+   * ⚠️ 上限**跟着好感度上限一起放开**（`MAX_AFFINITY = Infinity`），
+   *    跟 2026-09-20 那次一样不要再写死 100。
+   */
+  cfg.affinity.sensitiveUnlock = Math.max(50, Number(cfg.affinity.sensitiveUnlock) || 70);
+  /**
+   * 掉到多少才**收回**那一档（滞回）。
+   *
+   * ⚠️⚠️ 必须**严格小于** `sensitiveUnlock`。填反了的话「≥unlock 打开」之后
+   *    永远等不到「<retract」，那档就**只开不关**了 —— 而那种情况不报错、
+   *    界面上看着也正常，几个月都发现不了。所以这里强制夹一层。
+   */
+  cfg.affinity.sensitiveRetract = Math.min(
+    cfg.affinity.sensitiveUnlock - 1,
+    Math.max(0, Number(cfg.affinity.sensitiveRetract) || 60),
+  );
+
+  // ── 海豹骰（SealDice，2026-09-30）────────────────────────
+  // ⚠️ 方案是「甲」：**海豹不接 IM**，小祥主动调它的 HTTP API 算骰 / 读 log。
+  //    缘由见 `src/sealdice.js` 顶部：同一个 NapCat 挂两个 WS 客户端会有
+  //    **自反馈死循环**（小祥发的消息被海豹当成群友消息再转回来），那是架构问题。
+  // ⚠️ `baseUrl` / `token` 默认空 ⇒ `sealdice.enabled()` 恒 false ⇒ 完全不影响现有行为。
+  cfg.sealdice ??= {};
+  cfg.sealdice.enable = cfg.sealdice.enable !== false && !!cfg.sealdice.baseUrl;
+  // ⚠️ 超时上限 15 秒：这条调用在**消息处理链路**上，挂住 = 整条消息卡住。
+  //    默认 4 秒；再高没意义（海豹本地，几乎瞬时）。
+  cfg.sealdice.timeoutMs = Math.min(15000, Math.max(500, Number(cfg.sealdice.timeoutMs) || 4000));
+
+  // ── 骰娘模式（2026-09-30）──────────────────────────────
+  // ⚠️ 用户原话：「进入骰娘模式，别人发 ra 之类的指令，她只会回复骰点结果。
+  //   其他的情况下全程静默」
+  //
+  // ⚠️ 它与 `quiet`（安静指令）是**两件不同的事**，所以配置也分开：
+  //   · `quiet` = 什么都不说（含骰点）
+  //   · `diceMode` = 只说骰点
+  // 混在一起会出现「以为安静了、结果骰点还在回」这种查起来很懵的情况。
+  cfg.diceMode ??= {};
+  cfg.diceMode.enable = cfg.diceMode.enable !== false;
+  // ⚠️⚠️ 2026-09-30 补：触发词**原来没有默认值** ——
+  //    而 `config.example.yml` 里才有（`骰娘`/`散场`）。真机上没抄模板的话
+  //    `enterKeys` 就是 undefined ⇒ 说「骰娘」根本进不了模式，
+  //    而 `enable: true` 看着一切正常。**这种"配了却没生效"最难查。**
+  if (!Array.isArray(cfg.diceMode.enterKeys) || !cfg.diceMode.enterKeys.length) {
+    cfg.diceMode.enterKeys = ['骰娘', '当骰娘'];
+  }
+  if (!Array.isArray(cfg.diceMode.exitKeys) || !cfg.diceMode.exitKeys.length) {
+    cfg.diceMode.exitKeys = ['散场', '收摊'];
+  }
+  if (!Array.isArray(cfg.diceMode.skipDiceKeys)) cfg.diceMode.skipDiceKeys = [];
+  /**
+   * 超时自动退出的毫秒数。`0` = **永不自动退**，只能靠退出词解除。
+   * ⚠️ 用户要求时长可改、不写死，所以这里只兜一个上限防手滑填太大。
+   */
+  cfg.diceMode.durationMs = Math.min(
+    7 * 24 * 3600 * 1000,
+    Math.max(0, Number(cfg.diceMode.durationMs) || 0),
+  );
+
+  // ── 跑团记录（2026-09-30）──────────────────────────────
+  // ⚠️ 与 `observe/`、`storyline/` **并列的第三个分支** —— 用户明确要求独立，
+  //    理由写在 `src/dice-log.js` 文件头（混进 observe 会把剧情当性格学）。
+  cfg.diceLog ??= {};
+  // ⚠️⚠️ **默认 false**（不是 `!== false`）—— 用户 2026-09-30 明确
+  //    「先写出来但是不启用，我后面再改」。写成 `!== false` 会默认**开**，
+  //    那就违背了。这里必须默认关，启用是显式动作。
+  cfg.diceLog.enable = cfg.diceLog.enable === true;
+  cfg.diceLog.minIntervalMs = Math.max(0, Number(cfg.diceLog.minIntervalMs) || 5 * 60 * 1000);
+  cfg.diceLog.pullIntervalMs = Math.max(60000, Number(cfg.diceLog.pullIntervalMs) || 5 * 60 * 1000);
+  cfg.diceLog.pageSize = Math.min(200, Math.max(1, Number(cfg.diceLog.pageSize) || 50));
+  /** 要拉 log 的群号 —— ⚠️ 不填就**不拉**（不知道哪些群在跑团，硬拉是白花钱） */
+  if (!Array.isArray(cfg.diceLog.groups)) cfg.diceLog.groups = [];
+  cfg.diceLog.compress ??= {};
+  cfg.diceLog.compress.minEntries = Math.max(2, Number(cfg.diceLog.compress.minEntries) || 8);
+  cfg.diceLog.compress.minIntervalMs = Math.max(
+    0,
+    Number(cfg.diceLog.compress.minIntervalMs) || 30 * 60 * 1000,
+  );
+  cfg.diceLog.compress.checkIntervalMs = Math.max(
+    60000,
+    Number(cfg.diceLog.compress.checkIntervalMs) || 10 * 60 * 1000,
+  );
   /** `/好感度` 排行榜显示几个（用户要求 10 个） */
   cfg.affinity.boardSize = Math.min(30, Math.max(1, Number(cfg.affinity.boardSize) || 10));
   /** 「回应了她」的判定窗口：她刚说完话的这段时间内才算 */

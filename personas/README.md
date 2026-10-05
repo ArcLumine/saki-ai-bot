@@ -27,7 +27,7 @@ personas/
 | `persona.md`、`persona-money.md`、`persona-media.md` | `hzymtr-server.md`（服务器客服知识） |
 | `identity.json` | `owner.md`（主人是谁） |
 | `voices.md`（示例对话） | `relationship.md`（你和主人之间发生过什么） |
-| `voices.md`（示例对话） | `group-memory.md`、`groups/`（群和群友） |
+| `voices.md`（示例对话） | `groups/`、`observe/`（群和群友） |
 | | `anime/`（动画库；**读哪几个由人设声明**，见下） |
 | | `learned.md`（群友教的知识） |
 | | `anime.md` + `anime/`（二次元常识 / 作品库） |
@@ -52,7 +52,7 @@ personas/
 | `address.owner` / `ownerFormal` | 她怎么称呼主人（平时 / 正式场合） |
 | `address.ownerRule` | 什么时候用正式称呼（整句规矩，不在代码里拼） |
 | `address.admin` / `member` | 留空 = 用群名片（大多数角色都该是空的） |
-| `style.verbalTics` | 口癖 |
+| `style.verbalTics` | 句首口癖 / 句末口癖：分别放在 `sentenceStart` / `sentenceEnd`；是人设特征与软提醒依据，不是禁用词表 |
 | `qq.nickname` / `qq.avatar` | 这个角色的 **QQ 昵称 / 头像**（头像 = 包里的文件名）。切换人设时**自动应用到真号** |
 | `image.refs` | **生图参考图**（立绘）的文件名数组。群里让她"拍个照"时按它画 —— 见下面那节 |
 | `prompt.*` | 提示词里的**整句**（整句替换，见下面）；**长段**放 `prompt/<名字>.md` |

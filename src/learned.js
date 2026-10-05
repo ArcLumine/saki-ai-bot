@@ -1,42 +1,131 @@
 /**
- * 学习档案：机器人在群里被群主教到的知识存这里。
+ * 学习档案：机器人被教到的知识。
  *
- * 设计要点：
+ * ⚠️⚠️ **2026-09-27 彻底重构（用户拍板的 B 方案）** —— 原来是 `knowledge/learned.md`
+ *    这**一个全局单文件**，于是「A 群教的东西，B 群和私聊全都看得到」。
+ *    现在改成**按作用域分片**，一个 scope 一份：
+ *
+ *      scope                      落点                        谁看得到
+ *      ─────────────────────────  ──────────────────────────  ──────────────────
+ *      `global`                   `knowledge/global.md`       **所有群 + 所有私聊**
+ *      `group:<群号>`             `knowledge/groups/<群号>.md` 只有那一个群
+ *      `dm:<QQ号>`                `knowledge/dm/<QQ号>.md`     只有跟那个人私聊时
+ *
+ *    **归属是权限驱动的**（用户 2026-09-27 定）：
+ *      · 发送者是 **owner（服主）** → `global`（他教的到处都适用）
+ *      · 别人在群里教 → `group:<那个群>`
+ *      · 别人在私聊里教 → `dm:<那个人>`
+ *
+ *    为什么 `global` 能全局注入而 groups/dm 不行 —— 这就是"服主的规则"和
+ *    "某个群的梗"的区别：后者带到别的群去讲会让群友觉得莫名其妙。
+ *
+ * 设计要点（这些是从老版本继承的，没动）：
  *   - 内容插在 `<!-- LEARNED:BEGIN -->` 和 `<!-- LEARNED:END -->` 之间
  *   - 每个条目是一个 `## 主题`，教同一主题会**覆盖**旧的（群主选的行为）
- *   - 但它**不会删除** `hzymtr-server.md` 里的原文，
- *     而是在提示词里声明「learned.md 优先级更高」来实现覆盖
+ *   - 但它**不会删除**原文，而是在提示词里声明「learned 优先级更高」来实现覆盖
  *   - 每次改动都在「修改记录」里留一行 + 保存被覆盖的旧内容，教错了能回滚
+ *
+ * ⚠️ **读写都直接走磁盘，不走 `groupFiles` 缓存** —— 那份缓存要等 `reload()` 才更新，
+ *    而「记住：xxx」之后**下一秒就要能答上来**，走缓存会慢一拍（表现为"教了但没记住"）。
+ *    反过来注入时要 strip 掉 LEARNED 区，免得 `groups/<群号>.md` 的内容里带一遍、
+ *    这里又带一遍（见 `stripLearned()`）。
  */
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import { ROOT, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
+// ⚠️ 2026-09-28：新建骨架的标题要用「主人」的真称呼（从 identity 填），不再写死旧叫法
+import { callOwner } from './persona.js';
 import { backupKnowledge } from './backup.js';
 
-const FILE = join(KNOWLEDGE_DIR, 'learned.md');
+/** 全局层（owner 教的，所有群和私聊都读） */
+const GLOBAL = join(KNOWLEDGE_DIR, 'global.md');
 const BEGIN = '<!-- LEARNED:BEGIN -->';
 const END = '<!-- LEARNED:END -->';
 /** 单条知识最大长度，防止有人灌长文 */
 const MAX_FACT = 2000;
 
-function read() {
+/**
+ * 这个 scope 的知识存在哪个文件。
+ * @param {string} [scope] `global`（默认）/ `group:<群号>` / `dm:<QQ号>`
+ */
+export function fileForScope(scope = 'global') {
+  const s = String(scope ?? 'global').trim() || 'global';
+  if (s.startsWith('group:')) {
+    const gid = s.slice(6).trim();
+    if (gid) return join(KNOWLEDGE_DIR, 'groups', `${gid}.md`);
+  } else if (s.startsWith('dm:')) {
+    const uid = s.slice(3).trim();
+    if (uid) return join(KNOWLEDGE_DIR, 'dm', `${uid}.md`);
+  }
+  return GLOBAL;
+}
+
+/** 这个 scope 的给人看的路径（日志/回执用） */
+function scopeLabel(scope) {
+  const s = String(scope ?? 'global').trim() || 'global';
+  if (s.startsWith('group:')) return `groups/${s.slice(6).trim()}.md`;
+  if (s.startsWith('dm:')) return `dm/${s.slice(3).trim()}.md`;
+  return 'global.md';
+}
+
+/**
+ * 一个**空档案**该长什么样（第一次被教时用）。
+ * ⚠️ 骨架要跟 observe 那边分得开（`patchFile` 里也建骨架）—— 人一眼能看出这是学来的知识。
+ */
+function skeleton(scope) {
+  const s = String(scope ?? 'global');
+  const head = s.startsWith('dm:')
+    ? '# 私聊里学到的（跟这个人有关的）\n'
+    : s.startsWith('group:')
+      ? '# 这个群教我的（只在这个群算数）\n'
+      // ⚠️ 2026-09-28：原来写死「服主教的知识」—— 那是上一代的叫法（生分、且是身份不是称呼）。
+      //    现在从 `identity.address.owner` **填进来**：换称呼只改那一处，这里跟着变。
+      : `# ${callOwner() || '主人'}教的知识（所有群、所有私聊都算数）\n`;
+  return `${head}\n> ⚠️ 下面两个 \`<!-- LEARNED:* -->\` 标记不能删 —— 代码靠它们定位条目，\n>     删了整个文件的解析就废了（\`test/learned-edit.js\` 会报错）。\n\n${BEGIN}\n${END}\n\n## 修改记录\n\n<!-- 每次新增/覆盖都会在这里留一行，方便回滚。最新的在最上面。 -->\n`;
+}
+
+/**
+ * 读某个 scope 的正文。
+ *
+ * ⚠️ 文件不存在 → 返回**骨架**（含 BEGIN/END），不是空串 —— 否则 `learn()` 会
+ *    报「缺少标记行，已被破坏」，而用户看到的是"我教了它没反应"，极难查。
+ * ⚠️ 文件存在但没有标记区（比如 `groups/<群号>.md` 只有 observe 的 AUTO-OBSERVE 区）
+ *    → 由 `ensureBlock()` 补一对标记，同样不能报错。
+ */
+function read(scope) {
+  const f = fileForScope(scope);
   try {
-    return readFileSync(FILE, 'utf8');
+    return readFileSync(f, 'utf8');
   } catch (e) {
-    log.error(`读取 learned.md 失败: ${e.message}`);
+    if (e.code === 'ENOENT') return skeleton(scope);
+    log.error(`读取 ${basename(f)} 失败: ${e.message}`);
     return '';
   }
 }
 
-function write(content) {
-  // ⚠️ 改之前先备份 —— 这台机器上没有 git，教错了 / 模型抽错了没法回滚
+/** 文件里没有 LEARNED 标记区就补一对（observe 先建的骨架就属于这种） */
+function ensureBlock(text, scope) {
+  const t = String(text ?? '');
+  if (t.includes(BEGIN) && t.includes(END)) return t;
+  if (!t.trim()) return skeleton(scope);
+  return `${t.trimEnd()}\n\n## 学到的知识（群主教的）\n\n${BEGIN}\n${END}\n`;
+}
+
+function write(content, scope) {
+  const f = fileForScope(scope);
+  // ⚠️ 改之前先备份 —— 教错了 / 模型抽错了没法回滚
   //    （真实踩过：把分享卡片里的玩笑话抽成了知识）。
-  backupKnowledge(FILE);
+  try {
+    mkdirSync(dirname(f), { recursive: true });
+  } catch (e) {
+    log.warn(`建目录 ${dirname(f)} 失败（写盘那步会再报一次）：${e.message}`);
+  }
+  backupKnowledge(f);
   // 先写临时文件再改名，避免写一半断电留下坏文件
-  const tmp = FILE + '.tmp';
+  const tmp = `${f}.tmp`;
   writeFileSync(tmp, content, 'utf8');
-  renameSync(tmp, FILE);
+  renameSync(tmp, f);
 }
 
 /** 取出两个标记之间的正文 */
@@ -77,10 +166,37 @@ function renderEntries(entries) {
   );
 }
 
-/** 读出现有全部条目 */
-export function listEntries() {
-  const text = read();
+/**
+ * 读某个 scope 的全部条目。
+ * @param {string} [scope] `global`（默认）/ `group:<群号>` / `dm:<QQ号>`
+ */
+export function listEntries(scope = 'global') {
+  const text = ensureBlock(read(scope), scope);
   return parseEntries(extractBlock(text));
+}
+
+/**
+ * 把某个 scope 里 `<!-- LEARNED:BEGIN/END -->` 那一段**从文件正文里摘掉**。
+ *
+ * ⚠️ 为什么需要：`groups/<群号>.md` / `dm/<QQ号>.md` 是 **observe（群友观察）和 learned
+ *    共用**的两个文件，两块内容各有一对标记。注入提示词时走的是两条路：
+ *      · 文件整份内容 → `groupFiles` 缓存（observe 的世界）
+ *      · 这里的 learned 条目 → `learnedText()` 按需挑（learned 的世界）
+ *    不 strip 的话，同一个群的 learned 条目**会被带两遍**（探针那种"塞两遍"的重复）。
+ *
+ * @param {string} text 文件正文
+ * @returns {string} 摘掉 LEARNED 区之后的正文
+ */
+export function stripLearned(text) {
+  const t = String(text ?? '');
+  const i = t.indexOf(BEGIN);
+  const j = t.indexOf(END);
+  if (i === -1 || j === -1 || j < i) return t;
+  const after = j + END.length;
+  // 连同后面紧跟的换行一起摘，别留下一大段空白
+  let end = after;
+  while (end < t.length && (t[end] === '\r' || t[end] === '\n')) end++;
+  return (t.slice(0, i) + t.slice(end)).replace(/\n{3,}/g, '\n\n');
 }
 
 /**
@@ -131,9 +247,10 @@ const fmtEntry = (e) => `## ${e.title}\n\n${e.body}`;
  *    · **没给 `text`** → 照旧全带上（兼容老调用点和界面预览）。
  *
  * @param {string} [text] 对方说的话（用来挑相关条目）
+ * @param {string} [scope] 哪一份：`global`（默认）/ `group:<群号>` / `dm:<QQ号>`
  */
-export function learnedText(text = '') {
-  const entries = parseEntries(extractBlock(read()));
+export function learnedText(text = '', scope = 'global') {
+  const entries = listEntries(scope);
   if (!entries.length) return '';
 
   const t = String(text ?? '').trim();
@@ -150,21 +267,27 @@ export function learnedText(text = '') {
  * 新增或覆盖一个主题。
  * @param {string} topic 主题名（同名的会被覆盖）
  * @param {string} fact 内容
- * @param {{by?:string, byName?:string, where?:string}} meta 来源信息
+ * @param {{by?:string, byName?:string, where?:string, scope?:string}} meta
+ *   来源信息 + **归属**：`scope` 决定落进哪份文件（缺省 `global`）。
+ *   归属该填什么由调用方（`saveKnowledge()`）按权限判 —— owner→global、
+ *   群聊→group:<群号>、私聊→dm:<QQ号>。
  * @returns {{ok:boolean, replaced:boolean, error?:string, topic:string}}
  */
 export function learn(topic, fact, meta = {}) {
   const t = String(topic ?? '').trim();
   const f = String(fact ?? '').trim();
+  const scope = String(meta.scope ?? 'global').trim() || 'global';
 
   if (!t) return { ok: false, error: '主题为空', topic: t };
   if (!f) return { ok: false, error: '内容为空', topic: t };
   if (t.length > 60) return { ok: false, error: '主题太长（限 60 字）', topic: t };
   if (f.length > MAX_FACT) return { ok: false, error: `内容太长（限 ${MAX_FACT} 字）`, topic: t };
 
-  const text = read();
+  // ⚠️ 这里**不要**直接用 `read()`：文件可能是 observe 先建的骨架（没有 LEARNED 区），
+  //    那种情况要补标记区继续写，而不是报错让用户以为文件坏了。
+  const text = ensureBlock(read(scope), scope);
   if (!text.includes(BEGIN) || !text.includes(END)) {
-    return { ok: false, error: 'learned.md 缺少标记行，已被破坏', topic: t };
+    return { ok: false, error: `${scopeLabel(scope)} 缺少标记行，已被破坏`, topic: t };
   }
 
   const block = extractBlock(text);
@@ -195,11 +318,11 @@ export function learn(topic, fact, meta = {}) {
   out = insertChangeLog(out, logLine);
 
   try {
-    write(out);
-    log.info(`learned.md ${replaced ? '覆盖' : '新增'}主题「${t}」（${f.length} 字）`);
+    write(out, scope);
+    log.info(`${scopeLabel(scope)} ${replaced ? '覆盖' : '新增'}主题「${t}」（${f.length} 字）`);
     return { ok: true, replaced, topic: t };
   } catch (e) {
-    log.error(`写入 learned.md 失败: ${e.message}`);
+    log.error(`写入 ${scopeLabel(scope)} 失败: ${e.message}`);
     return { ok: false, error: e.message, topic: t };
   }
 }
@@ -267,9 +390,14 @@ export function validateFile(text) {
   return { ok: true, entries: entries.length };
 }
 
-/** 删掉某个主题（群主可以用「忘记：xxx」） */export function forget(topic) {
+/**
+ * 删掉某个主题（群主可以用「忘记：xxx」）。
+ * @param {string} topic 主题名
+ * @param {string} [scope] 从哪一份里删（默认 `global`）
+ */
+export function forget(topic, scope = 'global') {
   const t = String(topic ?? '').trim();
-  const text = read();
+  const text = ensureBlock(read(scope), scope);
   const entries = parseEntries(extractBlock(text));
   const idx = entries.findIndex((e) => e.title === t);
   if (idx === -1) return { ok: false, error: `没有找到主题「${t}」` };
@@ -279,11 +407,15 @@ export function validateFile(text) {
   out += renderEntries(entries);
   out += text.slice(text.indexOf(END));
   out = insertChangeLog(out, `- ${now()} **删除**「${t}」`);
-  write(out);
-  log.info(`learned.md 删除主题「${t}」`);
+  write(out, scope);
+  log.info(`${scopeLabel(scope)} 删除主题「${t}」`);
   return { ok: true, topic: t, removed: removed.body };
 }
 
-export function fileExists() {
-  return existsSync(FILE);
+/**
+ * 这个 scope 有没有对应的知识文件（**还没被教过就没有**）。
+ * @param {string} [scope]
+ */
+export function fileExists(scope = 'global') {
+  return existsSync(fileForScope(scope));
 }

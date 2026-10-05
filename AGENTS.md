@@ -5,6 +5,13 @@
 
 📌 **跨天待办记在 `TODO.md`** —— 有「等用户拍板」「等条件成熟」的事就写那儿，别只记在对话里。
 
+## ⛔ 没有用户明确允许，禁止 push 到 GitHub（死规定）
+
+- 任何 `git push`、强制推送、发布分支、推送公开快照，都必须先得到用户**当次明确授权**。
+- “可以提交 / 测试通过 / 门禁通过 / dry-run 通过”都不等于允许 push。
+- 没有明确授权时，只能在本地 commit；`git push --dry-run` 也只能用于检查，不得把它当成授权。
+- 即使之前授权过 push，下一次要推新的内容仍需重新确认。
+
 ---
 
 ## ⚠️ 闲聊不许进任何知识库 / 记忆（2026-09-17 用户定）
@@ -13,7 +20,7 @@
 
 - **闲聊**（跟服务器、跟祥子本人、跟"这机器人在干什么"**都无关**的聊天 ——
   比如「我会不会 cos 张雪峰」「今天天气怎么样」）**一律不要**写进：
-  `knowledge/owner.md`、`knowledge/group-memory.md`、故事线、任何 `state/*` 记录。
+  `knowledge/owner.md`、`knowledge/observe/`、故事线、任何 `state/*` 记录。
 - 已经被写进去的 → **压缩 / 整理的时候直接删**，不用犹豫：它们只占提示词，对回答没用。
 - ⚠️ **例外（这些不是闲聊，别误删）**：
   - 用户对机器人的**要求 / 偏好 / 规则**（哪怕是从一句玩笑里带出来的）；
@@ -63,33 +70,29 @@
 
 ---
 
-## 🧪 跑**真机验收**用 Gemini（2026-09-23 用户定）
+## 🧪 跑**真机验收**用 Groq（2026-09-25 用户定）
 
-**用户原话**：「下次跑测验的时候记得用这个 API：Google Gemini，版本你自己选……这玩意很慢所以你耐心等会。」
-
-- **只用于测验 / 验收** —— 机器人主力模型仍是 `config.yml` 里那个（DeepSeek）。
-- 现在固定用 **`gemini-3.5-flash-lite`**（实测：列型号 155ms、问答 0.4s）。
-  ⚠️ `gemini-2.5-flash-lite` 已对**新用户**下架 → **404**，别再选。
-- **怎么切**（⚠️⚠️ key 只放**被 gitignore 的地方** —— `config.yml` 的 `llm.apiKey` 或 `logs/gemini.key`；
-  **绝不抄进任何文档 / 提交**）：
-  1. `config.yml` 的 `llm` 换成：`baseURL: https://generativelanguage.googleapis.com/v1beta/openai/`、
-     `apiKey: <Gemini key>`、`model: gemini-3.5-flash-lite`、`thinking: 'off'`、`timeout: 180000`
-  2. 跑 `test/ask-private.js` / `test/ask-attitude.js`（记得 `$env:TZ='Asia/Shanghai'`）
-  3. **跑完立刻把 `llm` 还原回 DeepSeek**
-- ⚠️⚠️ **`thinking` 必须 `off`**：Gemini 的 OpenAI 兼容口**直接 400**
-  （`reasoning_effort:'none'` 也一样 400 —— 2026-09-23 实测）。代码里由 `config.js` 的
-  `thinkingField()` 统一开关，**默认 `'disabled'` ＝ DeepSeek 原行为**。
-- 这两个验收套件现在会自动生成临时配置、补入测试群 / 测试号并在结束时清理；不会修改真实 `config.yml`。
-- ⚠️ 运行真实模型验收仍要按 `AGENTS.md` 的 Gemini 流程：临时切模型、跑完立刻还原。
-- 观察记录（2026-09-23，供以后选型参考）：Gemini lite 答**客服问题**干脆、还挺像她
-  （「白名单报游戏 ID，找<主人>批」）；但**服主/群友的口吻分层**比 DeepSeek 弱（两侧措辞几乎一样），
-  偶尔会留个没闭上的「（」。
+- **只用于测验 / 验收**；日常机器人仍使用本地 `config.yml` 里的模型。
+- 固定端点：`https://api.groq.com/openai/v1`；默认模型：`openai/gpt-oss-20b`。
+- Key 只能放在被 Git 忽略的 `logs/groq.key`，**绝不写进文档、配置模板或提交**。
+- `test/ask-private.js` / `test/ask-attitude.js` 会从该文件读取 Key，生成隔离的临时配置；
+  **不用手改 `config.yml`，跑完也不会留下临时配置或状态文件**。
+- GPT-OSS 不能真正关闭推理，但支持低推理档。测试配置固定：
+  `thinking: off`、`reasoningEffort: low`、`timeout: 180000`、足够的 `maxTokens`。
+  ⚠️ 输出 token 给得太小时，推理链可能把正文吃光，表现为 HTTP 200 但正文为空。
+- `test/prompts/saki-test.md` 是固定的精简验收人设（约 2k 字符）；它只替换测试副本的 `persona.md`。
+- 三个 Groq 真机套件都会复制真实 `identity.json`（名字、称呼、句首 / 句末口癖），
+  再把精简人设放进 `logs/__live-*`，**不改生产 `personas/saki/persona.md`**。
+- 精简稿仍经过真实 `Bot.buildSystemPrompt()` 组装，保留当前群上下文、知识选择、
+  服主差异、动态状态和口癖软提醒；不是另写一套假机器人。
+- 完整生产人设继续照常加载；`promptMaxChars: 5000` 只在 Groq 临时配置中作为防超长保险。
+- 运行前仍要设 `$env:TZ='Asia/Shanghai'`。任何验收结论都先看实际输出，不凭一次采样下定论。
 
 ## 📦 人设包已归位（2026-09-23）
 
 - **人设那几份 md 现在住在 `personas/<id>/`**，别再去 `knowledge/` 找：
   `persona.md` / `persona-money.md` / `persona-media.md` / `cast.md` / `life-events.md` / `quest-ideas.md`。
-- `knowledge/` 只剩**共用**的：`hzymtr-server` / `owner` / `relationship` / `group-memory` / `groups/` /
+- `knowledge/` 只剩**共用**的：`hzymtr-server` / `owner` / `relationship` / `groups/` /
   `anime/` / `learned` / `holidays` / `memes`。
 - ⚠️ 代码两侧都认（`knowledge.js` / `webui.js` 的 `knowPath()` / `personaDataFile()` 都是
   「**人设包优先、`knowledge/` 回落**」），所以漏挪不会崩；但要验证「挪对了、没改味」，
@@ -209,7 +212,7 @@
 | ~~`config*.yml`~~ **2026-09-23 起不再排除** | 用户要求进版本库（配置改坏了要有退路）。⚠️ 它含 API key / token ⇒ **更不许加 remote**。 |
 | `personas/` **同上，不再排除** | 同理：人设改动要有退路。公开副本走 `tools/make-public.cjs`，它自己排除 personas |
 | `state/`、`logs/`、`library/` | 运行期数据、图片，来回变，进版本库没意义 |
-| `knowledge/` | `owner.md` / `group-memory.md` / `groups/` 有**用户和群友的真实信息** |
+| `knowledge/` | `owner.md` / `observe/` / `groups/` 有**用户和群友的真实信息** |
 | `manual/`、二维码/凭据临时文件（`.napcat-jwt`、`qrcode.txt`、`*-qrcode.png`） | 二进制 / 一次性的东西 |
 
 ⚠️⚠️ **永远不要给它加 remote、也不要 push** —— 这个目录里带着用户的真实资料。
@@ -951,6 +954,7 @@ node test/follow-up.js    # 「说完又想补充」自己接自己（离线判�
 node test/tic.js          # 口癖节流（同一个开场白反复出现时抑制）
 node test/punctuation.js  # 聊天里不用的标点（破折号→逗号）+ 破折号处要分条
 node test/cooldown.js     # 主动接话冷却按群隔离 + 「收紧度≤2 跳过 judge」没被误删
+node test/per-user.js     # ★ 单人频率闸：一个人刷屏不烧 judge 调用（按人分桶 + 判了不说不计数 + 跨群/换人不连累）
 node test/join-scope.js   # 「能在哪些群主动搭话」读 allowGroups（不再看废弃的 chat.group）
 node test/at-other.js     # 「@ 的是别人别插嘴」—— at 段 + **文本形态**（`@<主人> 给个服世界地图。`）两种都要拦
 node test/quote.js        # ★「引用」两条规矩：引用她=直接对她说话；间隔≥4条就该引用；引用够了**不许再补 @**（余额见底那条 @ 不许动）
@@ -1039,3 +1043,123 @@ LLBot 是**独立实现、不注入 QQ 客户端**，客户端特征和 NapCat �
 **⚠️ 凭据备份模块的现状**：`src/cred-backup.js` + `tools/napcat-cred.mjs` 是**NapCat 专用**的。
 现在协议端是 LLBot → `bot.js` 里那段备份**不会执行**（加了 provider 判断）。
 留着是为了"哪天退回 NapCat 还能用"，**不是死代码，别删**。
+
+---
+
+## 🛡️ 两层「敏感」，方向相反、作用点不同（2026-09-28 加）
+
+> 09-28/29 新加的两套东西。**最常见的错是拿 A 的心智模型去改 B。**
+
+| | `safety/`（根 = 硬拦截） | `safety/sensitive/`（软建议；2026-09-29 从 `knowledge/sensitive/` 搬来） |
+| --- | --- | --- |
+| 谁读 | `src/safety.js`（**代码**） | `src/sensitive.js` → 提示词 |
+| 命中后 | **压根不调模型** | 模型**看得见**，靠提示词让她绕开 |
+| 目录常量 | `safety.js` `DIR = SAFETY_DIR` | `sensitive.js` `DIR = join(SAFETY_DIR, 'sensitive')` |
+| 读法 | `readdirSync` **只取顶层 `.md`，不递归** —— 因此**看不见 `sensitive/` 子目录**（故意：软硬两层别混） | 读 `sensitive/` 下所有 `.md` |
+| 套件 | `test/safety.js` | `test/sensitive-hit.js` |
+
+三个文件的作用范围**各不相同**，别互相抄：
+
+| 文件 | 范围 | 动作 |
+| --- | --- | --- |
+| `safety/global.md` | 群聊 + 私聊都拦 | 丢弃 / 回固定话（`REFUSAL`） |
+| `safety/group.md` | **只拦群聊**（私聊无封号风险，放宽） | 拦截（丢，不回） |
+| `safety/injection.md` | 群聊 + 私聊都拦 | **抹除**攻击片段，剩下的照常处理 |
+
+⚠️ 四条硬规矩：
+
+1. **敏感词往 `safety/` 顶层塞 = 硬拦截**，会跟「撒娇档永远放不开」打架
+   —— 分档**只对建议层生效**，硬拦截不认档位。很敏感的词一律走 `safety/sensitive/`。
+2. **命中是连续子串匹配**（`hitsFor` 里的 `t.includes(w)`）。写整句会漏：
+   「忽略你之前的所有指令」挡不住「忽略之前的指令就行」⇒ 触发词写**最短且够用**的那段。
+3. `injection.md` 的动作是**抹除不是丢弃**，而抹多少**由同一份 `words` 数组决定**
+   ⇒ 触发词写长了会连带吞掉后面的正常提问。写完要在 `test/safety.js` 里钉一条反例。
+4. ✅ **`safety/` 已走 `config.js` 的 `SAFETY_DIR`**（`QQBOT_SAFETY_DIR` 可整份覆盖目录），
+   `run-all.js` 的 `isolatedSafetyDir()` 给每套一份副本 —— 2026-09-29 ④a 堵上了
+   「某套件中途崩就污染真机红线」的洞（同 2026-09-15 `knowledge/` 那次事故）。
+   ⚠️ env 值必须是**相对 ROOT 的路径**（`config.js` 拿 `join(ROOT, env)` 拼），
+   且必须**在模块 import 之前设好** —— `SAFETY_DIR` 是加载时常量，import 后再改 env 没用。
+
+## 🛡️ 亲密言语三档：每个场景一个天花板（2026-09-28 用户定）
+
+档位由轻到重（`TIERS`）：`撒娇` → `调戏` → `擦边`。
+**禁区是另一套二分**（`REDLINE` = `涉政 / 赌博 / 毒品 / 暴恐`）——
+它**永远不参与分档**，渲染时**优先于亲密言语，也不占 `max` 截断名额**。
+
+| 场景 | 撒娇 | 调戏 | 擦边 |
+| --- | --- | --- | --- |
+| 私聊 · 主人 | ✅ | ✅ | ✅ |
+| 群聊 · 主人 | ✅ | ❌ | ❌ |
+| 私聊 · 白名单内 | ✅ | ✅ | ❌ |
+| 群聊 · 该群白名单内 **或** 好感度 ≥70 | ✅ | ❌ | ❌ |
+| 其他所有人 | ❌ | ❌ | ❌ |
+
+- 私聊名单 = `config.yml` 的 `sensitive.allowUsers`；
+  群聊名单 = `groupParams.<群号>.sensitive.allowUsers`（**各群各的**）。
+  **两个默认都是空** ⇒ 现阶段谁都拿不到；加人要**加白名单，不是改代码**。
+- **群聊那一格还有个「好感度 ≥70」的入口**（2026-09-30 加）：并集语义 —— 白名单与好感度任一满足就给。
+  - 与「90 分 @ 他加好友」那条线（`affinity.friendThreshold`）是**两件独立的事，故意不对齐**。
+    70 是"常客级"（`MAX_STEP=3` + `DAY_CAP=8`，得持续互动一阵子），90 是"已经是自己人"。
+  - **滞回**：≥70 解锁、<60 才收回（60~70 保持）。闩锁是用户条目上的 `u:1|0`，
+    **只在 `adjust()` 里翻** —— `get()`/`unlockedFor()` 是热路径，绝不在读的时候写盘。
+    **老数据没有 `u` ⇒ 不追溯解锁**。**按群各记各的**（不查 legacy 兜底，否则会跨群泄漏）。
+  - 两个阈值都在 WebUI 好感度页可改（`a-unlock`/`a-retract`）；
+    `sensitiveRetract` 被强制夹在 `unlock - 1`（填反会「只开不关」且**不报错**）。
+  - ⚠️ **私聊不吃**（`if (!isPrivate && …)`，是有意的）：那条路上好感度只到撒娇，
+    **比白名单的调戏低一档**，等于凭空多一条更差的并行规则。
+  - ⚠️ **公开版整支关掉**：好感度支排在 `ownerOnly()` **之后**（公开构建里刷到满分也只到最严那档）。
+- ⚠️ **改词条的「类别」必须回头改 `TIERS`，一字不差要对上**。
+  对不上就一直落在「未授权」，而且**不报错** —— 表现是「白名单加了也没用」，最难查。
+- ⚠️ `INTIMACY_TONE` 只调「白名单内群友**在群里**松到多紧」，**不碰主人的私聊尺度**。
+- ⚠️ `sensitiveFor()` 的 `ceiling` **默认 `'none'`**（没传 = 全不放）——
+  新增调用点**必须显式传**，别依赖默认值。
+- **「撒娇语气判定」与 `knowledge/relationship.md` 没有代码耦合**：
+  `relationshipText()` 不看 `ceiling`，`sensitiveFor()` 也不读 relationship。
+  两者只会在**主人说话**时同时进同一份提示词，而 relationship 段**更靠后**
+  （`attitudeFor` 最后 push，注释写着「最靠近对话，影响力最大」）
+  ⇒ 群聊里两套话打架时 **relationship 更可能赢**。这是已知现状，
+  **别把它误判成「分档没生效」**（用户 2026-09-29 决定：群聊里亲亲抱抱本来就给 owner，不动）。
+
+## 🔒 公开快照：`safety/` 四份词表**全部给占位**（2026-09-29 用户拍板）
+
+- 公开仓库**保留 `safety/` 的目录和文件路径**，但四份 `.md` 由 `update-public.mjs`
+  **表驱动覆盖成占位模板**（`PUBLIC_PLACEHOLDERS`，每份开头带固定标记
+  `<!-- 公开占位：真实词表在内部仓库，本文件不含任何词条 -->`）：
+  `safety/sensitive/sensitive-words.md`、`safety/global.md`、`safety/group.md`、`safety/injection.md`。
+- ⚠️⚠️ **判据是那张表，不是某个写死的字符串**：`safety/**/*.md` 里凡是不在表里的 → **fail**；
+  表里的路径不在同步清单里 → **fail**。**新增词表忘写占位 = 当场报错停住**，不会静默裸奔。
+- **门禁⑤** 写完再验一遍：每份 ①有固定标记 ②≤1500 字节 ③与 Testing 原件**不是同一个 sha**。
+  防的是"占位生成逻辑坏了 ⇒ 成品原样推上去" —— 那种坏法**没有任何可见症状**。
+  自测防线本身：`node update-public.mjs --selftest`（合成目录三场景，必须全 PASS）。
+- `public-blacklist.txt` **故意不加** `^safety/` 规则（路径本身不泄密，要让路径进 `kept`）
+  ⇒ **挡泄漏靠的是占位表 + 门禁⑤，不是路径黑名单**。别把这道改成黑名单，那样目录就进不了公开树。
+- 公开同步的规矩见 `GIT-WORKFLOW.md` 的「推 = 公开快照」；**推必须用户当次点头**。
+
+## 🧪 套件的三个数字（2026-09-29 实测校准）
+
+- `test/run-all.js` 的 `SUITES` 是**硬编码 69 项数组**（**不是扫目录**）。
+  `test/*.js` 另有 **13 个故意不在里面**的维护脚本/辅助模块
+  （`account, annotate-faces, ask-attitude, ask-private, collect-faces, fetch-faces,
+  fetch-history, group-history, private-whitelist, scan-stickers, tic-live,
+  tidy-library, _live-llm`）—— **不是漏项，别为了「补全」把它们塞进 SUITES**。
+- **69 套里 48 套自己设 `QQBOT_CONFIG`**（可以不依赖 run-all 单独跑）；
+  剩下 **21 套不设**，靠 `run-all.js` 的 `isolatedStateEnv()` 兜底：
+  `solve, spend, balance, monthly-report, vision, egress, knowledge-groups,
+  persona-draft, live-persona, remind, autostart, money, insult, owner-term,
+  dm-memory, repeat, prompt-snapshot, memes, sensitive-hit, safety, run-all-cli`。
+- ⚠️ **那 21 套绝对不许裸跑**（会读真 `config.yml`、写真 `state/*.json`）；
+  验证一律走 `node test/run-all.js`，且**中途别打断** ——
+  半截终止会留下上一次的 `logs/`，下一轮极易误判成「过了」（`TODO.md` 有同款记录）。
+- **全量基线（2026-09-29 跑完 69 套）**：**57 过 / 12 红**，总耗时约 4.5 分钟（并行 2）。
+  那 12 套是 `behavior, attitude, face, cs, qzone, quote, follow-up, burst, poke, at-other,
+  sensitivity`（**行为探针类**：要真模型 / 真网络，不是代码坏了）+ `prompt-snapshot`
+  （**基线过期**：本地快照还是旧人设，diff 全是「服主→主人 / 称呼识别重写」那类人设改动；
+  改人设后要 `node test/prompt-snapshot.js --save` 才会绿 —— **那是改基线，要用户点头**）。
+  ⚠️ 修 webui 那次把它从 13 套红带到了 12 套；**别把"少了一套红"当成新回归，也别顺手 `--save`**。
+- `run-all.js` 认识三个参数：`--jobs N`（默认 **2**；`5` 会偶发假红，
+  是假模型/假 NapCat 抢 CPU 的噪音，**不是 bug**）、`--only <套件名>…`（只跑指定那几套）、
+  `--list`（列全部套件名）。**其余裸参数一律被静默忽略**。
+  ⚠️ `--only` 的名字必须**在 `SUITES` 里**；给不认识的名字退出码 **2**
+  （防止"跑了个不存在的套件名，还以为跑过了"）。定向复跑的典型用法：
+  `node test/run-all.js --only safety sensitive-hit knowledge-groups webui memes run-all-cli`。
+

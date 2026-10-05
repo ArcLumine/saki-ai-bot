@@ -25,7 +25,7 @@
  * 所以本模块**不监听** `observe` 的总结流程，`observe.js` 也**不碰**
  * `state/affinity.json`。要调只能由代码里明确调用 `adjust()`。
  *
- * ### ③ 它**不在 group-memory.md 里**
+ * ### ③ 它**不在 observe/<群号>.md 里**
  *
  * 用户说"加到群友信息库"，但那个文件是**给人看、给模型读的散文**，
  * 而好感度是**程序状态**：
@@ -39,6 +39,13 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from '
 import { join } from 'node:path';
 import { ROOT, config } from './config.js';
 import { log } from './log.js';
+// ⚠️ 2026-09-28：为了 `promptLine()` 里那句「它管不到 <主人>」能填成真称呼。
+//    那一段以前是字面量占位符，**原样发给了模型**（尖括号对模型就是"占位符"信号）。
+//    查 prompt-snapshot 基线时才发现 —— test/owner-term 只验了几个主要出口，
+//    漏了 affinity 自己拼的这段。
+import { callOwner } from './persona.js';
+// ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)`
+import { whoTag } from './who.js';
 
 const STATE_DIR = join(ROOT, 'state');
 // ⚠️ 给测试留出口（和 QQBOT_TIC_FILE / QQBOT_QZONE_FILE 一个套路）
@@ -154,6 +161,13 @@ export function reload() {
           v: clamp(n),
           at: Number(v?.at) || 0,
           note: v?.note ? String(v.note).slice(0, 60) : undefined,
+          // ⚠️⚠️ 2026-09-30 新增：`u` = 「亲密尺度」那一档的**滞回闩锁**（0/1）。
+          //    为什么单独存一个字段、而不是每次拿 `v` 现比阈值：
+          //    滞回要求「≥unlock 开、<retract 才关」，70 与 60 之间那段**要保持开**。
+          //    如果每次现算，那 70→65 的人会突然被关掉，再涨回 70 又开 —— 反复闪。
+          //    老数据没有这个字段 ⇒ 视 0（**不追溯解锁**）：不能因为"以前有过的高分"
+          //    就白送一档 —— 那等于给所有人降一档门槛。
+          u: v?.u ? 1 : 0,
         });
       }
       return m;
@@ -352,6 +366,71 @@ export function groupIds() {
 }
 
 /**
+ * 「亲密尺度」那一档的**滞回闩锁**（2026-09-30 用户要求：「群聊还是大于70解锁但是大于90才能加好友」）。
+ *
+ * ## 这条线与「加好友」那条线是**两件独立的事**
+ *
+ *   · `sensitiveUnlock`（默认 70）→ 群里给他开到「撒娇」那一档
+ *   · `friendThreshold`（默认 90）  → 群里 @ 他、让他来加好友（`adjust()` 的 `crossed`）
+ *
+ * 两条线**故意不对齐**：70 分的是常客级（`MAX_STEP=3` + `DAY_CAP=8`，要持续互动一阵子），
+ * 而 90 分那条是「已经是自己人」。把权限线压在好友线之下是用户拍板的。
+ *
+ * ## 为什么要滞回（`unlock` 与 `retract` 分开）
+ *
+ * 只有 unlock 的话，70 分的人掉到 69 会立刻被关，再涨回 70 又开 ⇒ **反复闪**。
+ * 所以：**≥ unlock 开，< retract 才关**，中间那段保持原状。
+ *
+ * ## 为什么只在 `adjust()` 里翻
+ *
+ * 铁律②说了这个模块只有 `adjust()` 能改状态。`get()` / `unlockedFor()` 是**热路径**
+ * （每次拼提示词都要走），绝不能在里面写盘。闩锁跟着分数一起写，既满足铁律②，
+ * 也天然跟着 `bucket(groupId)` 按群分桶 —— 同一个 QQ 在 A 群开的档不会漏到 B 群。
+ *
+ * ⚠️ 这**不影响** `crossed`：那行读的是 `config.affinity.friendThreshold`（早就接好了），
+ * 跟这里的闩锁是两套独立的判据。
+ *
+ * @param {{u?:number}|undefined} prev 该人**之前**的条目（没记录过就是 undefined）
+ * @param {number} to 这次调整后的分数
+ * @returns {0|1}
+ */
+function rollUnlock(prev, to) {
+  const a = cfg();
+  if (a.sensitiveUnlock === false) return 0; // 功能关 ⇒ 闩锁一并清掉（改回来要重新挣）
+  // 阈值兜底：配置没填/填了垃圾 → 用默认值。真值由 config.js 那边夹过一遍。
+  const unlock = Number(a.sensitiveUnlock) || 70;
+  // ⚠️ `retract` 必须**小于** `unlock`。填反了（retract ≥ unlock）的话
+  //    「≥unlock 开」之后永远等不到「<retract」⇒ 闩锁只开不关。
+  //    config.js 会强制 `retract ≤ unlock-1`，这里再兜一次底。
+  const retract = Math.min(unlock - 1, Number(a.sensitiveRetract) || 60);
+  const was = prev?.u ? 1 : 0;
+  if (to >= unlock) return 1;
+  if (to < retract) return 0;
+  return was; // 中间那段：保持原状（滞回）
+}
+
+/**
+ * 他在这个群里有没有解锁「撒娇」那一档？（纯读，**不写盘**）
+ *
+ * ⚠️ 查不到记录 ⇒ `false`。理由跟 `get()` 一样：没有记录就是 50 分，
+ * 没到解锁线。**不**因为"他也许曾经到过 90"就当成解锁 —— 那要靠上面的闩锁。
+ *
+ * @param {string|number} userId
+ * @param {string} [groupId] 不给 = 「不知道哪个群」那个桶
+ */
+export function unlockedFor(userId, groupId = '') {
+  if (!enabled()) return false;
+  if (cfg().sensitiveUnlock === false) return false;
+  const id = String(userId ?? '').trim();
+  if (!id) return false;
+  // ⚠️ 只看**群桶**：这个功能是"群里对他放松"，而好感度本身按群各记各的。
+  //    legacy 兜底**故意不查** —— 分群之前那份分数没有"在哪个群"的含义，
+  //    拿它开档等于把 A 群的档漏到 B 群（跟 `observe/` 那次踩过的坑同一类）。
+  const e = bucket(groupId)?.users.get(id);
+  return e?.u ? true : false;
+}
+
+/**
  * 调好感度。
  *
  * @param {string|number} userId
@@ -385,10 +464,12 @@ export function adjust(userId, delta, opts = {}) {
 
   if (to !== from || opts.force) {
     const b = bucket(gid, true);
+    const prev = b.users.get(id);
     b.users.set(id, {
       v: to,
       at: Date.now(),
-      note: opts.note ? String(opts.note).slice(0, 60) : b.users.get(id)?.note,
+      note: opts.note ? String(opts.note).slice(0, 60) : prev?.note,
+      u: rollUnlock(prev, to),
     });
     save();
   }
@@ -441,18 +522,27 @@ export function promptLine(userId, opts = {}) {
             : v >= 20
               ? '有点不耐烦'
               : '很不想理';
+  // ⚠️ 称呼填进来（2026-09-28）：下面那句「它管不到 <主人>」以前是**字面量占位符**，
+  //    原样发给了模型（尖括号对模型就是"占位符"信号，它真的会照着吐）。
+  //    查 prompt-snapshot 基线时才发现 —— test/owner-term 只验了主要出口，
+  //    漏了 affinity 自己拼的这段。
+  const o = callOwner() || '主人';
 
   return [
     '## 你对这个人的好感度（私人印象，**别说出来**）',
     '',
-    `你对 **${name}** 的好感度：**${v}**（${band}）`,
+    // ⚠️ 2026-10-04：统一格式 `昵称(QQ号)`（`promptLine` 本来就收得到 userId）
+    `你对 **${whoTag(name, userId)}** 的好感度：**${v}**（${band}）`,
     '',
     '- ⚠️⚠️ **绝对不许说出数字、也不许提"好感度"这个词** ——',
     '  那是游戏面板，说出来一秒出戏。它只影响你的**语气松紧**：',
     '  · 高（≥65）→ 会主动接话、愿意多聊两句、开得起玩笑',
-    '  · 中（40~64）→ 正常客服，礼貌里带点距离',
-    '  · 低（<40）→ 更短、更淡，不主动搭理（但**该答的还是答**）',
-    '- ⚠️⚠️ **它管不到 <主人>** —— 你对 <主人> 的态度由 `relationship` 那套决定，',
+    // ⚠️ 称呼填进来（2026-09-28）：以前这三行是字面量「<主人>」，**原样发给模型**。
+    //    这是查 prompt-snapshot 基线时才发现的第三处漏网
+    //    （`test/owner-term` 只验了主要出口，漏了这段自己拼的字符串）。
+    `  · 中（40~64）→ 正常客服，礼貌里带点距离`,
+    `  · 低（<40）→ 更短、更淡，不主动搭理（但**该答的还是答**）`,
+    `- ⚠️⚠️ **它管不到 ${o}** —— 你对 ${o} 的态度由 \`relationship\` 那套决定，`,
     '  **优先级高于好感度**。就算哪天他在这儿的分很低，你也还是那样跟他说话。',
     '- ⚠️ 别因为好感度低就不好好回答 —— 你是客服，**该给的答案要给**，',
     '  只是语气冷一点。',

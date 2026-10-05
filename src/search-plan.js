@@ -9,7 +9,8 @@
  * 所以这里用一次便宜的模型调用做「查询规划」。先用 chat（快，1~2 秒），
  * 不行再退到规则。
  */
-import { config } from './config.js';
+import { config, reasoningField } from './config.js';
+import { llmFetch } from './llm.js';
 import { looksInternal } from './search.js';
 import { log } from './log.js';
 // ⚠️ 2026-09-15 补：搜索规划也是**直接 fetch** 的，原来**没记账**。
@@ -118,6 +119,7 @@ export async function planSearch(text, context = '', opts = {}) {
     //    它不是 OpenAI 兼容接口的通用字段，Gemini 会直接拒绝请求。
     max_tokens: 800,
     temperature: 0,
+    ...reasoningField(),
     messages: [
       { role: 'system', content: PLAN_PROMPT },
       { role: 'user', content: user },
@@ -125,7 +127,7 @@ export async function planSearch(text, context = '', opts = {}) {
   };
 
   try {
-    const r = await fetch(`${baseURL}/chat/completions`, {
+    const r = await llmFetch(`${baseURL}/chat/completions`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

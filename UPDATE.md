@@ -7,7 +7,7 @@
 
 1. **服务器上不要改代码**。要改功能、修 bug ⇒ 提 issue / 找维护者，改动走他们的开发流程。
    （在服务器副本上改了代码，下一次更新就会冲突。）
-2. **活数据不在 git 里**：`config.yml`、`knowledge/group-memory.md`、`knowledge/learned.md`、
+2. **活数据不在 git 里**：`config.yml`、`knowledge/observe/`、`knowledge/global.md`、
    `knowledge/owner.md`、`knowledge/hzymtr-server.md`、`knowledge/groups/`、`state/`、`logs/`
    都被 `.gitignore` 挡住 ⇒ 更新**不会**覆盖它们，也**不会**把它们带进提交。
 
@@ -18,12 +18,10 @@ git clone https://github.com/ArcLumine/saki-ai-bot.git
 cd saki-ai-bot
 npm i                                    # 依赖很少（ws / js-yaml / qrcode …）
 copy config.example.yml config.yml       # 然后填：llm.apiKey、onebot.accessToken、ownerQQ、botQQ、trigger.allowGroups
-# 三个「活文件」用模板起头（不进仓库）：
-cd knowledge
-copy group-memory.example.md group-memory.md
-copy hzymtr-server.example.md hzymtr-server.md
-copy learned.example.md learned.md
-cd ..
+# 「活文件」用模板起头（不进仓库；模板在 example/）：
+# ⚠️ 群友资料不用起头 —— 机器人自己在 knowledge/observe/<群号>.md 里暗中攒
+copy example\hzymtr-server.example.md knowledge\hzymtr-server.md
+copy example\global.example.md knowledge\global.md
 node test/run-all.js                     # 自检（离线、不碰真 QQ、不花钱）
 node src/index.js                        # 起（管理界面 http://127.0.0.1:3099）
 ```
@@ -55,7 +53,7 @@ git status --short          # ⑤ 应该仍是空的；再看一眼第 3 节
 
 ```bash
 git status --short                        # 应为空
-dir config.yml knowledge\*.md             # 你的配置与活知识库都还在（不是 .example 的那几个）
+dir config.yml knowledge\*.md             # 你的配置与活知识库都还在（模板已挪到 example/，这里都是真文件）
 dir state                                 # 好感度 / 故事线 / 待发箱还在
 ```
 

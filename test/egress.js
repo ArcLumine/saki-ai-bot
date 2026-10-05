@@ -80,5 +80,24 @@ console.log('\n【4】★ 别把另一个方向弄坏（直连不通时仍会试
   check(/isNetErr\(e\)/.test(src), '★ 只对**网络类**错误切换（402/401 那些业务错误原样抛）');
 }
 
+console.log('\n【5】★ 可选推理档位：默认不影响旧模型，Groq 测试时才显式发送');
+{
+  const configSrc = readFileSync(join(ROOT, 'src', 'config.js'), 'utf8');
+  check(/export function reasoningField\(\)/.test(configSrc), 'config.js 导出 reasoningField()');
+  check(/return \['low', 'medium', 'high'\]\.includes\(mode\) \? \{ reasoning_effort: mode \} : \{\}/.test(configSrc),
+    '★ 只接受 low / medium / high，其它值一律不发');
+  check((src.match(/\.\.\.reasoningField\(\)/g) || []).length === 4,
+    'llm.js 的流式正文、过渡话、润色、自检四处都接上了',
+    String((src.match(/\.\.\.reasoningField\(\)/g) || []).length));
+  check(/reasoningEffort: ''/.test(configSrc), '默认值是空串 —— DeepSeek 日常请求不会凭空多字段');
+  const botSrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/promptMaxChars: 0/.test(configSrc), '测试提示词压缩默认关闭 —— 生产路径完全不变');
+  check(/adaptiveRateLimit: false/.test(configSrc), 'TPM 自适应限速默认关闭 —— 生产路径完全不变');
+  check(/if \(!maxChars \|\| prompt\.length <= maxChars\) return prompt/.test(botSrc),
+    '★ 只有显式设置上限且确实超长时才压缩');
+  check(/x-ratelimit-reset-tokens/.test(src) && /res\.status !== 429/.test(src),
+    '★ 测试模式会读 Groq 的 token 重置头并处理 429');
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

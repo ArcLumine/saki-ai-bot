@@ -17,12 +17,19 @@ const TOKEN = 'att-token';
 const BOT_QQ = '10000002';
 const GROUP = '200000001';
 const OWNER = '10000001';
+// ⚠️ 2026-09-28：主人在提示词里**叫什么**是从 `identity.address.owner` 填进来的，
+//    所以断言也不能写死名字 —— 用户改称呼，这里跟着变（`test/owner-term.js` 盯另一头：
+//    占位符绝不残留）。`OWNER` 仍然只是 QQ 号。
+const { callOwner } = await import('../src/persona.js');
+const OWNER_NAME = callOwner() || '主人';
 const ADMIN = '10000005';
 const MEMBER = '30003';
+// ⚠️ 2026-10-04：`say()` 里非主人一律给 nickname='路人'，断言身份块格式时要用它。
+const MEMBER_NAME = '路人';
 
 let failures = 0;
-const check = (ok, label) => {
-  console.log(`  ${ok ? '✅' : '❌'} ${label}`);
+const check = (ok, label, extra = '') => {
+  console.log(`  ${ok ? '✅' : '❌'} ${label}${ok || !extra ? '' : `\n      ${extra}`}`);
   if (!ok) failures++;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -121,7 +128,7 @@ function say(userId, role, text, id) {
       user_id: userId,
       self_id: BOT_QQ,
       time: Math.floor(Date.now() / 1000),
-      sender: { user_id: userId, nickname: role === 'owner' ? '<主人>' : role === 'admin' ? '管理' : '路人', role },
+      sender: { user_id: userId, nickname: role === 'owner' ? OWNER_NAME : role === 'admin' ? '管理' : '路人', role },
       message: [
         { type: 'at', data: { qq: BOT_QQ } },
         { type: 'text', data: { text: ` ${text}` } },
@@ -174,7 +181,7 @@ async function main() {
   await waitFor(() => !!probeOf('把群的回复关掉'), 20000);
   const pOwner = probeOf('把群的回复关掉');
   check(!!pOwner, '收到服主的消息');
-  check(!!pOwner?.sys.includes('服主 <主人>'), '系统提示词标明了对方是服主');
+  check(!!pOwner?.sys.includes(`${OWNER_NAME} 本人`), '系统提示词标明了对方是主人本人');
   check(!!pOwner?.sys.includes('同级口吻'), '要求用同级口吻');
   check(!!pOwner?.sys.includes('不用敬语'), '明确说了不用敬语');
   check(!!pOwner?.sys.includes('不是他的客服'), '明确说明对服主不是客服身份');
@@ -186,13 +193,21 @@ async function main() {
   };
   const ownerInjected = injected(pOwner);
   check(!!ownerInjected, '身份段落存在');
-  check(ownerInjected.includes('<主人> 本人'), '身份段落明确了对方就是服主本人');
-  // 2026-09-13 用户要求：平时直接叫 <主人>，「服主」只在说服务器事务时用
-  check(ownerInjected.includes('平时') && ownerInjected.includes('叫「<主人>」'), '身份段落交代了称呼规则（平时叫 <主人>）');
-  check(ownerInjected.includes('服务器事务'), '身份段落限定了「服主」这个称呼的使用场合');
+  check(ownerInjected.includes(`${OWNER_NAME} 本人`), '身份段落明确了对方就是主人本人');
+  // ⚠️ 2026-09-28：称呼规则从「平时叫 X、服务器事务才叫服主」**统一成只有一种**。
+  //    下面两条盯的是"只有一种叫法 + 不再出现旧叫法"，别再写死具体措辞。
+  check(
+    ownerInjected.includes('任何场合都叫') && ownerInjected.includes(`叫「${OWNER_NAME}」`),
+    '身份段落交代了称呼规则（任何场合都叫同一个名字）',
+  );
+  check(!ownerInjected.includes('服主'), '身份段落不再出现旧叫法「服主」');
+  check(!ownerInjected.includes('<主人>'), '身份段落没有占位符残留（会被模型照着吐出来）');
   check(!ownerInjected.includes('可以端着一点'), '身份段落没有套用「允许端着」那套');
   check(ownerInjected.includes('不要端着'), '身份段落明确说了不要端着');
-  check(ownerInjected.includes('不要对他说「你找茏或者 <主人>」'), '身份段落禁止让服主去找自己');
+  check(
+    ownerInjected.includes('不要对他说') && ownerInjected.includes(OWNER_NAME),
+    '身份段落禁止让主人去找自己',
+  );
 
   console.log('\n[2] 普通群友说话 → 应该允许端着、可以怼');
   say(MEMBER, 'member', '服务器怎么进啊烦死了', 4002);
@@ -251,7 +266,43 @@ async function main() {
   //       也会让数量变多，同样会提前放开。
   await waitFor(() => !!probeOf('在吗，问个事'), 20000);
   const pPrivate = probeOf('在吗，问个事');
-  check(!!pPrivate?.sys.includes('普通群友'), '私聊里的陌生人按群友对待');
+  // ⚠️⚠️ 2026-10-04 这几条断言**跟着 `attitudeFor()` 的改动一起改的**。
+  //
+  //  原来这里断言「私聊里的陌生人按**群友**对待」—— 那是把私聊说成群聊的根源：
+  //  `speakerRole()` 私聊恒返回 `'member'` ⇒ 私聊拿到的是「普通群友」那段。
+  //  真实事故：她在私聊里脑补「这是你自己另一个号发的」，还拿人设怼他。
+  //  现在私聊有**自己的一档**：身份只认当前事件的 `user_id`，且明确「只有一个发件人」。
+  // ⚠️⚠️ 2026-10-04：断言也跟着「统一格式」改了。
+  //  以前身份块写的是 `昵称（QQ 号）`（**全角**），现在全项目统一 `昵称(QQ号)`（半角），
+  //  跟群上下文/引用行完全一致 —— 所以这里不能再找 `QQ 30001` 那种字样，
+  //  要找统一的 `昵称(QQ号)` 形态。
+  check(
+    !!pPrivate?.sys.includes(`${MEMBER_NAME}(${MEMBER})`),
+    '私聊身份块用统一格式 `昵称(QQ号)`（模型不用猜他是谁）',
+  );
+  check(
+    !pPrivate?.sys.includes(`${MEMBER_NAME}（QQ ${MEMBER}）`),
+    '私聊身份块不再用全角括号（旧格式已清干净）',
+  );
+  check(
+    !!pPrivate?.sys.includes('私聊里只有他一个人'),
+    '私聊段明说只有一个发件人（不许脑补出第二个号）',
+  );
+  check(
+    !!pPrivate?.sys.includes('## 现在跟你私聊的是：'),
+    '私聊用的是私聊自己的身份段（不是群聊那段）',
+  );
+  // ⚠️ 只查**身份段本身**，别查整个 sys —— 人设/知识库里本来就有
+  //    「对普通群友的规矩」这类文字（那是她的说话方式，与当前场景无关）。
+  const privIdBlock = (pPrivate?.sys ?? '').split('## 现在跟你私聊的是：')[1] ?? '';
+  check(
+    !privIdBlock.slice(0, 200).includes('普通群友'),
+    '私聊身份段没把对方说成「普通群友」',
+  );
+  check(
+    !!pPrivate?.sys.includes('永远要给解决方案'),
+    '陌生人私聊的语气要求没丢（仍可端着、必须给方案）',
+  );
 }
 
 async function cleanup() {

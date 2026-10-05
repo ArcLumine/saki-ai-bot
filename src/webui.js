@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 
-import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, paramsFor, personaDir, personaId, thinkingField } from './config.js';
+import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, SAFETY_DIR, paramsFor, personaDir, personaId, thinkingField } from './config.js';
 import { log } from './log.js';
 import { ping } from './llm.js';
 // 生图（群里说的「拍个照」）—— 界面上的「测试生图」用它，见下面 /api/imagegen/test
@@ -43,6 +43,9 @@ import QR from 'qrcode';
 import { listEntries } from './learned.js';
 import { faceTags, reload as reloadFaces } from './faces.js';
 import { hasKnowledge, reloadKnowledge, knowledgeText } from './knowledge.js';
+// ⚠️ 2026-09-28：/api/knowledge/verify 判敏感词库时要用（词典按需注入，
+//    判据改成"总规则在不在里面" —— 见那个 handler 里的注释）
+import { sensitiveRules } from './sensitive.js';
 import * as life from './life.js';
 import * as persona from './persona.js';
 import * as personaAdmin from './persona-admin.js';
@@ -54,8 +57,9 @@ import * as friend from './friend.js';
 import * as affinity from './affinity.js';
 import * as names from './names.js';
 import { streamChat } from './llm.js';
-// ⚠️ `learned.md` 的格式校验 —— 它由代码解析维护，界面上直接改必须过这一关
-import { validateFile as learnedValidate } from './learned.js';
+// ⚠️ 学习档案（`global.md` / `groups/<群号>.md` / `dm/<QQ号>.md`）的格式校验 ——
+//    它由代码解析维护，界面上直接改必须过这一关
+import { validateFile as learnedValidate, listEntries as learnedList } from './learned.js';
 import * as qzone from './qzone.js';
 import * as qzoneCompose from './qzone-compose.js';
 
@@ -173,9 +177,17 @@ export function __withSandboxForTest(fn) {
 
 const LIB = join(ROOT, 'library');
 const KNOW = KNOWLEDGE_DIR;
+/**
+ * `safety/` —— **敏感词库（软层）现在住这儿**（2026-09-29 从 `knowledge/sensitive/` 搬来）。
+ *
+ * ⚠️ 只用来解析 `sensitive/<名>.md` 那一个子目录：`safety/` **根目录**那三个 md
+ *    是**硬拦截规则**，界面**不提供编辑**（那是"代码开关"，随便改会改掉机器人的红线，
+ *    而且改了不重启不生效，最容易变成"我明明改了它没反应"）。
+ */
+const SAFE = SAFETY_DIR;
 
 /**
- * 知识文件的真实路径：**人设包优先，其次共用库**（2026-09-21 加）。
+ * 知识文件的真实路径：**敏感词库走 safety/，人设包优先，其次共用库**（2026-09-21 加）。
  *
  * ⚠️ 人设的 md（`persona.md` / `persona-money.md` / `persona-media.md` / `voices.md`…）
  *    搬到了 `personas/<id>/`，理由见 `knowledge.js` 里那段注释。
@@ -183,10 +195,22 @@ const KNOW = KNOWLEDGE_DIR;
  *    这样人设包以后多出什么文件，界面自动就能编辑，不用改代码。
  * ⚠️ `personaDir()` 从 `knowledge.js` 拿 —— **别在这儿再实现一遍**（两份逻辑会漂移，
  *    那种 bug 最难查：界面上看到的是 A 文件，机器人加载的是 B 文件）。
+ * ⚠️ 2026-09-29：**读和写都走这里**（GET / POST 各一处调用），所以"敏感词库搬家"
+ *    只要在这儿加一个分支就够 —— 别去改那两处调用点。
  */
 function knowPath(name) {
-  const p = join(personaDir(), name);
-  return existsSync(p) ? p : join(KNOW, name);
+  const s = String(name ?? '');
+  if (s.startsWith('sensitive/')) return join(SAFE, s);
+  // ⚠️ 2026-09-30：人设「共用层」`personas/_shared/`（说话方式，所有角色共用）。
+  //    ⚠️ 在**顶层**而不是 `personas/<id>/_shared/` —— 它不属于任何一个人设包，
+  //    放进人设包会在切角色时跟着消失（而且不报错）。
+  //    相对名 `_shared/<名>.md`；`knowPath()` 那侧负责还原真实路径。
+  if (s.startsWith('_shared/')) {
+    const rest = s.slice('_shared/'.length);
+    return join(personaDir(), '..', '_shared', rest);
+  }
+  const p = join(personaDir(), s);
+  return existsSync(p) ? p : join(KNOW, s);
 }
 
 const MIME = {
@@ -240,6 +264,12 @@ function safeKnowName(raw) {
   const s = String(raw ?? '').trim().replace(/\\/g, '/');
   if (s.includes('..')) return '';
   if (/^groups\/\d+\.md$/.test(s)) return s;
+  // ⚠️ 2026-09-27（B 方案）：私聊记忆也是活文件，跟 `groups/` 对称要能读能写 ——
+  //    少了这条，界面上能改群资料却改不了私聊档案，会显得很随意（而且都是 `\d+.md`，没安全差别）
+  if (/^dm\/\d+\.md$/.test(s)) return s;
+  // ⚠️ 2026-09-28：观察记忆目录 `observe/`（群观察 + `dm-<QQ号>.md` 私聊观察）。
+  //    跟 `groups/` `dm/` 对称，界面上要能读能写（同样是活文件）。
+  if (/^observe\/(?:\d+|dm-\d+|_shared)\.md$/.test(s)) return s;
   if (/^anime\/[\w.-]+\.md$/.test(s)) return s;
   if (/^sensitive\/[\w.-]+\.md$/.test(s)) return s;
   return /^[\w.-]+\.md$/.test(s) ? s : '';
@@ -261,6 +291,29 @@ function readBody(req, limit = MAX_UPLOAD) {
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+/**
+ * 读一个 JSON 请求体。
+ *
+ * ⚠️ 为什么要单独包一层（2026-09-29）：
+ *    原来 20 多个路由各写各的 `await jsonBody(req)`，
+ *    **这行在各自的 try 外面** —— 请求体格式不对时，异常一路冒到 createServer
+ *    的兜底 catch，那里统一返回 **500**。可「你发过来的 JSON 写错了」明明是
+ *    400 类的问题（请求本身不对），500 会让调用方以为是自己程序崩了。
+ *    这里抛出的错带 `badBody` 标记，由 createServer 的 catch 认出来返 400。
+ *
+ * 空 body 仍按 `{}` 处理（跟原来的 `|| '{}'` 一致），不报错。
+ */
+async function jsonBody(req) {
+  const raw = (await readBody(req)).toString('utf8').trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    const err = new Error(`请求体不是合法 JSON: ${e.message}`);
+    err.badBody = true;
+    throw err;
+  }
 }
 
 // ── 配置：读写 ────────────────────────────────────────
@@ -297,9 +350,20 @@ function configForUi() {
     //    和 `saveConfig` 里那行 `put('groupParams', …)` 是**一对**，别只加一个
     //    （这个文件里"存得进去、显示不出来"的坑踩过一次，见上面 `chat` 那段注释）。
     groupParams: JSON.parse(JSON.stringify(config.groupParams ?? {})),
+    // ⚠️ 2026-09-30：骰娘模式（进入后只应答骰点）。和 saveConfig 里那行 `put('diceMode', …)`
+    //    是**一对**，别只加一个（这个文件里"存得进去、显示不出来"的坑踩过一次，见 chat 那段注释）。
+    //    ⚠️ `sealdice` 不在这里暴露 `token` —— 那是本机密钥，界面不需要显示也不该显示。
+    diceMode: {
+      ...config.diceMode,
+      enterKeys: [...(config.diceMode?.enterKeys ?? [])],
+      exitKeys: [...(config.diceMode?.exitKeys ?? [])],
+      skipDiceKeys: [...(config.diceMode?.skipDiceKeys ?? [])],
+    },
     ownerQQ: config.ownerQQ,
     /** 机器人自己的号（用来做快速登录、页面上显示） */
     botQQ: config.botQQ,
+    /** ⚠️ 2026-09-28：主人的各种叫法（**识别用**）。和人设页那两个是一对，别只加一个。 */
+    ownerAliases: [...(config.ownerAliases ?? [])],
     logLevel: config.logLevel,
   };
 }
@@ -333,6 +397,10 @@ function saveConfig(patch) {
   put('quest', patch.quest);
   put('affinity', patch.affinity);
   put('friend', patch.friend);
+  // ⚠️ 2026-09-30：骰娘模式 —— 和 configForUi 里那几行是**一对**，别只加一个
+  //    （那个文件里的注释写得很清楚："存得进去、显示不出来"的坑踩过一次）。
+  //    ⚠️ **不要**在这里写 `sealdice.token` —— 那是本机密钥，界面只用来填触发词。
+  put('diceMode', patch.diceMode);
   // ⚠️⚠️ 2026-09-22 加：**`persona`**（人设包 id）。
   //    踩到的：这一行原来没有它 ⇒ `POST /api/persona/switch` 里那句
   //    `saveConfig({ persona: { id } })` **什么也没发生**，而接口照样返回
@@ -350,6 +418,9 @@ function saveConfig(patch) {
   put('groupParams', patch.groupParams);
   if (patch.ownerQQ !== undefined) raw.ownerQQ = patch.ownerQQ;
   if (patch.botQQ !== undefined) raw.botQQ = patch.botQQ;
+  // ⚠️ 2026-09-28：主人的各种叫法（数组，空数组 = 清空）。
+  //    界面在「模型（主人 / 机器人）」页那张「身份」卡里填，和 `ownerQQ` 一起提交。
+  if (patch.ownerAliases !== undefined) raw.ownerAliases = patch.ownerAliases;
   if (patch.logLevel !== undefined) raw.logLevel = patch.logLevel;
 
   // ⚠️⚠️ 2026-09-22 加：**白名单外的顶层键要吵出来**。
@@ -358,7 +429,10 @@ function saveConfig(patch) {
   const HANDLED = new Set([
     'llm', 'onebot', 'trigger', 'context', 'qzone', 'status', 'faces', 'chat', 'attitude',
     'teach', 'chunking', 'webui', 'life', 'quest', 'affinity', 'friend', 'persona',
-    'imagegen', 'groupParams', 'ownerQQ', 'botQQ', 'logLevel',
+    'imagegen', 'groupParams', 'ownerQQ', 'botQQ', 'ownerAliases', 'logLevel',
+    // ⚠️ 2026-09-30：骰娘模式。**漏了它这里会吵一行 warn** —— 那是故意的，
+    //    比"界面保存了但没写进 yaml、看着像没生效"好查得多。
+    'diceMode',
   ]);
   for (const k of Object.keys(patch ?? {})) {
     if (!HANDLED.has(k)) log.warn(`saveConfig 收到没处理的字段「${k}」—— 白名单里没有它，这次它**不会被写进 config.yml**`);
@@ -381,7 +455,9 @@ function saveConfig(patch) {
     'attitude',
     'life',
     'quest',
+    'diceMode',
     'ownerQQ',
+    'ownerAliases',
     'botQQ',
     'adminQQ',
     'logLevel',
@@ -509,6 +585,39 @@ async function applyPersonaQQ(id) {
   return out;
 }
 
+/**
+ * 学习档案**所有 scope** 的条目（★ 2026-09-27 B 方案）。
+ *
+ * 原来只有 `learned.md` 一个文件，`listEntries()` 就够了；现在分成了
+ * `global.md` + `groups/<群号>.md` + `dm/<QQ号>.md` 三层，界面上的
+ * 「学到 N 条」和「主题列表」得把三层都数上 —— 否则群友教的东西会
+ * 在界面上**凭空消失**（人会以为"教了没记住"）。
+ *
+ * ⚠️ 只读**有 LEARNED 区**的文件：observe 建的那批 `groups/*.md` 里没有标记区，
+ *    `learnedList()` 对它们返回空数组，天然被跳过，不用先判断。
+ *
+ * @returns {{title:string, scope:string}[]}
+ */
+function allLearned() {
+  const out = [];
+  const grab = (scope) => {
+    for (const e of learnedList(scope)) out.push({ title: e.title, scope });
+  };
+  grab('global');
+  for (const [dir, prefix] of [
+    ['groups', 'group:'],
+    ['dm', 'dm:'],
+  ]) {
+    const abs = join(KNOW, dir);
+    if (!existsSync(abs)) continue;
+    for (const f of readdirSync(abs)) {
+      if (!f.toLowerCase().endsWith('.md')) continue;
+      grab(prefix + f.replace(/\.md$/i, ''));
+    }
+  }
+  return out;
+}
+
 const routes = {
   'GET /api/state': async (_req, res) => {
     const data = await queryServer(config.status.host, 0).catch((e) => ({ ok: false, error: e.message }));
@@ -518,10 +627,13 @@ const routes = {
       problems: validate(),
       stats: {
       faces: faceTags().length,
-        learned: listEntries().length,
+        learned: allLearned().length,
         knowledge: hasKnowledge(),
       },
-      learnedTopics: listEntries().map((e) => e.title),
+      // ⚠️ 三层合并（B 方案）。**保持 `string[]`** —— 界面 `learnedFilter()` 是按
+      //    `String(t)` 过滤的，塞对象进去会让搜索变成 `[object Object]`（改字段形状之前
+      //    先看了 `src/webui.html:5080`，这里别自作聪明升级成对象）。
+      learnedTopics: allLearned().map((e) => e.title),
       faces: facesWithMeta(),
       // ── 日常事件（一级）给界面的快照 ──
       // ⚠️ 2026-09-16：`status` / `plan` 是**按群**的（`st` 分桶了）。
@@ -539,7 +651,7 @@ const routes = {
   },
 
   'POST /api/config': async (req, res) => {
-    const patch = JSON.parse((await readBody(req)).toString('utf8'));
+    const patch = await jsonBody(req);
     try {
       saveConfig(patch);
       send(res, 200, { ok: true, config: configForUi(), problems: validate() });
@@ -551,7 +663,7 @@ const routes = {
   /** 测试模型连通性（用界面当前填的值，不落盘） */
   /** 列出 API 上可用的模型（用于界面上的模型下拉框） */
   'POST /api/models': async (req, res) => {
-    const t = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const t = await jsonBody(req);
     // 界面上可能改了 baseURL / apiKey 还没保存，所以以传来的为准
     const baseURL = String(t.baseURL ?? config.llm.baseURL ?? '').replace(/\/+$/, '');
     const apiKey = String(t.apiKey ?? config.llm.apiKey ?? '');
@@ -584,7 +696,7 @@ const routes = {
   },
 
   'POST /api/test-llm': async (req, res) => {
-    const t = JSON.parse((await readBody(req)).toString('utf8'));
+    const t = await jsonBody(req);
     const saved = { ...config.llm };
     if (t.llm) Object.assign(config.llm, t.llm);
     const started = Date.now();
@@ -609,7 +721,7 @@ const routes = {
    *    所以把"看起来是生图的"排到前面 —— 界面用 `<datalist>`，打字时浏览器自己会过滤。
    */
   'POST /api/imagegen/models': async (req, res) => {
-    const t = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const t = await jsonBody(req);
     const over = t.imagegen ?? {};
     const pre = imagegen.presets(over);
     const baseURL = String(over.baseURL ?? '').trim().replace(/\/+$/, '') || pre.baseURL;
@@ -666,7 +778,7 @@ const routes = {
    * ⚠️ 只动 `library/photo/`；`library/` 根目录是**表情库**，绝不碰。
    */
   'POST /api/imagegen/cache': async (req, res) => {
-    const t = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const t = await jsonBody(req);
     const keepHours = Number(config.imagegen?.keepHours ?? 24);
     if (t.dryRun) {
       const s = imagegen.sweep(Number.MAX_SAFE_INTEGER);
@@ -692,7 +804,7 @@ const routes = {
    * 用户点一下就能判断「像不像她」—— 这比任何 ping 都有信息量。
    */
   'POST /api/imagegen/test': async (req, res) => {
-    const t = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const t = await jsonBody(req);
     if (!imagegen.ready(t.imagegen).ok) {
       const why = imagegen.ready(t.imagegen).why;
       return send(res, 200, { ok: false, reason: 'off', error: why, hint: imagegen.hint('off') });
@@ -767,7 +879,7 @@ const routes = {
   },
 
   'POST /api/faces': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
 
     if (b.action === 'delete') {
       const idx = readIndex();
@@ -1178,7 +1290,7 @@ const routes = {
   'POST /api/autostart': async (req, res) => {
     let body = {};
     try {
-      body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      body = await jsonBody(req);
     } catch { /* body 坏了就当查询，下面按 falsy 处理 */ }
     try {
       const st = body.enabled ? autostart.enable() : autostart.disable();
@@ -1209,7 +1321,7 @@ const routes = {
   'POST /api/life/preview': async (req, res) => {
     let gid = '';
     try {
-      const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const b = await jsonBody(req);
       gid = String(b?.groupId ?? '').trim() || String(b?.group_id ?? '').trim();
     } catch {}
     const p = await life.preview(Date.now(), gid).catch((e) => ({ ok: false, reason: e.message }));
@@ -1239,7 +1351,7 @@ const routes = {
     let srcNote = '';
     let gid = '';
     try {
-      const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const b = await jsonBody(req);
       gid = String(b?.groupId ?? '').trim();
       if (b && b.preview && typeof b.preview === 'object') pre = b.preview;
     } catch {}
@@ -1343,7 +1455,7 @@ const routes = {
    * ⚠️ **必须给 groupId** —— 分群之后"压哪个群"没有默认值，界面上是每行一个按钮。
    */
   'POST /api/storyline/compress': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const gid = String(b.groupId ?? '').trim();
     if (!gid) return send(res, 200, { ok: false, error: '要指定是哪个群（故事线是按群存的）' });
     const r = await storyline.compress({ groupId: gid, force: b.force !== false });
@@ -1378,7 +1490,7 @@ const routes = {
   },
 
   'POST /api/group-params': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const gid = String(b.groupId ?? '').trim();
     if (!gid) return send(res, 200, { ok: false, error: '要指定是哪个群' });
     // ⚠️⚠️ **只有 1 档群才进事件系统**（<主人> 2026-09-15：「挡位 2 不能进事件系统，只有 1 才能设置」）。
@@ -1390,7 +1502,7 @@ const routes = {
         ok: false,
         error:
           `群 ${gid} 不是 1 档群（当前档位 ${lv ?? '没配'}）→ **不进事件系统**，` +
-          '设了也不会生效。想让它收日常事件/跑剧情，先去「群与触发」把档位改成 1。',
+          '设了也不会生效。想让它收日常事件/跑剧情，先去「活跃度」把档位改成 1。',
       });
     }
     const raw = yaml.load(readFileSync(CONFIG_FILE, 'utf8')) ?? {};
@@ -1429,7 +1541,7 @@ const routes = {
    *    `groupId` 空着 = 存那份**全局兜底**（老页面不传群号时走这条，不至于报错）。
    */
   'POST /api/quest/hint': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const gid = String(b.groupId ?? '').trim();
     const text = quest.setNextHint(b.text, gid);
     log.info(`管理界面设置了"下次二级事件"的自定义内容（${gid ? `群 ${gid}` : '全局兜底'}）：${text ? text.slice(0, 40) : '(清空)'}`);
@@ -1442,7 +1554,7 @@ const routes = {
    * ⚠️ 这是会真的往群里发消息的 —— 界面上必须写清楚。
    */
   'POST /api/quest/start': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     // ⚠️ **只有 1 档群才进事件系统**（<主人> 2026-09-15：「挡位 2 不能进事件系统，只有 1 才能设置」）
     const groups = life.targetGroups();
     if (!groups.length) return send(res, 200, { ok: false, error: '没有 1 档群，不知道发哪儿（只有 1 档群会进事件系统）' });
@@ -1458,7 +1570,7 @@ const routes = {
     if (!life.isEventGroup(gid)) {
       return send(res, 200, {
         ok: false,
-        error: `群 ${gid} 不是 1 档群 → 不进事件系统（档位在「群与触发」里改成 1 才能设置）`,
+        error: `群 ${gid} 不是 1 档群 → 不进事件系统（档位在「活跃度」里改成 1 才能设置）`,
       });
     }
     // ⚠️ `manual: true` → 人在界面上主动点的：**不受总开关和每周上限限制**
@@ -1504,7 +1616,7 @@ const routes = {
    *    不然"回复她"判据和好感度结算都会断）。
    */
   'POST /api/quest/next': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const b = await jsonBody(req);
     const gid = String(b.groupId ?? '').trim();
     if (!gid) return send(res, 200, { ok: false, error: '要推哪个群的剧情？（groupId）' });
     const q = quest.current(gid);
@@ -1578,7 +1690,7 @@ const routes = {
   'POST /api/quest/reset': async (req, res) => {
     let gid = '';
     try {
-      const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const b = await jsonBody(req);
       gid = String(b.groupId ?? '').trim();
     } catch {}
     const what = gid ? `群 ${gid}` : '所有群';
@@ -1599,7 +1711,7 @@ const routes = {
 
   /** 「自动生成并填充并开始剧情」/「立即用自定义内容开始剧情」 */
   'POST /api/quest/sim/start': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const hint = String(b.text ?? '').trim();
     simReset();
     const r = await withSandbox(() =>
@@ -1620,7 +1732,7 @@ const routes = {
    * `reply` 非空 → 先把"群友这句话"记进去（走和真群一样的 `isPlotReply` 判定）。
    */
   'POST /api/quest/sim/next': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     if (!sim.quest) return send(res, 200, { ok: false, error: '还没有在跑的模拟剧情' });
     const reply = String(b.reply ?? '').trim();
     const name = String(b.name ?? '').trim() || '模拟群友';
@@ -1700,7 +1812,7 @@ const routes = {
    * ⚠️ 测试**不记账**（不 markNoticed）—— 不然你测一次，真到 90 的时候就不发了。
    */
   'POST /api/friend/test-notice': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const uid = String(b.userId ?? '').trim();
     const gid = String(b.groupId ?? '').trim() || life.targetGroups()[0];
     if (!uid) return send(res, 200, { ok: false, error: '要填一个 QQ 号' });
@@ -1718,7 +1830,7 @@ const routes = {
 
   /** 预览一条主动私聊会说什么（**不发**） */
   'POST /api/friend/preview-dm': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const uid = String(b.userId ?? '').trim();
     if (!uid) return send(res, 200, { ok: false, error: '要填一个 QQ 号' });
     const text = await friend.composeDm(uid).catch((e) => '');
@@ -1728,7 +1840,7 @@ const routes = {
 
   /** 真的发一条主动私聊（**会真的发出去**） */
   'POST /api/friend/send-dm': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const uid = String(b.userId ?? '').trim();
     if (!uid) return send(res, 200, { ok: false, error: '要填一个 QQ 号' });
     if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
@@ -1788,7 +1900,7 @@ const routes = {
 
   // 设置某个群的灵敏度；level 传 0 表示「跟随全局」（删掉覆盖）
   'POST /api/qq/group-respond': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const gid = String(b.groupId ?? '').trim();
     if (!/^\d+$/.test(gid)) return send(res, 400, { ok: false, error: '群号不合法' });
     const raw = config.trigger.groupRespondTo ?? {};
@@ -1815,7 +1927,7 @@ const routes = {
    *    前端轮询着调，每批做完显示进度，别让一个请求挂几分钟。
    */
   'POST /api/faces/annotate': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const b = await jsonBody(req);
     const batch = Math.min(20, Math.max(1, Number(b.batch) || 10));
 
     const idx = readIndex();
@@ -1851,12 +1963,15 @@ const routes = {
     try {
       const inMem = knowledgeText();
       const rootFiles = readdirSync(KNOW).filter(
-        (n) => n.endsWith('.md') && n.toLowerCase() !== 'learned.md',
+        // ⚠️ 学习档案**不参与**这个一致性比对（B 方案：`global.md`；老布局还有 `learned.md`）
+        //    —— 它由 `learnedText()` 单独读盘注入，不走内存里那份 `knowledgeText()` 快照。
+        (n) => n.endsWith('.md') && n.toLowerCase() !== 'learned.md' && n.toLowerCase() !== 'global.md',
       );
-      // 敏感词库在独立子目录里，根目录 readdir 看不见它 —— 校验时必须补上，
+      // 敏感词库在**独立目录**里（`safety/sensitive/`，2026-09-29 从 knowledge/ 搬走），
+      // 根目录 readdir 看不见它 —— 校验时必须补上，
       // 否则 sensitive/ 改了但内存没跟上，接口也会误报"一致"。
       const sensitiveNames = (() => {
-        const dir = join(KNOW, 'sensitive');
+        const dir = join(SAFE, 'sensitive');
         if (!existsSync(dir)) return [];
         return readdirSync(dir)
           .filter((n) => n.endsWith('.md'))
@@ -1864,8 +1979,38 @@ const routes = {
       })();
       const names = [...rootFiles, ...sensitiveNames];
       const mismatched = [];
+      // ⚠️ 敏感词库：判据是**总规则那一节的每一行**在不在 `sensitiveRules()` 里 ——
+      //    词典那部分**故意不在** `knowledgeText()`（2026-09-28 改成撞库），
+      //    拿"整份内容在内存里"去判会永远误报"不一致"。
+      // ⚠️⚠️ 2026-09-29 修（既有 bug，跟词库搬家无关）：原来这里拿
+      //    `disk.slice(0, 40)`（文件头 H1 + 前言）去撞 `sensitiveRules()`，
+      //    而后者**只抽 `## 总规则` 一节** ⇒ 文件头永远不在里面
+      //    ⇒ 这条判据**结构上永远为假**，接口恒报"不一致"。
+      //    正确判据：切出磁盘上「总规则」那一节的**正文行**（标题行不算），逐行比对。
+      const rulesSectionLines = (text) => {
+        const ls = text.replace(/<!--[\s\S]*?-->/g, '').split(/\r?\n/); // 解析时丢 HTML 注释，比对前也丢
+        const start = ls.findIndex((l) => {
+          const h = l.match(/^##\s+(.+?)\s*$/);
+          return h && /总规则/.test(h[1]);
+        });
+        if (start < 0) return [];
+        const out = [];
+        for (let i = start + 1; i < ls.length; i++) {
+          if (/^##\s+/.test(ls[i])) break; // 下一个 `## ` = 这一节结束了
+          const t = ls[i].trim();
+          if (t) out.push(t); // 解析器存进 body 的就是 trim 后的行
+        }
+        return out;
+      };
       for (const n of names) {
-        const disk = readFileSync(join(KNOW, n), 'utf8').trim();
+        const disk = readFileSync(n.startsWith('sensitive/') ? join(SAFE, n) : join(KNOW, n), 'utf8').trim();
+        if (n.startsWith('sensitive/')) {
+          const lines = rulesSectionLines(disk);
+          const rules = sensitiveRules();
+          // 三种不一致：规则解析为空、磁盘上没有「总规则」那一节、那一节的行对不上
+          if (!rules || !lines.length || !lines.every((l) => rules.includes(l))) mismatched.push(n);
+          continue;
+        }
         const probe = disk.slice(0, 60); // 取开头一段做特征
         if (probe && !inMem.includes(probe)) mismatched.push(n);
       }
@@ -1896,12 +2041,22 @@ const routes = {
       'life-events.md': '一级日常事件库（她一天里会遇到哪些小事）· **角色专属**',
       'quest-ideas.md': '剧情素材池（二级主线的点子）· **角色专属**',
       'hzymtr-server.md': '服务器知识库（进服、排障、规则、存档）',
-      'group-memory.md': '群资料库（群友是谁、什么性格、群里的大事）',
+      'observe/': '★ 群观察（这个群自己暗中攒的：群友性格、群里的大事）· **只在这个群注入**',
       'sensitive/sensitive-words.md':
         '敏感词库（全局注入）：认出雷点后**只认不接**，不重复、不引申、不顺着说',
-      'learned.md':
-        '学习档案（群里「记住：…」教的短知识，优先级最高）。⚠️ 格式有要求：每条必须是 `## 主题` 开头，' +
-        '而且要保留 `<!-- LEARNED:BEGIN -->` / `END` 两行标记 —— 保存时会校验，不合格会拒绝保存',
+      // ⚠️ 2026-09-30：人设「共用层」`_shared/<名>.md`。
+      //    说明挂在这张表里而不是 `mk()` 的参数上 —— `mk()` 只有 4 个形参，
+      //    多传会被静默忽略（写的时候看着像生效了，其实没有）。
+      //    ⚠️ 这条描述是**唯一**告诉人「该改哪」的地方，别删。
+      '_shared/style.md':
+        '★ **人设共用层**（说话的方式 / 行为边界 / 群私切换 / 知识纪律）：' +
+        '**所有角色都读这一份**，换角色不用重写。' +
+        '⚠️ 它跟 `persona.md` 的区别：那边写「**她是谁**」，这边写「**怎么扮演**」。',
+      'global.md':
+        '★ 全局学习档案（**主人**教的，所有群 + 所有私聊都读，优先级最高）。' +
+        '格式有硬要求：每条必须是 `## 主题` 开头，还要保留 `<!-- LEARNED:BEGIN -->` / `END` 两行标记 —— 保存时会校验，不合格会拒绝。' +
+        '（⚠️ 群友教的不在这里，在 `groups/<群号>.md` 里，只在那个群算数）',
+      'learned.md': '学习档案（**已废弃**：2026-09-27 起分层为 `global.md` + `groups/` + `dm/`，这里是老布局遗留）',
     };
     try {
       // ⚠️ 动画库的名字**不能写死在这张表里** —— 库名是人设声明的（`anime/<库名>.md`），
@@ -1935,6 +2090,18 @@ const routes = {
           files.push(mk(pdir, n, 'persona'));
         }
       }
+      // ⚠️ 2026-09-30：人设「共用层」`personas/_shared/`（说话方式，所有角色共用）。
+      //    ⚠️ **顶层**目录（`join(pdir, '..', '_shared')`），不在人设包里 ——
+      //    它不属于任何角色，切角色时不动；放包里会跟着消失且不报错。
+      try {
+        const shdir = join(pdir, '..', '_shared');
+        if (existsSync(shdir)) {
+          for (const n of readdirSync(shdir)) {
+            if (!n.endsWith('.md')) continue;
+            files.push(mk(shdir, n, 'persona', `_shared/${n}`));
+          }
+        }
+      } catch {}
       for (const n of readdirSync(KNOW)) {
         if (!n.endsWith('.md')) continue;
         // ⚠️ 人设包里已经有同名的 ⇒ 跳过。界面上只显示**真正生效**的那一份 ——
@@ -1942,9 +2109,10 @@ const routes = {
         if (inPersona.has(n.toLowerCase())) continue;
         files.push(mk(KNOW, n, 'knowledge'));
       }
-      // ⚠️ 敏感词库（`sensitive/<文件名>.md`）：和共用库分开放，界面单独一组。
+      // ⚠️ 敏感词库（`sensitive/<文件名>.md`）：2026-09-29 起住在 `safety/sensitive/`
+      //    （跟硬拦截规则同一个家）。界面上照旧**单独一组**，相对名没变。
       try {
-        const sdir = join(KNOW, 'sensitive');
+        const sdir = join(SAFE, 'sensitive');
         if (existsSync(sdir)) {
           for (const n of readdirSync(sdir)) {
             if (!n.endsWith('.md')) continue;
@@ -1968,6 +2136,36 @@ const routes = {
               size: (() => {
                 try {
                   return readFileSync(join(gdir, n), 'utf8').length;
+                } catch {
+                  return 0;
+                }
+              })(),
+            });
+          }
+        }
+      } catch {}
+      // ⚠️ 观察记忆（`observe/<群号>.md` / `observe/dm-<QQ号>.md`）也要列出来。
+      //    2026-09-28 从"学到的知识"里拆出来之后，这就是它的正式入口 ——
+      //    不列的话界面上根本看不到她对某个群观察到了什么。
+      try {
+        const odir = join(KNOW, 'observe');
+        if (existsSync(odir)) {
+          for (const n of readdirSync(odir)) {
+            if (!n.endsWith('.md')) continue;
+            const isDm = /^dm-\d+$/.test(n.replace(/\.md$/i, ''));
+            const who = isDm ? n.replace(/^dm-|\.md$/gi, '') : n.replace(/\.md$/i, '');
+            files.push({
+              name: `observe/${n}`,
+              desc: isDm
+                ? `私聊观察 · **只跟 QQ ${who} 私聊时注入**（机器人自己暗中攒的，会被整块覆盖）`
+                : who === '_shared'
+                  ? '观察 · ⚠️ **认不出属于谁时的兜底**，不会有群读到它（正常情况下不该存在）'
+                  : `群观察 · **只给群 ${who} 用**（机器人自己暗中攒的，会被整块覆盖）`,
+              readonly: false,
+              groupId: isDm ? '' : who,
+              size: (() => {
+                try {
+                  return readFileSync(join(odir, n), 'utf8').length;
                 } catch {
                   return 0;
                 }
@@ -2004,7 +2202,7 @@ const routes = {
       } catch {}
       // ⚠️ 动画库的名字是人设声明的，写不进固定表 —— 这里现算一个顺序表。
       const animeNames = files.filter((f) => f.name.startsWith('anime/')).map((f) => f.name);
-      const order = ['persona.md', 'hzymtr-server.md', ...animeNames, 'group-memory.md'];
+      const order = ['persona.md', 'hzymtr-server.md', ...animeNames, 'observe/'];
       files.sort((a, b) => {
         // ⚠️ 人设包的排最前（那是"她是谁"、最常改），其次共用库
         const fa = a.from === 'persona' ? 0 : 1;
@@ -2018,6 +2216,9 @@ const routes = {
         const ia = order.indexOf(a.name);
         const ib = order.indexOf(b.name);
         if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+        // ★ B 方案：学习档案全局层排最后（跟老 `learned.md` 同一个位置，视觉上不跳）
+        if (a.name === 'global.md') return 1;
+        if (b.name === 'global.md') return -1;
         if (a.name === 'learned.md') return 1;
         if (b.name === 'learned.md') return -1;
         return a.name.localeCompare(b.name);
@@ -2031,7 +2232,7 @@ const routes = {
   /** 知识库页「新建动画库」：生成可编辑预览（AI 或手动模板），不直接写盘。 */
   'POST /api/knowledge/draft-anime': async (req, res) => {
     try {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const body = await jsonBody(req);
       const r = await personaDraft.draftAnimeLib(body, { signal: AbortSignal.timeout(180000) });
       send(res, 200, r);
     } catch (e) {
@@ -2046,7 +2247,7 @@ const routes = {
    */
   'POST /api/knowledge/create': async (req, res) => {
     try {
-      const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const b = await jsonBody(req);
       if (b.kind !== 'anime') return send(res, 400, { ok: false, error: '只支持新建动画库' });
       const name = String(b.name ?? '').trim();
       if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(name) || name.includes('..')) {
@@ -2085,30 +2286,38 @@ const routes = {
   },
 
   'POST /api/knowledge': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const b = await jsonBody(req);
     const name = safeKnowName(b.name);
     if (!name) return send(res, 400, { ok: false, error: '非法文件名' });
     const content = String(b.content ?? '');
     // 群资料库 / 敏感词库：目录可能还不存在（第一次给某个群建一份 / sensitive/ 被删过）
+    // ⚠️ 2026-09-29：敏感词库的目录在 `safety/` 下（`SAFE`），别在 `knowledge/` 里建空目录
     if (name.startsWith('groups/') || name.startsWith('sensitive/')) {
       try {
-        mkdirSync(join(KNOW, name.split('/')[0]), { recursive: true });
+        mkdirSync(join(name.startsWith('sensitive/') ? SAFE : KNOW, name.split('/')[0]), { recursive: true });
       } catch {}
     }
 
-    // ⚠️⚠️ `learned.md` **可以改了**（2026-09-14 用户要求：
-    //    「在群里一句一句修改还是有点麻烦」），但它**必须过格式校验** ——
-    //    这个文件是**代码在解析和维护**的（条目要 `## 主题`，还要 BEGIN/END 标记），
-    //    改坏了 `learn()` / `forget()` 会**静默失效**：
+    // ⚠️⚠️ 学习档案**可以改了**（2026-09-14 用户要求：「在群里一句一句修改还是有点麻烦」），
+    //    但它**必须过格式校验** —— 这类文件是**代码在解析和维护**的（条目要 `## 主题`，
+    //    还要 BEGIN/END 标记），改坏了 `learn()` / `forget()` 会**静默失效**：
     //    群主在群里说「记住：xxx」就没反应，而且很难查出原因。
     //    所以宁可拒绝保存并说清原因。
-    if (name === 'learned.md') {
+    //
+    // ★ 2026-09-27（B 方案）：判定从 `name === 'learned.md'` 换成
+    //    **「是全局层那两份」或「内容里带 LEARNED 标记」** ——
+    //    现在三份文件都可能带 LEARNED 区（`global.md` / `groups/<群号>.md` / `dm/<QQ号>.md`），
+    //    按文件名一个个列会漏（尤其是群友自己那份 groups 文件，界面上直接改很常见）；
+    //    而只看内容的话，全局层被人**把标记整段删光**反而不校验了 —— 所以两条件取或。
+    //    ⚠️ 前端 `kValidate()` 用的是同一个判据（`webui.html` 里），两边必须一起改。
+    const isGlobalScope = name === 'global.md' || name === 'learned.md';
+    if (isGlobalScope || content.includes('LEARNED:BEGIN') || content.includes('LEARNED:END')) {
       const v = learnedValidate(content);
       if (!v.ok) {
-        log.warn(`界面想保存 learned.md 但格式不合格：${v.error}`);
-        return send(res, 400, { ok: false, error: `learned.md 格式不合格：${v.error}` });
+        log.warn(`界面想保存 ${name} 但学习档案格式不合格：${v.error}`);
+        return send(res, 400, { ok: false, error: `学习档案格式不合格（${name}）：${v.error}` });
       }
-      log.info(`界面保存 learned.md（${v.entries} 条知识）`);
+      log.info(`界面保存学习档案 ${name}（${v.entries} 条知识）`);
     }
 
     // ⚠️ 改之前先备份（这台机器上没有 git，手滑改坏了没法回滚）
@@ -2218,7 +2427,7 @@ const routes = {
 
   /** 手动发一条说说（force=true 跳过素材量和时间窗限制） */
   'POST /api/qzone/post': async (req, res) => {
-    const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const b = await jsonBody(req);
     try {
       if (b.content) {
       // 直接在界面上写好内容，跳过模型生成
@@ -2288,7 +2497,7 @@ const routes = {
 
   'POST /api/persona': async (req, res) => {
     try {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const body = await jsonBody(req);
       const saved = personaAdmin.saveIdentity(body.id, body.identity);
       // 改的是**当前正在用的**这个包 ⇒ 立刻热重载（存完就生效，不用重启）
       const reloaded = String(body.id) === personaId() ? (persona.reload(), reloadKnowledge()) : null;
@@ -2309,7 +2518,7 @@ const routes = {
 
   'POST /api/persona/doc': async (req, res) => {
     try {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const body = await jsonBody(req);
       const r = personaAdmin.saveDoc(body.id, body.path, body.text);
       const reloaded = String(body.id) === personaId() ? reloadKnowledge() : null;
       send(res, 200, { ok: true, ...r, reloaded });
@@ -2320,7 +2529,7 @@ const routes = {
 
   'POST /api/persona/switch': async (req, res) => {
     try {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const body = await jsonBody(req);
       const id = String(body.id ?? '');
       personaAdmin.readPack(id); // 先验证这个包**读得出来** —— 读不了就不许切过去
       saveConfig({ persona: { id } });
@@ -2353,7 +2562,7 @@ const routes = {
 
   'POST /api/persona/create': async (req, res) => {
     try {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const body = await jsonBody(req);
       send(res, 200, { ok: true, ...personaAdmin.createPack(body.id, body.from || '_template') });
     } catch (e) {
       send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
@@ -2362,7 +2571,7 @@ const routes = {
 
   'POST /api/persona/delete': async (req, res) => {
     try {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const body = await jsonBody(req);
       const id = String(body.id ?? '');
       if (id === personaId()) throw new Error('这是**正在用**的人设 —— 先切到别的，再删它');
       send(res, 200, { ok: true, ...personaAdmin.removePack(id) });
@@ -2374,7 +2583,7 @@ const routes = {
   /** 手动把某个人设的昵称/头像**立刻**应用一次（自动那次失败、或改完想马上生效时用） */
   'POST /api/persona/apply-qq': async (req, res) => {
     try {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const body = await jsonBody(req);
       const id = String(body.id ?? '');
       personaAdmin.readPack(id); // 先确认读得出来
       const r = await applyPersonaQQ(id);
@@ -2460,7 +2669,7 @@ const routes = {
     if (!bot?.call) return send(res, 200, { ok: false, error: '机器人还没连上协议端' });
     let nickname = '';
     try {
-      nickname = String(JSON.parse((await readBody(req)).toString('utf8') || '{}').nickname ?? '').trim();
+      nickname = String(await jsonBody(req).nickname ?? '').trim();
     } catch (e) {
       return send(res, 400, { ok: false, error: `请求体不是合法 JSON：${e.message}` });
     }
@@ -2525,7 +2734,7 @@ const routes = {
    */
   'POST /api/persona/draft': async (req, res) => {
     try {
-      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const body = await jsonBody(req);
       const r = await personaDraft.draft(body, { signal: AbortSignal.timeout(180000) });
       send(res, 200, r);
     } catch (e) {
@@ -2605,50 +2814,82 @@ function loadPage() {
 }
 loadPage();
 
-export function startWebUI(botInstance = null) {
+/**
+ * 启动管理界面。
+ *
+ * ⚠️ 返回 Promise（2026-09-29）：要等 `listen()` 出结果才能决定 IPv6 失败后要不要
+ *    换 IPv4 重来，所以不能再是同步函数。调用方 `index.js` 本来就忽略返回值，
+ *    不用跟着改；想等它就 `await startWebUI(bot)`。
+ */
+export async function startWebUI(botInstance = null) {
   bot = botInstance;
   if (!config.webui.enable) {
     log.info('管理界面已关闭（config.yml 里 webui.enable: false）');
     return null;
   }
 
-  const server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-    const key = `${req.method} ${url.pathname}`;
+// ⚠️ 这里用**循环**重试，不是递归（2026-09-29）：
+  //    原来「IPv6 不可用 → 改成 127.0.0.1 → startWebUI() 再来一遍」。递归有两个毛病：
+  //    ① 万一改完 host 还是绑不上、错误码又变了，会一层层套下去，每层各挂一个 server；
+  //    ② 递归那层调的是 `startWebUI()` **没带参数**，`bot` 被重新赋成 null，
+  //    界面里依赖 bot 的功能就悄悄失效了。循环最多试 2 次，第二次不行就老实报错。
+  let listening = null;
+  for (let attempt = 0; attempt < 2 && !listening; attempt++) {
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const key = `${req.method} ${url.pathname}`;
 
-    try {
-      if (routes[key]) return await routes[key](req, res, url);
-      return serveStatic(req, res, url);
-    } catch (e) {
-      log.error(`管理界面 ${key} 出错: ${e.message}`);
-      if (!res.headersSent) send(res, 500, { ok: false, error: e.message });
-    }
-  });
+      try {
+        if (routes[key]) return await routes[key](req, res, url);
+        return serveStatic(req, res, url);
+      } catch (e) {
+        // ⚠️ 请求体本身不合法 → 400，不是 500（「调用方 JSON 写错了」≠「服务端崩了」）
+        if (e.badBody) {
+          if (!res.headersSent) send(res, 400, { ok: false, error: e.message });
+          return;
+        }
+        log.error(`管理界面 ${key} 出错: ${e.message}`);
+        if (!res.headersSent) send(res, 500, { ok: false, error: e.message });
+      }
+    });
 
-  server.on('error', (e) => {
-    if (e.code === 'EADDRINUSE') {
-      log.error(`管理界面端口 ${config.webui.port} 被占用，换一个端口或关掉占用的程序`);
-    } else if (e.code === 'EADDRNOTAVAIL' && config.webui.host === '::') {
-      // 有些环境没有 IPv6，退回只监听 IPv4
-      log.warn('没有可用的 IPv6，退回只监听 127.0.0.1');
-      config.webui.host = '127.0.0.1';
-      startWebUI();
-    } else {
-      log.error(`管理界面启动失败: ${e.message}`);
-    }
-  });
+    // 要等 listen 的结果才能决定要不要重来，所以这个函数现在返回 Promise
+    const started = await new Promise((resolve) => {
+      let settled = false;
 
-  // host 用 "::" 时 Node 默认同时接受 IPv4 和 IPv6（双栈），
-  // 这样浏览器无论是走 127.0.0.1 还是 localhost→::1 都能打开。
-  const host = config.webui.host === '127.0.0.1' ? '::' : config.webui.host;
+      server.on('error', (e) => {
+        if (e.code === 'EADDRINUSE') {
+          log.error(`管理界面端口 ${config.webui.port} 被占用，换一个端口或关掉占用的程序`);
+        } else if (e.code === 'EADDRNOTAVAIL' && config.webui.host === '::') {
+          // 有些环境没有可用的 IPv6，退回只监听 IPv4，然后由循环再试一次
+          log.warn('没有可用的 IPv6，退回 127.0.0.1 重试');
+          config.webui.host = '127.0.0.1';
+        } else {
+          log.error(`管理界面启动失败: ${e.message}`);
+        }
+        if (settled) return;
+        settled = true;
+        resolve(false);
+      });
 
-  server.listen({ port: config.webui.port, host, ipv6Only: false }, () => {
-    log.info('═══════════════════════════════════════');
-    log.info(` 管理界面: http://127.0.0.1:${config.webui.port}`);
-    log.info('═══════════════════════════════════════');
-  });
+      // host 用 "::" 时 Node 默认同时接受 IPv4 和 IPv6（双栈），
+      // 这样浏览器无论是走 127.0.0.1 还是 localhost→::1 都能打开。
+      const host = config.webui.host === '127.0.0.1' ? '::' : config.webui.host;
 
-  return server;
+      server.listen({ port: config.webui.port, host, ipv6Only: false }, () => {
+        if (settled) return;
+        settled = true;
+        log.info('═══════════════════════════════════════');
+        log.info(` 管理界面: http://127.0.0.1:${config.webui.port}`);
+        log.info('═══════════════════════════════════════');
+        resolve(true);
+      });
+    });
+
+    if (started) listening = server;
+  }
+
+  return listening;
 }
 
 export { configForUi, facesWithMeta };

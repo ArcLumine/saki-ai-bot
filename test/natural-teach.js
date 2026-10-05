@@ -37,7 +37,8 @@ const check = (ok, label) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const LEARNED = join(KNOW, 'learned.md');
+// ★ B 方案（2026-09-27）：老的单文件 learned.md 已废 —— owner 教的内容落 `global.md`
+const LEARNED = join(KNOW, 'global.md');
 const originalLearned = readFileSync(LEARNED, 'utf8');
 
 // 假模型：判断这句话有没有知识
@@ -247,7 +248,7 @@ async function cleanup() {
   await new Promise((r) => wss.close(r));
   await new Promise((r) => llmServer.close(r));
   writeFileSync(LEARNED, originalLearned, 'utf8');
-  console.log('\n（已还原 knowledge/learned.md）');
+  console.log('\n（已还原 knowledge/global.md）');
 }
 
 main()

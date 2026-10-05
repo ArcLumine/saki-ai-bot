@@ -45,7 +45,7 @@ const PROMPT = `【归属核对】你在检查一条**即将发到 QQ 群里**�
 - **认错人**：回复里提到的人 / 回应的事，其实是**另一个人**说的或做的
   （例：A 说要请假，你回「B 你要请假？」，就是在认错人）
 - **把事安错人**：A 分享了一件事，你却在回 B
-- **对着错的角色说话**：把服主当普通群友、把群友当服主
+- **对着错的角色说话**：把主人当普通群友、把群友当主人
 - **编造身份**：给人安了图里/上下文里没有的身份（「你就是名单上那个」）
 
 ⚠️ **特别注意**：如果草稿里出现了某个人的名字，**核实那个名字是不是当前说话的人**。
@@ -133,7 +133,17 @@ export async function checkAttribution({ draft, context = '', current = { name: 
       log.debug(`[归属核对] 没给出 JSON（${String(raw).slice(0, 40)}），放行`);
       return { ...pass, ms: Date.now() - t0 };
     }
-    const j = JSON.parse(m[0]);
+    // ⚠️ 同 speak-judge：正则只保证「截到一段像 JSON 的」，不保证合法。
+    //    模型在 JSON 后面补一段带花括号的说明时，贪婪的 `[\s\S]*` 会吃到
+    //    最后一个 `}`，截出来的直接解析不了。外面虽有 catch 兜底放行，
+    //    但那属于日常的「没按格式回」，不该打 warn。
+    let j;
+    try {
+      j = JSON.parse(m[0]);
+    } catch {
+      log.debug(`[归属核对] 模型给的 JSON 解析不了（${String(raw).slice(0, 40)}），放行`);
+      return { ...pass, ms: Date.now() - t0 };
+    }
     const ok = j.ok !== false;
     const fixed = String(j.fixed ?? '').trim();
     const out = {

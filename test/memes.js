@@ -66,7 +66,7 @@ for (const s of must) {
 
 console.log('\n== ⑤~⑧ 敏感类已迁到独立全局库，不再由梗库按需注入 ==');
 // 2026-09-25：敏感词必须**始终在提示词里**，不能等命中才补；
-// 它现在住在 knowledge/sensitive/sensitive-words.md（全局注入），
+// 它现在住在 safety/sensitive/sensitive-words.md（2026-09-29 从 knowledge/ 搬来），
 // 所以 memesFor() 对这些词返回空是**正确行为** —— 两边不能各存一份。
 const migratedSensitive = [
   '你当我老婆吧', '来贴贴', '要抱抱', '你这个舔狗',

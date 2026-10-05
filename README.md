@@ -152,6 +152,25 @@
   → **密度由判断管，不靠"每分钟最多几句"那种硬闸**
 - **被 @ / 引用 / 点名叫她 / 命中关键词 / 服务器问题** 这几类"明确召唤"**不受冷却影响**
   （真人不会因为两秒前刚说过话就不理你）
+- ⚠️ **单人频率闸**（2026-10-02，`chat.perUser`，WebUI「活跃度 → 单人频率闸」可调）：
+  治「一个人反复触发把 token 烧光」。**改动之前**所有冷/热节流**全是按群的**，而刷屏是**按人**的
+  —— 一个人连发 20 条时每条都算"冷却已过"，于是 20 次全部烧模型调用。
+  · `enable`(true) / `windowMs`(300000) / `softLimit`(3) / `hardLimit`(6) —— **三个数都能在 WebUI 改**；
+    默认**开着**，嫌烦就关掉。
+  · ⚠️ **只在内存计数，不落盘**（和「主动接受冷场额度」同一档的取舍）。
+  · 超过 `softLimit`(3)：把「这个人最近让你说了几次」喂给 judge，**由它自己收着**
+    （**约束仍由判断定**，不是硬闸）
+  ⚠️ 硬阈值**问题类也不豁免**（用户决定：换个问法绕不过豁免）；
+  代价是急事连问也会被静默 —— 嫌误伤就调大 `hardLimit`，不用改代码。
+- ⚠️ **召唤频率闸**（2026-10-03，`chat.perUserCall`，WebUI「活跃度 → 召唤频率闸」可调）：
+  治「一个人换着戳名字刷屏」—— 上面那两个闸**同类覆盖不到召唤**：戳名字是在
+  `shouldJoinChat` **之外**提前返回的，既不装哑巴*也不记账*，等于开了一整条无上限的口子。
+  · `enable`(false) / `windowMs`(120000) / `limit`(10) —— WebUI 可改。
+  · 覆盖 **@他 / 引用 / 正文点名 / 戳 / 关键词 / 服务器问题 / vision** 这**七种**召唤。
+  · 与 `chat.perUser` 是**完全独立**的两套计数：聊天不算召唤额度，反之亦然。
+  · ⚠️ **默认关闭**、阈值**故意设得很高**（2 分钟 10 次）—— 召唤是"真在问"，
+    误伤比多花一次调用更糟。硬拦是"先给个回执，之后全静默"，那个回执本身又是新刷屏源。
+  · 只在内存计数，不落盘。
 - ⚠️ **没人指名她时，她不把自己当主角**：只有 **@她 / 叫她的名字 / 引用她的话**（私聊也算）
   才让她进入"被问的那个人"的姿态；其余情况她只是**群里路过搭一句**的群友 ——
   **不辩解、不自证、不把话题拉到自己身上**（真实踩过：有人说「机器人一来群消息多好多」，
@@ -311,7 +330,8 @@ deepseek-flash ： 缓存命中 0.02 / 未命中 1 / 输出 4      （高峰时�
 | 分档灵敏度 | 每个群单独设：**3=只认 @**，2=只接服务器话题/聊到它，**1=能自由接话**（再配"收紧度"滑块） |
 | 消息合并 | 一口气发好几条 → 合成一次回答；思考期间来的消息也会攒着一起答 |
 | 服务器状态 | 真去查 MC 服务器（在线人数/玩家名单），查不到就不编 —— ⚠️ **这是它的本职工作，见上面「特色功能 ⓪」** |
-| 群里教学 | 主人/管理员说「记住：…」就写进 `learned.md`；也能在管理界面直接改（保存时校验格式） |
+| 群里教学 | 主人/管理员说「记住：…」就写进学习档案 —— **按归属分片**（服主教的全局 `global.md` / 群内教的 `groups/<群号>.md` / 私聊教的 `dm/<QQ号>.md`），别的群和私聊看不到群内教的那份；也能在管理界面直接改（保存时校验格式） |
+| 群内安静 | 服主/管理员说「小祥安静」她就闭嘴 —— 接话、复读、戳一戳一律不响，说「小祥说话」才恢复；**落盘 `state/quiet.json`，重启也还记得**。⚠️ 只认 `quiet.groupId` 那一个群，且必须**整句相等**才算指令（「小祥安静点」不算，否则她说一句就被自己闭嘴一次） |
 | 知识库 | 人设 / 群友信息 / 服务器资料 / 收藏夹（anime）/ 关系（relationship）—— 都是纯文本 md |
 | 群友观察 | 攒够 120 条群消息，后台总结"这些人的性格 + 群里的大事"，写进群记忆 |
 | 好感度 | 0~100（默认 50），**按群 + 按人**分开记；**只由"回应她"和"剧情结局"改**（见上面特色功能 ⑥），对主人不生效；`/好感度` 看榜单（显示群名片名字） |
@@ -352,11 +372,19 @@ deepseek-flash ： 缓存命中 0.02 / 未命中 1 / 输出 4      （高峰时�
 | `owner.md` | **服主本人**的资料（经历、朋友、偏好） | **只在跟服主说话时**（群里、私聊都算） |
 | `relationship.md` | 她和服主之间那层关系 | 同上 |
 | `hzymtr-server.md` | 服务器资料（整合包 / 模组 / 线路 / 报错…） | 命中服务器关键词时 |
-| `group-memory.md` | 共享的群记忆 | 提到"群里 / 群友 / 你还记得"时 |
+| `observe/<群号>.md` | **这个群**的群友观察（群友是谁、什么性格、群里的大事） | **只在这个群注入**，别的群看不到 |
 | `groups/<群号>.md` | **这个群自己**的资料 | 同上，且**只认当前那个群** |
 | `dm/<QQ号>.md` | **私聊记忆**（只在"纯好友、跟他没有共有群"时才单独存） | 跟那个人私聊时、或他在群里说话时 |
 | `learned.md` | 群主后来教的知识（**优先级最高，会覆盖上面所有**） | 按条目标题挑，只带**沾边的那几条** |
 | `cast.md` / `holidays.md` / `life-events.md` | 角色表 / 节日表 / 事件库 | **不进聊天**（代码查表用） |
+| `safety/sensitive/sensitive-words.md` | **敏感词库**（⚠️ 已搬出 `knowledge/`，由 `src/sensitive.js` 单独读）：她该躲开的词。亲密言语分**撒娇 / 调戏 / 擦边**三档，按场景授权；另有**禁区**（涉政 / 赌博 / 毒品 / 暴恐）一刀切 | 「总规则」常驻；词典**只带这次命中的那几条** |
+
+> ⚠️ **另有一层，根本不进提示词**：`safety/` 目录（**故意不在 `knowledge/` 下**）——
+> `global.md`（全局违禁）、`group.md`（只拦群聊的防封词）、`injection.md`（逆向指令 / 越狱）——
+> 在**拼提示词之前**由代码拦下，命中就**压根不调模型**（丢弃 / 回一句固定话 / 抹掉攻击片段）。
+>
+> **一个词出现在哪，决定它归谁管**：写进 `safety/sensitive/` 是「提示她自己绕开」，
+> 写进 `safety/` 顶层是「物理上不让她说」。前者会被人设和上下文带跑，后者不会。
 
 #### 怎么防"太长 → 漏规则"
 
@@ -502,10 +530,11 @@ copy config.example.yml config.yml      # Linux/macOS: cp
 ### 4. 知识库起头（三个"活文件"不进仓库）
 
 ```bash
-cd knowledge
-copy group-memory.example.md   group-memory.md      # 群友是谁、什么性格、群里的大事
-copy hzymtr-server.example.md  hzymtr-server.md     # 你自己的服务器/业务资料
-copy learned.example.md        learned.md           # 群里「记住：…」教的东西
+# 模板在 example/，真文件落进 knowledge/（跑 tools/first-run-setup.mjs 会自动做这件事）
+# ⚠️ 群友资料不用手写：机器人自己在 `knowledge/observe/<群号>.md` 里暗中攒，
+#    群和群一分开就各记各的（旧版的共享 group-memory.md 已删除）。
+copy example\hzymtr-server.example.md  knowledge\hzymtr-server.md     # 你自己的服务器/业务资料
+copy example\learned.example.md        knowledge\learned.md           # 群里「记住：…」教的东西
 ```
 
 - 想给**某个群单独一份资料**（比如另一个群玩别的游戏）：建 `knowledge/groups/<群号>.md`
@@ -567,7 +596,7 @@ node src/index.js
 3) 我还没填 config.yml：把需要我提供的东西列成清单（大模型 Key/模型名、NapCat 的
    WS 地址和 token、我的 QQ、机器人 QQ、要在哪些群说话/档位），我逐条给你，你写进去。
    ⚠️ 不要让我把 QQ 密码给你，也不要去猜 —— 登录靠扫码。
-4) 用模板把 knowledge/ 里三个活文件起头（group-memory / hzymtr-server / learned）。
+4) 用模板把 knowledge/ 里的活文件起头（hzymtr-server / global）。群友资料不用管，机器人自己会记。
 5) 协议端 NapCatQQ：告诉我该下哪个包、放哪、双击哪个 launcher；
    ⚠️ 必须走 launcher（直接调 NapCatWinBootMain.exe 不会注入 NapCat）；
    带我确认 3001 在监听，并让我在 NapCat 的 WebUI 里加 WebSocket 服务端 + token。
@@ -631,12 +660,10 @@ cp config.example.yml config.yml      # Windows: copy config.example.yml config.
 #   要填的：llm.apiKey（大模型 Key）· onebot.accessToken（NapCat 的 token）
 #          · ownerQQ（主人/你自己的 QQ）· botQQ（机器人 QQ）· trigger.allowGroups（在哪些群说话）
 
-# 3) 知识库：三个"活文件"用模板起头（它们不进仓库）
-cd knowledge
-cp group-memory.example.md   group-memory.md
-cp hzymtr-server.example.md  hzymtr-server.md
-cp learned.example.md        learned.md
-cd ..
+# 3) 知识库：活文件用模板起头（它们不进仓库；模板在 example/）
+#    ⚠️ 群友资料不用起头 —— 机器人自己在 knowledge/observe/<群号>.md 里攒
+cp example/hzymtr-server.example.md  knowledge/hzymtr-server.md
+cp example/learned.example.md        knowledge/learned.md
 
 # 4) 协议端：装好 NapCatQQ，WS 端口/token 和 config.yml 里对上
 #    Windows 一键启动：双击「一键启动（QQ+机器人）.bat」

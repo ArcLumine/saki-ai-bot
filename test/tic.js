@@ -45,6 +45,18 @@ writeFileSync(
 process.env.QQBOT_CONFIG = CFG_REL;
 process.env.QQBOT_TIC_FILE = TIC_FILE_REL;
 
+// 给 tic.js 一个隔离的人设包：测试口癖字段不能读真实 personas/saki。
+const PERSONA_REL = 'logs/__test-tic-persona';
+const PERSONA_DIR = join(ROOT, PERSONA_REL);
+rmSync(PERSONA_DIR, { recursive: true, force: true });
+mkdirSync(PERSONA_DIR, { recursive: true });
+writeFileSync(
+  join(PERSONA_DIR, 'identity.json'),
+  JSON.stringify({ style: { verbalTics: { sentenceStart: ['其实'], sentenceEnd: ['呢'] } } }, null, 2),
+  'utf8',
+);
+process.env.QQBOT_PERSONA_DIR = PERSONA_REL;
+
 let failures = 0;
 const check = (ok, label, extra = '') => {
   console.log(`  ${ok ? '✅' : '❌'} ${label}${extra ? `  ${extra}` : ''}`);
@@ -340,57 +352,104 @@ console.log('\n【14】开头和句中是两类，互不覆盖');
   check(tic.ticHint(G4).includes('你最近老这么开口'), 'head 类用"老这么开口"的措辞');
 }
 
-console.log('\n【15】★ 口癖词：「倒是」（2026-09-17 用户反馈）');
+console.log('\n【15】★ 人设里的句首 / 句末口癖');
 {
-  // 用户原话：「先把这个 **倒是** 这个词频率修一下，感觉很高」。
-  // 实例：「还没呢，等交完班再说。**你倒是**先吃上了（」
-  //
-  // ⚠️ 它同时卡在前两层机制的盲区里 —— 这两条断言就是"为什么还要第三层"的证据：
   fresh();
-  check(
-    tic.headOf('还没呢，你倒是先吃上了') !== '倒是',
-    '它在句中 → headOf（只看开头 4 字）抓不到',
-  );
-  check(
-    tic.clausesOf('还没呢，等交完班再说。你倒是先吃上了').length === 0,
-    '每条只出现一次 → clausesOf（要求跨句重复）也抓不到',
-  );
+  check(tic.startTicsOf('其实，先说正事。').includes('其实'), '句首口癖只在句首命中');
+  check(tic.startTicsOf('我其实觉得可以').length === 0, '句中的同名词不算句首口癖');
+  check(tic.startTicsOf('前面只是铺垫。其实，先说正事。').includes('其实'), '回复中间某句话的开头也会识别');
+  check(tic.endTicsOf('那就交给你了呢？').includes('呢'), '句末口癖只在句末命中');
+  check(tic.endTicsOf('呢，其实先说正事').length === 0, '句首出现的同名词不算句末口癖');
+  check(tic.endTicsOf('第一句收尾呢。还有一句。').includes('呢'), '回复中间某句话的结尾也会识别');
+  check(tic.wordsOf('其实，先说正事呢？').sort().join('、') === '其实、呢', '兼容 wordsOf 返回两类人设口癖');
 
-  tic.note(G, '还没呢，等交完班再说。你倒是先吃上了（');
-  check(tic.repeated(G) === null, '说 1 次：不提醒（这个词本身是正常语气，不是脏话）');
+  for (let i = 0; i < 3; i++) tic.note('200000010', `其实，第${i}条消息`);
+  const start = tic.repeated('200000010');
+  check(start?.kind === 'start' && start?.g === '其实', `句首口癖达到阈值后记为 start（${start?.g}）`);
+  const startHint = tic.ticHint('200000010');
+  check(startHint.includes('句首') && startHint.includes('不是禁用词'), '句首提醒区分类型并明确不是禁用词');
+  check(!/从现在起别再出现|绝对不能说/.test(startHint), '句首提醒不使用硬禁令措辞');
 
-  tic.note(G, '你倒是说说看，这图哪来的');
-  const r = tic.repeated(G);
-  check(
-    !!r && r.g === '倒是' && r.kind === 'word' && r.count === 2,
-    `★ 说 2 次就判定为口癖（${r?.g} / ${r?.kind} / ${r?.count} 次）`,
-  );
+  for (let i = 0; i < 3; i++) tic.note('200000011', `第${i}条消息交给你了呢`);
+  const end = tic.repeated('200000011');
+  check(end?.kind === 'end' && end?.g === '呢', `句末口癖达到阈值后记为 end（${end?.g}）`);
+  const endHint = tic.ticHint('200000011');
+  check(endHint.includes('句末') && endHint.includes('不是禁用词'), '句末提醒区分类型并明确不是禁用词');
 
-  const hint = tic.ticHint(G);
-  check(hint.includes('倒是'), '提示里点名了「倒是」');
-  check(/同一个词/.test(hint), '措辞说的是"老用同一个词"（不是"老这么开口"）');
-  check(/不是说完全不能说|遣词造句/.test(hint), '仍然带了"不是禁言"的意思（用户的原话）');
-  check(!/禁止说|不许说|绝对不能说/.test(hint), '措辞不是硬禁令');
-
-  // ⚠️ 反向：正常用这个词不该被"见到就拦" —— 拦的是**高频**，不是词本身
-  check(tic.wordsOf('这倒是真的').length === 1, '命中就是命中，频率交给阈值管');
+  check(tic.status(G).words.includes('其实') && tic.status(G).words.includes('呢'), 'status 展示人设里的两类口癖');
 }
 
-console.log('\n【16】口癖词表可以改，表外的词不乱抓');
+console.log('\n【16】旧人设格式与 config 词表兼容边界');
 {
+  const persona = await import('../src/persona.js');
+  const idFile = join(PERSONA_DIR, 'identity.json');
+  writeFileSync(idFile, JSON.stringify({ style: { verbalTics: ['旧格式口癖'] } }, null, 2), 'utf8');
+  persona.reload();
+  check(persona.verbalTics().sentenceStart.includes('旧格式口癖'), '旧数组格式会兼容读成句首口癖');
+  check(persona.verbalTics().sentenceEnd.length === 0, '旧数组格式不会凭空生成句末口癖');
+
+  writeFileSync(
+    idFile,
+    JSON.stringify({ style: { verbalTics: { sentenceStart: ['其实'], sentenceEnd: ['呢'] } } }, null, 2),
+    'utf8',
+  );
+  persona.reload();
   fresh();
   const before = config.tic.words;
   config.tic.words = ['貌似', '倒是'];
-  check(tic.wordsOf('他貌似不太高兴').includes('貌似'), 'config 里加的词生效');
-  check(tic.wordsOf('这倒是真的').includes('倒是'), '表里原有的词仍在');
-  check(tic.wordsOf('他好像不太高兴').length === 0, '表里没有的词不抓（不自动统计所有词）');
-  check(tic.status(G).words.includes('貌似'), 'status() 能列出当前词表（管理界面/自检要看）');
+  check(!tic.wordsOf('他貌似不太高兴').includes('貌似'), '旧 config 词表不会绕过人设字段生效');
+  check(!tic.wordsOf('这倒是真的').includes('倒是'), '旧 config 词表里的词不会自动抓取');
+  check(tic.wordsOf('其实，先说正事呢？').sort().join('、') === '其实、呢', '实际口癖仍只来自当前人设');
+  check(tic.status(G).words.includes('其实'), 'status 读取人设口癖，而不是旧 config.words');
   config.tic.words = before;
+}
+
+console.log('\n【17】★ 软提醒真的进入系统提示词，而且出口不再硬改写');
+{
+  const { Bot } = await import('../src/bot.js');
+  const bot = new Bot();
+  bot.selfId = '10000002';
+  const event = {
+    message_type: 'group',
+    group_id: '200000012',
+    user_id: '10000003',
+    self_id: '10000002',
+    message: [{ type: 'text', data: { text: '给我一句建议' } }],
+    sender: { user_id: '10000003', nickname: '某群友', role: 'member' },
+  };
+
+  fresh();
+  for (let i = 0; i < 3; i++) tic.note(event.group_id, `其实，第${i}条建议`);
+  const prompt = bot.buildSystemPrompt('', event, null, '给我一句建议');
+  check(prompt.includes('句首口癖') && prompt.includes('不是禁用词'),
+    'Bot.buildSystemPrompt 里真的带上了句首软提醒');
+
+  fresh();
+  for (let i = 0; i < 3; i++) tic.note(event.group_id, `第${i}条建议交给你了呢`);
+  const endPrompt = bot.buildSystemPrompt('', event, null, '给我一句建议');
+  check(endPrompt.includes('句末口癖') && endPrompt.includes('不是禁用词'),
+    'Bot.buildSystemPrompt 里真的带上了句末软提醒');
+
+  const oldLimit = config.llm.promptMaxChars;
+  config.llm.promptMaxChars = 1000;
+  const compact = bot.buildSystemPrompt('', event, null, '给我一句建议');
+  check(compact.length <= 1000, '测试压缩开关生效后不超过配置字符数', String(compact.length));
+  check(!compact.includes('【测试验收提示词压缩') || compact.length <= 1000,
+    '压缩标记本身也计入长度上限');
+  check(compact.includes('句末口癖'), '压缩保留靠近问题的尾部提醒');
+  check(compact.includes('提示词压缩'), '中段知识省略处有明确标记');
+  config.llm.promptMaxChars = oldLimit;
+
+  const botSrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const ticSrc = readFileSync(join(ROOT, 'src', 'tic.js'), 'utf8');
+  check(!/softenDao\s*\(/.test(botSrc), 'bot.js 不再在发言出口调用 softenDao()');
+  check(!/export function softenDao\s*\(/.test(ticSrc), 'tic.js 不再提供硬改写出口');
 }
 
 try {
   rmSync(TIC_PATH, { force: true });
   rmSync(join(ROOT, CFG_REL), { force: true });
+  rmSync(PERSONA_DIR, { recursive: true, force: true });
 } catch {}
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);

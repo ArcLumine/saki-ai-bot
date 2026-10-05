@@ -203,7 +203,20 @@ console.log('\n【6】注入的内容要合格（别让她把数字说出来）'
   check(/\d+/.test(line) && !/\/100/.test(line), '给了数值，而且不写 /100（上限无限）');
   check(/不许说出数字|别说出来/.test(line), '★ 明确要求**不许说出数字**');
   check(/好感度/.test(line) && /别说|出戏/.test(line), '也要求不许提「好感度」这个词');
-  check(/<主人>/.test(line), '★ 写明"管不到 <主人>"（优先级约束传达到了）');
+  // ⚠️ 2026-09-28：这一条原来钉的是**字面量「<主人>」**，
+  //    而那正是我们花好几轮在堵的泄漏 —— 提示词里不该再出现尖括号占位符。
+  //    现在那段填的是**真称呼**（`identity.address.owner`），所以断言跟着改成
+  //    「有主人称呼 + 没有占位符」两件事一起验。
+  const { callOwner } = await import('../src/persona.js');
+  const OWNER_NAME = callOwner() || '主人';
+  check(
+    line.includes(`管不到 ${OWNER_NAME}`),
+    `★ 写明"管不到 ${OWNER_NAME}"（优先级约束传达到了）`,
+  );
+  check(
+    !/<主人>|\{\{\s*owner\s*\}\}/.test(line),
+    '★★ 而且没有占位符残留（2026-09-28 修的四处泄漏之一）',
+  );
   check(/优先级|高于/.test(line), '写明了优先级关系');
   check(/该给的答案要给|该答的还是答/.test(line), '低好感度也不能不干活');
 }
@@ -327,6 +340,128 @@ console.log('\n【11】★★ 榜单要显示**名字**，不能只甩 QQ 号（
   check(/names\.note\(payload\)/.test(bj), '★ 每条群消息都会记一笔（不用额外调接口）');
   check(/names\.of\(String\(x\.userId\)\)/.test(wj), '★ 界面的榜单也带上名字');
   check(/x\.name \|\| '（还没说过话）'/.test(wh), '★ 界面上名字 + 号码都显示（管理用）');
+}
+
+// ══════════════════════════════════════════════════════════════
+// 【4】★★ 亲密尺度闩锁（2026-09-30 用户要求）
+//   「群聊还是大于 70 解锁但是大于 90 才能加好友」
+//
+// ## 两条线是**独立的**
+//   · 70（sensitiveUnlock）→ 群里给他开到「撒娇」那一档
+//   · 90（friendThreshold）→ 群里 @ 他、让他来加好友
+//   ⇒ 这组必须钉住"改一个不影响另一个"，否则将来有人只动一处、
+//     以为两条线是一回事，就会把权限线跟"加好友"绑死。
+//
+// ## 滞回为什么要有
+//   只有 unlock 的话，70 分的人掉到 69 会立刻被关、再涨回 70 又开 ⇒ 反复闪。
+//   所以 ≥70 开、<60 才关，中间 60~70 保持。
+// ══════════════════════════════════════════════════════════════
+console.log('\n【4】★★ 好感度 → 亲密尺度（两条线独立 + 滞回，2026-09-30）');
+{
+  const A = await import('../src/affinity.js');
+  const { config } = await import('../src/config.js');
+  const G = '300000001';
+  const U = '300000002';
+  const force = (n) => A.adjust(U, n, { groupId: G, force: true });
+
+  check(config.affinity.sensitiveUnlock === 70, '★ 默认解锁线 = 70', `实得 ${config.affinity.sensitiveUnlock}`);
+  check(config.affinity.sensitiveRetract === 60, '★ 默认收回线 = 60', `实得 ${config.affinity.sensitiveRetract}`);
+
+  // 从 50 涨到 70
+  for (let i = 0; i < 8; i++) force(3);
+  check(A.get(U, G) === 74, '调分生效（force 绕过了夹取）', `实得 ${A.get(U, G)}`);
+  check(A.unlockedFor(U, G) === true, '★★ 74 ≥ 70 ⇒ 已解锁「撒娇」');
+
+  // 滞回：掉到 65（<70 但 ≥60）必须**保持开**
+  for (let i = 0; i < 3; i++) force(-3); // 74 → 65
+  check(A.get(U, G) === 65, '掉到 65', `实得 ${A.get(U, G)}`);
+  check(A.unlockedFor(U, G) === true, '★★ 65 落在滞回区间（60~70）⇒ **仍保持开**（不闪）');
+
+  // 掉到 59（<60）才收
+  for (let i = 0; i < 2; i++) force(-3); // 65 → 59
+  check(A.get(U, G) === 59, '掉到 59', `实得 ${A.get(U, G)}`);
+  check(A.unlockedFor(U, G) === false, '★★ 59 < 60 ⇒ 收回（滞回下限生效）');
+
+  // 重新涨上去要能再开（闩锁不是一次性开关）
+  for (let i = 0; i < 5; i++) force(3); // 59 → 74
+  check(A.unlockedFor(U, G) === true, '★ 再涨回 74 ⇒ 又能开（闩锁不是一次性的）');
+
+  // ── 两条线独立 ──────────────────────────────────────────
+  const crossedAt = (target) => {
+    A.adjust(U, -1000, { groupId: G, force: true }); // 先砸到底
+    let hit = null;
+    for (let i = 0; i < 400 && hit === null; i++) {
+      // 用 force 绕过 MAX_STEP，模拟"慢慢涨"时哪一档先到
+      const r = A.adjust(U, 1, { groupId: G, force: true });
+      if (r.crossed) hit = r.to;
+    }
+    return hit;
+  };
+  const at90 = crossedAt(90);
+  check(at90 === 90, '★★ 加好友那条线：90 分才 crossed（`crossed` 读的是 friendThreshold）', `实得 ${at90}`);
+  check(A.unlockedFor(U, G) === true, '★ 90 分时撒娇那档当然也是开的（70 < 90）');
+
+  // 好友阈值调高 ⇒ crossed 必须跟着动（证明它真读配置，不是写死 90）
+  const savedFt = config.affinity.friendThreshold;
+  config.affinity.friendThreshold = 120;
+  const at120 = crossedAt(120);
+  check(at120 === 120, '★★ friendThreshold 改成 120 ⇒ crossed 也在 120 才触发（真读配置）', `实得 ${at120}`);
+  config.affinity.friendThreshold = savedFt;
+
+  // ── 持久化 ─────────────────────────────────────────────
+  A.reload();
+  check(A.unlockedFor(U, G) === true, '★★ `reload()` 之后闩锁还在（u 字段真落盘了）');
+
+  // ── 老数据不追溯 ───────────────────────────────────────
+  // 老条目只有 v/at/note，没有 u —— 就算 v 很高也不该算已解锁
+  writeFileSync(
+    AFF,
+    JSON.stringify({ byGroup: { [G]: { users: { [U]: { v: 999, at: Date.now() } }, dayBudget: { date: new Date().toISOString().slice(0, 10), used: {} } } } }),
+    'utf8',
+  );
+  A.reload();
+  check(A.unlockedFor(U, G) === false, '★★ 老数据（无 `u`、v=999）⇒ **不追溯解锁**（不能白送一档）');
+
+  // ── 跨群隔离 ───────────────────────────────────────────
+  writeFileSync(
+    AFF,
+    JSON.stringify({ byGroup: { [G]: { users: { [U]: { v: 80, u: 1, at: 1 } }, dayBudget: { date: new Date().toISOString().slice(0, 10), used: {} } } } }),
+    'utf8',
+  );
+  A.reload();
+  check(A.unlockedFor(U, G) === true, '★ A 群解锁了');
+  check(A.unlockedFor(U, '300000009') === false, '★★ B 群**没有**解锁（闩锁按群各记各的，不漏）');
+
+  // ── 关掉功能 ⇒ 一律不解锁 ─────────────────────────────
+  writeFileSync(
+    AFF,
+    JSON.stringify({ byGroup: { [G]: { users: { [U]: { v: 80, u: 1, at: 1 } }, dayBudget: { date: new Date().toISOString().slice(0, 10), used: {} } } } }),
+    'utf8',
+  );
+  A.reload();
+  config.affinity.enable = false;
+  check(A.unlockedFor(U, G) === false, '★★ `affinity.enable=false` ⇒ 即使闩锁是 1 也不给（白名单照旧）');
+  config.affinity.enable = true;
+
+  // ── 接线：bot.js 的天花板必须真的调它，且私聊早退 ──────
+  const bj = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const fn = bj.slice(bj.indexOf('function intimacyCeiling'), bj.indexOf('function srcOf'));
+  check(/!isPrivate && affinity\.unlockedFor\(/.test(fn), '★★ bot.js 天花板：好感度支带 `!isPrivate`（私聊不吃好感度）');
+  check(
+    fn.indexOf('ownerOnly()') < fn.indexOf('affinity.unlockedFor'),
+    '★★ 好感度支在 `ownerOnly()` **之后**（公开版整支关掉）',
+  );
+  check(
+    fn.indexOf('affinity.unlockedFor') < fn.indexOf("paramsFor('sensitive'"),
+    '★ 好感度支在私聊名单判定**之前**（并集语义：任一满足就给）',
+  );
+  // 界面可改
+  const wh = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  check(/id="a-unlock"/.test(wh), '★★ WebUI：解锁门槛有输入框（用户要求"这玩意应该还是可以在 webui 里改"）');
+  check(/id="a-retract"/.test(wh), '★★ WebUI：滞回门槛有输入框');
+  check(/sensitiveUnlock: Number\(\$\('a-unlock'\)\.value\)/.test(wh), '★ 保存时提交 sensitiveUnlock');
+  check(/sensitiveRetract: Math\.min\(/.test(wh), '★ 保存时把 retract 夹在 unlock 之下');
+  check(/\$\('a-unlock'\)\.value = _unlock/.test(wh), '★ 回填时读得到它（并把 retract 钳在 unlock 之下）');
 }
 
 // ── 收尾 ──────────────────────────────────────────────

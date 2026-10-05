@@ -404,12 +404,15 @@ export function lineCount(tier) {
  */
 export function remindSystem(crit) {
   // ⚠️ 2026-09-21：称呼从 `identity.address` 来（`owner` = 平时叫法、`ownerFormal` = 正式叫法）
+  // ⚠️ 2026-09-28：以前这里是 `提醒${of} ${o}`，而 `of` 配的是「服主」——
+  //    实际渲染出来是「提醒**服主** <主人> 充钱」，那个词既生分又是上一代的叫法。
+  //    现在 `callOwnerAny()` 拿「老板」这类**可填的正式叫法**，一个词就够。
   const o = persona.callOwner();
-  const of = persona.callOwnerFormal() || o;
+  const of = persona.callOwnerAny();
   return [
     llm.personaLine(),
     '',
-    `现在你要在 QQ 私聊里**提醒${of} ${o} 充钱**（你的账户余额${crit ? '已经见底了' : '不太够了'}）。`,
+    `现在你要在 QQ 私聊里**提醒${of} 充钱**（你的账户余额${crit ? '已经见底了' : '不太够了'}）。`,
     '',
     '硬要求：',
     '· 两句话以内，像随口说的一句话，**不要像系统通知**；',

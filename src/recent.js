@@ -20,6 +20,9 @@ import { join, basename } from 'node:path';
 import { config, ROOT, CONFIG_FILE } from './config.js';
 import { log } from './log.js';
 import * as persona from './persona.js';
+// ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)` —— 见该文件头
+// ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)` —— 见该文件头
+import { whoTag } from './who.js';
 
 /** group_id -> [{ name, userId, text, at, atMe, time }] */
 const store = new Map();
@@ -323,6 +326,11 @@ export function remember(event, parsed = {}) {
         id: rid || String(given.id ?? ''),
         self: given.self === true || given.fromBot === true,
         name: String(given.name ?? ''),
+        // ⚠️ 2026-10-04 加：连**被引用的那个人**是哪个号一起存下来。
+        //    以前引用行只显示名字（`【引用XX说的】`），引用的是不是当前说话人
+        //    模型判断不了 —— 多人说话时会把话归错人（见上面那串真实案例）。
+        //    `get_msg` 查得到就填；查不到/老数据缺失时为空串，渲染时自动降级为不带号。
+        userId: String(given.userId ?? ''),
         text: String(given.text ?? '').slice(0, 60),
       };
     } else if (rid) {
@@ -332,6 +340,7 @@ export function remember(event, parsed = {}) {
             id: rid,
             self: hit.self === true,
             name: String(hit.name ?? ''),
+            userId: String(hit.userId ?? ''),
             text: String(hit.text ?? '').slice(0, 60),
           }
         : { id: rid }; // 不在缓冲里 → 只留 id（显示成编号，聊胜于无）
@@ -447,6 +456,9 @@ export function fillReplyInfo(groupId, messageId, info) {
     id: hit.replyTo?.id || '',
     self: info.self === true,
     name: String(info.name ?? ''),
+    // ⚠️ 2026-10-04：被引用那个人的 QQ 号（`fetchQuoted` 已经查到了）。
+    //    没它的话引用行只有名字，模型判断不了「引的是不是当前这个人」。
+    userId: info.self === true ? '' : String(info.userId ?? ''),
     text: String(info.text ?? '').slice(0, 60),
   };
   scheduleSave();
@@ -542,7 +554,9 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
     // ⚠️ 带上 QQ 号。用户反馈「多人高密度发言时还是认错人」——
     //    只给昵称的话，一堆人同时说话时很容易把事对错人。
     //    自己那行不用带（已经标了【你自己说的】）。
-    const id = m.self || !m.userId ? '' : `(${m.userId})`;
+    // ⚠️ 2026-10-04：拼号逻辑收进 `who.js` 的 `whoTag()`，跟私聊/日志/引用同一个格式。
+    //    自己那行不带号（已经标了【你自己说的】）。
+    const tag = m.self ? m.name : whoTag(m.name, m.userId);
     // ⚠️⚠️ 2026-09-19 修（用户报：她在群里字面发出 `[图片]` / `[表情包]`）：
     //    **根因是她照着上下文学**——别人发的图在我们这边是占位符 `[图片]`，
     //    她看到"是bro的大豆：[图片]"，就以为**方括号是能用的标记**，
@@ -556,10 +570,13 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
     //    一个编号 ⇒ 看不到引的是谁 ⇒ 把「白天」归错了人。
     let body = String(m.text ?? '');
     if (m.replyTo?.id) {
+      // ⚠️ 2026-10-04：引用行也带 QQ 号（`given`/`hit` 有 userId 时）。
+      //    群里人名重名/改昵称很常见，光看名字模型分不清「引的是谁」。
+      const rTag = m.replyTo.self ? '' : whoTag(m.replyTo.name, m.replyTo.userId);
       const who = m.replyTo.self
         ? '【引用你自己说的】'
-        : m.replyTo.name
-          ? `【引用${m.replyTo.name}说的】`
+        : rTag
+          ? `【引用${rTag}说的】`
           : '【引用】';
       const quote = m.replyTo.text ? `：${m.replyTo.text}` : `（#${m.replyTo.id}）`;
       body = `${who}${quote} ${body.replace(/\[引用#[^\]]*\]/g, '').trim()}`.trim();
@@ -569,7 +586,7 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       /\[(图片|照片|表情包|动画表情|动图|贴纸|gif|sticker|img|image)\]/gi,
       '（发了张图）',
     );
-    lines.push(`${who}${m.name}${id}（${when}）${at}${body}`);
+    lines.push(`${who}${tag}（${when}）${at}${body}`);
   }
   if (!lines.length) return '';
   return lines.join('\n');

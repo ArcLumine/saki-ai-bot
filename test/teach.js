@@ -36,7 +36,8 @@ const check = (ok, label) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── 学习档案：测试前后自动备份/还原，不污染真实数据 ──
-const LEARNED = join(KNOW, 'learned.md');
+// ★ B 方案（2026-09-27）：老的单文件 learned.md 已废 —— owner 教的内容落 `global.md`
+const LEARNED = join(KNOW, 'global.md');
 const originalLearned = readFileSync(LEARNED, 'utf8');
 
 // ── 假模型 ──
@@ -252,9 +253,9 @@ async function main() {
   check(taught, '机器人确认记下了');
   check(calls.extract >= 1, '调用了知识抽取');
   const learnedFile = readFileSync(LEARNED, 'utf8');
-  check(learnedFile.includes('白名单说明'), 'learned.md 里出现了新主题「白名单说明」');
-  check(learnedFile.includes('直接下整合包就能进'), 'learned.md 里存下了教学内容');
-  check(learnedFile.includes('<主人>'), 'learned.md 里记录了教学者');
+  check(learnedFile.includes('白名单说明'), 'global.md 里出现了新主题「白名单说明」');
+  check(learnedFile.includes('直接下整合包就能进'), 'global.md 里存下了教学内容');
+  check(learnedFile.includes('<主人>'), 'global.md 里记录了教学者');
 
   console.log('\n[2] 学了之后，回答要用新知识');
   sent.length = 0;
@@ -328,7 +329,7 @@ async function main() {
 async function cleanup() {
   if (restoreNeeded) {
     writeFileSync(LEARNED, originalLearned, 'utf8');
-    console.log('\n（已还原 knowledge/learned.md）');
+    console.log('\n（已还原 knowledge/global.md）');
   }
   try {
     bot?.kill();

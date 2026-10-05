@@ -9,6 +9,8 @@ import { log } from './log.js';
 import { Bot } from './bot.js';
 import { startWebUI } from './webui.js';
 import * as observe from './observe.js';
+// ⚠️ 2026-09-30：跑团记录（海豹 log → 章节）。**默认关闭**，见下面那段接线。
+import * as diceLog from './dice-log.js';
 import * as life from './life.js';
 import * as storyline from './storyline.js';
 import * as quest from './quest.js';
@@ -889,6 +891,61 @@ startOutboxTick();
         `只在 ${config.friend?.dayFromHour ?? 9}:00-${config.friend?.dayToHour ?? 22}:00 之间发，` +
         `每天 ${Math.round((config.friend?.dailyChance ?? 0.35) * 100)}% 概率挑一个`,
     );
+  }
+}
+
+// ── 跑团记录（海豹 log → 章节，2026-09-30）────────────────
+//
+// ⚠️⚠️ **默认关闭**（`diceLog.enable` 默认 false，用户 2026-09-30 明确
+//    「先写出来但是不启用，我后面再改」）。所以：
+//      · 不注入 `__runner` ⇒ `compress()` 直接返回"没注入压缩用的模型调用"，不花钱
+//      · 不注册定时器 ⇒ `note()` / `compress()` 都不会被调
+//    ⇒ 整个模块现在是**零调用**的死代码，改它不会影响机器人。
+//    启用只需在 config.yml 里把 `diceLog.enable` 改成 true。
+//
+// ⚠️ 为什么模型调用要**注入**而不是模块自己 import llm.js：
+//    那会拉进一整条依赖链（llm → config → …），`dice-log.js` 就没法在套件里
+//    单独跑了。注入的写法见下面 `__runner` 那一行。
+if (config.diceLog?.enable === true) {
+  config.diceLog.__runner = async (system, user) => {
+    // ⚠️ 压缩是**整理已有内容**，不需要深推理 ⇒ 关掉思考链。
+    //    跟 storyline 那次同一个理由：思考链会烧掉绝大部分 token，
+    //    正文写不完就被 `finish_reason: length` 截断 ⇒ JSON 不完整 ⇒ 整次作废。
+    const { collect, thinkingField } = await import('./llm.js');
+    return collect(
+      [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      { maxTokens: 4000, timeoutMs: 150000, ...thinkingField() },
+    );
+  };
+  diceLog.reload();
+  log.info(
+    `[跑团记录] 已启用（海豹 ${config.sealdice?.baseUrl || '未配置'}` +
+      `${config.sealdice?.baseUrl ? '' : ' —— 拉不到 log，只是先待命'}）`,
+  );
+
+  const everyDice = Math.max(60000, Number(config.diceLog.compress?.checkIntervalMs) || 10 * 60 * 1000);
+  setInterval(() => {
+    diceLog
+      .compressIfDue()
+      .catch((e) => log.debug(`[跑团记录] 定时压缩出错：${e.message}`));
+  }, everyDice).unref();
+
+  // ⚠️ 拉 log 也得有人调。这里只在**有海豹且配置了群**时才拉 ——
+  //    不知道哪些群在跑团，硬拉就是白花钱。
+  const diceGroups = Array.isArray(config.diceLog?.groups) ? config.diceLog.groups : [];
+  if (diceGroups.length && config.sealdice?.baseUrl) {
+    const everyNote = Math.max(60000, Number(config.diceLog.pullIntervalMs) || 5 * 60 * 1000);
+    setInterval(() => {
+      for (const gid of diceGroups) {
+        diceLog.note({ groupId: gid }).catch((e) => log.debug(`[跑团记录] 拉取出错：${e.message}`));
+      }
+    }, everyNote).unref();
+    log.info(`[跑团记录] 拉取已启用，群：${diceGroups.join('、')}`);
+  } else if (!diceGroups.length) {
+    log.info('[跑团记录] ⚠️ 没填 diceLog.groups ⇒ 不会去拉 log（不知道哪些群在跑团）');
   }
 }
 

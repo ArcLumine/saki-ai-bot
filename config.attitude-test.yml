@@ -21,6 +21,14 @@ trigger:
   allowGroups:
     - "200000001"
   requireAtInGroup: true
+  # ⚠️ 2026-10-04 加：私聊白名单。
+  #    原来这里没配 `allowPrivateUsers` ⇒ `privateAllowed()` 一律 false
+  #    ⇒ 第 [5] 步那条私聊消息**压根没进 LLM**，`probeOf('在吗，问个事')` 永远是 undefined，
+  #    那条断言**长期是假失败**（基线上就红着，一直被当成噪音）。
+  #    ⚠️ 名单里同时放 OWNER 和 MEMBER，好让「主人私聊」和「陌生人私聊」两档都能验到。
+  allowPrivateUsers:
+    - "10000001"
+    - "30003"
   keywords: []
   historyRounds: 2
   cooldownMs: 0

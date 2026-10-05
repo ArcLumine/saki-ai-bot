@@ -8,7 +8,8 @@
  * 自然口径需要模型判断「这句是不是在给我讲新知识」，所以提示词里把
  * 「闲聊 / 提问 / 抱怨」都明确排除掉，避免把日常聊天记成知识。
  */
-import { config } from './config.js';
+import { config, reasoningField } from './config.js';
+import { llmFetch } from './llm.js';
 import { log } from './log.js';
 // ⚠️ 2026-09-15 补：这条路是**直接 fetch** 打模型的，原来**没记账**
 //    （`llm.js` 里那三处才有 `spend.record`）。后果是「今天花了多少」
@@ -32,7 +33,7 @@ const SYSTEM_BASE = `你在给一个 QQ 群客服机器人做「知识录入」�
 
 **群里的称呼 / 身份（这类也要记）：**
 - **别名的对应关系**：「豆圣又名小豆，也叫 shiderdexiaodou」→ 记成「豆圣 = 小豆 = shiderdexiaodou」
-- 「XX 是服主」「YY 管技术」「ZZ 是管理员」这类**身份归属**
+- 「XX 是主人」「YY 管技术」「ZZ 是管理员」这类**身份归属**
 - 某个人的固定叫法、头衔、外号
 
   ⚠️ 为什么这类也要记：群友聊天时只说「小豆」，机器人得知道那是谁，
@@ -72,7 +73,7 @@ const SYSTEM_BASE = `你在给一个 QQ 群客服机器人做「知识录入」�
 | 「豆圣是本群最恶臭之人」 | ❌ 不记（骂人） |
 | 「豆圣是我老婆」 | ❌ 不记（感情状况 / 玩梗） |
 | 「小豆是本群历史最恶臭之人，老婆是星野」 | ❌ 整条都不记（既有骂人又有感情状况） |
-| 「XX 是服主，管技术」 | ✅ **记**（身份归属） |
+| 「XX 是主人，管技术」 | ✅ **记**（身份归属） |
 
 一句里**既有别名又有骂人**怎么办？→ **整体 hasKnowledge=false**，宁可漏记也别把骂人话存进去。
 
@@ -110,7 +111,7 @@ export async function detectKnowledge(text, mode = 'natural', existingKnowledge 
       ? '注意：对方用了明确的教学措辞，所以这句话很可能包含新知识，但如果没有实质内容（比如只是说了句「记住」），仍然返回 hasKnowledge=false。'
       : '注意：对方只是随口说的，你要自己判断这句里有没有新知识。没有就返回 hasKnowledge=false。';
 
-  const res = await fetch(`${config.llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
+  const res = await llmFetch(`${config.llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -126,6 +127,7 @@ export async function detectKnowledge(text, mode = 'natural', existingKnowledge 
       // ⚠️ max_tokens 必须够大。thinking 不是 OpenAI 兼容接口的通用字段，
       //    不要把它发送到 Gemini 等严格校验请求体的服务。
       max_tokens: 2000,
+      ...reasoningField(),
       stream: false,
       response_format: { type: 'json_object' },
     }),

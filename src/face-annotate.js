@@ -94,7 +94,16 @@ export async function annotateFace(file, face = {}) {
 
   const m = String(raw).match(/\{[\s\S]*\}/);
   if (!m) throw new Error('模型没返回 JSON');
-  const j = JSON.parse(m[0]);
+  // ⚠️ 截到了不等于能解析：模型在 JSON 后面补一段带花括号的说明时，
+  //    贪婪的 `[\s\S]*` 会吃到最后一个 `}`，拼出来的不是合法 JSON。
+  //    直接把 parse 的原话抛出去（"Unexpected token..."）看不出是谁的问题，
+  //    这里换成能定位的说明。批量标注那边本来就是逐张 try/catch，抛是允许的。
+  let j;
+  try {
+    j = JSON.parse(m[0]);
+  } catch {
+    throw new Error('模型返回的 JSON 解析不了（可能后面跟了说明文字）');
+  }
 
   const tag = String(j.tag ?? '')
     .replace(/[^\u4e00-\u9fa5A-Za-z0-9]/g, '')

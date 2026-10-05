@@ -30,6 +30,7 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { ROOT, config, CONFIG_FILE } from './config.js';
+import * as persona from './persona.js';
 import { log } from './log.js';
 
 const STATE_DIR = join(ROOT, 'state');
@@ -116,7 +117,8 @@ export function reload() {
           // ⚠️ 兼容两种老格式：`{head}`（只有开场白）和 `{g,kind}`（新）
           .map((x) => {
             const g = String(x.g ?? x.head ?? '');
-            return { g: g.slice(0, 16), kind: x.kind === 'clause' ? 'clause' : 'head', at: Number(x.at) };
+            const kind = ['clause', 'word', 'start', 'end'].includes(x.kind) ? x.kind : 'head';
+            return { g: g.slice(0, 16), kind, at: Number(x.at) };
           })
           .filter((x) => x.g),
       );
@@ -233,104 +235,59 @@ export function clausesOf(text) {
   return out;
 }
 
+// 人设里的口癖由 identity.style.verbalTics.sentenceStart / sentenceEnd 提供；
+// 这里不再从 config.yml 读取角色专属词表。
 /**
- * 已经确认过的「口癖词」（2026-09-17 加）。
- *
- * ⚠️ 只放**用户亲自报过的**。判断标准不是"这个词不好"，而是
- *    "**它在她的话里出现得太顺嘴了**" —— 同一个语气词反复用，听的人一眼就记住。
- *    所以往这里加词之前，先确认真实聊天里确实高频，别凭感觉塞。
+ * 人设里的口癖：分别取句首 / 句末配置。
+ * 这些是角色的自然说话习惯与软提醒依据，不是输出禁用词。
  */
-const DEFAULT_WORDS = ['倒是'];
-
-/** 口癖词表：`config.yml` 的 `tic.words` 优先，否则用默认表 */
-function ticWords() {
-  const w = cfg().words;
-  // ⚠️⚠️ 2026-09-18：**显式给空数组 = 真的不要词表**。用户拍板「倒」这个口癖不修了、
-  //    改成在人设里承认它 —— 那么代码层就必须能**真关掉**，而不是"空了就回退到默认表"
-  //    （那样 `words: []` 等于没写，人设说"这是口头禅"、代码还在注入"别再用"）。
-  if (Array.isArray(w)) return w.map((x) => String(x ?? '').trim()).filter(Boolean);
-  return DEFAULT_WORDS;
+function ticWords(kind = 'sentenceStart') {
+  return (persona.verbalTics()?.[kind] ?? [])
+    .map((x) => String(x ?? '').trim())
+    .filter(Boolean);
 }
 
-/**
- * 取一句话里命中的**口癖词**（第三层，2026-09-17 加）。
- *
- * ## 为什么还要这一层
- *
- * 用户原话：「先把这个 **倒是** 这个词频率修一下，感觉很高」。
- * 实例：「还没呢，等交完班再说。**你倒是**先吃上了（」
- *
- * 「倒是」正好卡在前两层机制的缝里：
- *   · 它在**句中** → `headOf` 只看开头 4 个字，抓不到；
- *   · 它**每条回复里只出现一次** → `clausesOf` 要求"同一回复里跨 ≥2 句重复"，也抓不到。
- *
- * 前两层管的是"**每次都这么开口**"和"**一句话里反复说同一个词**"；
- * 这一类是"**每条只说一次，但好多条都在说**" ——
- * 它不是"重复得太密"，是"**用得太多**"。
- *
- * ## 为什么不自动统计所有词
- *
- * 试过会更糟：中文里两字常用词太多（「什么」「这个」「就是」「一个」…），
- * 自动统计必然把它们一起算成口癖，然后提示词里塞一堆"别说什么什么"，
- * 那会把她的话拧成另一种怪。所以这里用**小词表**。
- *
- * @param {string} text
- * @returns {string[]} 命中的词（去重、保持词表顺序）
- */
-/**
- * 「倒」这个口癖**硬降频**（2026-09-18 用户拍板）。
- *
- * 用户原话：「倒是真的还是出现的太频繁了，这样肯定不行。
- *   **直接检测到倒和倒是就以百分之 90 的概率去替换其他词吧**」。
- *
- * ⚠️ 为什么从"提示词"改成"代码替换"：前面试过两轮提示词（先是词表提醒、
- *    后来干脆改成"承认这是她的口头禅"），**都没压住** ——
- *    口癖这种事靠"求模型别说"是不行的，只能在她的**发言出口**上动。
- *
- * ⚠️⚠️ 替换策略**保守优先**（改错一句话，比少说一个语气词糟糕得多）：
- *   · **固定搭配**（倒不如 / 反倒 / 我倒觉得）→ 换成等价说法，换了不会错；
- *   · **「倒是」** → 按概率**直接删**（它多半是可有可无的语气词：
- *     「你倒是先吃上了」→「你先吃上了」，语法照样完整）；
- *   · **单独用的「倒」** → 只在**明显的语气位置**（倒也是 / 倒也不 / 倒还挺 / 倒先…）
- *     才动手；**「摔倒 / 倒闭 / 倒计时 / 倒吸 / 倒影 / 倒车」一个都不许碰**。
- *
- * @param {string} text
- * @param {() => number} [rng] 测试用（注入固定值）
- * @returns {string}
- */
-export function softenDao(text, rng = Math.random) {
-  let t = String(text ?? '');
-  if (!t.includes('倒')) return t;
-  const v = Number(cfg().daoReplaceChance);
-  const chance = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.9;
+const cleanStart = (text) =>
+  String(text ?? '').trim().replace(/^[\s"'「『（(【\[]+/, '');
+const cleanEnd = (text) =>
+  String(text ?? '').trim().replace(/[\s"'」』）)】\]。！？!?…～~、，,]+$/, '');
+// 一条回复经常有好几句话；「句首 / 句末」要逐句看，不能只看整条回复首尾。
+const sentenceParts = (text) =>
+  String(text ?? '')
+    .split(/[。！？!?；;…\r\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  // ① 固定搭配：换成等价说法（这些换了不会错）
-  t = t.replace(/倒不如/g, '不如').replace(/反倒是/g, '反而是').replace(/反倒/g, '反而');
-  t = t.replace(/([我你他她])倒(是)?觉得/g, '$1觉得');
-
-  // ② 「倒是」：多半是可省的语气词 → 按概率删掉
-  t = t.replace(/倒是/g, (m) => (rng() < chance ? '' : m));
-
-  // ③ 单独用的「倒」：**白名单式**，只在语气位置动手
-  t = t.replace(/倒(?=(也|还|挺|先|想|像|不|蛮|颇|算|真|有点|有意思))/g, () =>
-    rng() < chance ? '' : '倒',
-  );
-
-  return t;
-}
-
-export function wordsOf(text) {
-  const t = String(text ?? '');
-  if (!t) return [];
-  const out = [];
-  for (const w of ticWords()) {
-    if (w && t.includes(w) && !out.includes(w)) out.push(w);
+/** 句首口癖命中：回复里任何一句话真正以它开头才算，句中普通用法不算。 */
+export function startTicsOf(text) {
+  const out = new Set();
+  for (const sentence of sentenceParts(text)) {
+    const t = cleanStart(sentence);
+    for (const w of ticWords('sentenceStart')) {
+      if (w && t.startsWith(w)) out.add(w);
+    }
   }
-  return out;
+  return [...out];
 }
 
-/**
- * 记一句机器人说过的话。
+/** 句末口癖命中：回复里任何一句话真正以它收尾才算。 */
+export function endTicsOf(text) {
+  const out = new Set();
+  for (const sentence of sentenceParts(text)) {
+    const t = cleanEnd(sentence);
+    for (const w of ticWords('sentenceEnd')) {
+      if (w && t.endsWith(w)) out.add(w);
+    }
+  }
+  return [...out];
+}
+
+/** 兼容旧调用：返回一句话里命中的两类人设口癖。 */
+export function wordsOf(text) {
+  return [...new Set([...startTicsOf(text), ...endTicsOf(text)])];
+}
+
+/** 记一句机器人说过的话。
  *
  * ⚠️ **这是同步函数，不要加 `async`。**
  *    第一版写成了 `async`，而调用处（`bot.js` 和测试）都是**当同步用的**
@@ -358,8 +315,9 @@ export function note(groupId, text) {
   // ② 句中重复的短串（2026-09-14 加，管「哪看到的」这种）
   for (const g of clausesOf(text)) fresh.push({ g, kind: 'clause', at: now });
 
-  // ③ 句中口癖词（2026-09-17 加，管「倒是」这种"每条只说一次、但好多条都在说"的）
-  for (const g of wordsOf(text)) fresh.push({ g, kind: 'word', at: now });
+  // ③ 人设里的句首 / 句末口癖：分别记录，不用「见到就拦」。
+  for (const g of startTicsOf(text)) fresh.push({ g, kind: 'start', at: now });
+  for (const g of endTicsOf(text)) fresh.push({ g, kind: 'end', at: now });
 
   if (!fresh.length) return;
 
@@ -380,13 +338,7 @@ export function note(groupId, text) {
  *    等提醒出来的时候用户早就记住了（他的原话就是"感觉很高"）。
  *    代价可控 —— 提醒只是往提示词里加一句"换个说法"，不是禁用某个词。
  */
-const limitOf = (kind) => {
-  if (kind === 'word') {
-    const v = Number(cfg().wordLimit);
-    return Number.isFinite(v) && v > 0 ? v : 2;
-  }
-  return repeatLimit();
-};
+const limitOf = () => repeatLimit();
 
 /**
  * 平票时先提哪一条。
@@ -396,13 +348,13 @@ const limitOf = (kind) => {
  * ⚠️ 2026-09-17 起 `word` 排最前：那是**用户亲自点过名**的词，
  *    比自动发现的更该先改。
  */
-const KIND_RANK = { word: 2, clause: 1, head: 0 };
+const KIND_RANK = { start: 3, end: 3, word: 2, clause: 1, head: 0 };
 
 /**
  * 有没有哪个词/开场白最近说得太多了？
  *
  * @param {string|number} groupId
- * @returns {{g:string, kind:'head'|'clause', count:number}|null}
+ * @returns {{g:string, kind:'head'|'clause'|'word'|'start'|'end', count:number}|null}
  */
 export function repeated(groupId) {
   const list = store.get(String(groupId)) ?? [];
@@ -459,28 +411,38 @@ export function ticHint(groupId) {
     .map((x) => `「${x.g}」`);
 
   const isWord = r.kind === 'word';
+  const isStart = r.kind === 'start';
+  const isEnd = r.kind === 'end';
   const isClause = r.kind === 'clause';
-  const title = isWord
-    ? '## ⚠️ 你最近老用同一个词（换个说法）'
-    : isClause
-      ? '## ⚠️ 你最近老用同一句措辞（换个说法）'
-      : '## ⚠️ 你最近老这么开口（换个说法）';
+  const title = isStart
+    ? '## ⚠️ 你最近多次用同一种句首口癖（换个说法）'
+    : isEnd
+      ? '## ⚠️ 你最近多次用同一种句末口癖（换个说法）'
+      : isWord
+        ? '## ⚠️ 你最近老用同一个词（换个说法）'
+        : isClause
+          ? '## ⚠️ 你最近老用同一句措辞（换个说法）'
+          : '## ⚠️ 你最近老这么开口（换个说法）';
   return [
     title,
     '',
     `你最近 **${r.count} 次**都用了这个说法：${samples.slice(0, 4).join('、')}`,
     '',
-    '**这就是口癖** —— 不是不能说，是**说得太顺嘴了**：同一个词、同一种说法反复出现，',
-    '听的人一眼就记住。用户的原话是：',
+    '**这是软提醒，不是禁用词**：口癖是这个角色的自然说话习惯，只有反复到让人记住时才需要换一种自然说法。',
+    '用户的原话是：',
     '**「不是说完全不能说，而是遣词造句要有一点变化，要不然我不会记忆这么深刻」**。',
     '',
-    isWord
-      ? `- 🚫 **从现在起别再出现「${r.g}」这个字** —— 这个语气照样要表达，换成别的词或换个句式（⚠️ 这是用户专门点过名的字，再冒出来就是口癖，下面几条回复都算）`
-      : isClause
-        ? '- 🚫 这次**别再用这个说法**了 —— 换个词、换个句式都行'
-        : '- 🚫 这次**别再用这个开头**了（换个说法，或者直接说事）',
+    isStart
+      ? '- 这是这个角色自然的**句首习惯**，不是禁止使用；这次换一个同样自然的开头，或直接说事'
+      : isEnd
+        ? '- 这是这个角色自然的**句末习惯**，不是禁止使用；这次换一个同样自然的收尾，别每句话都下结论'
+        : isWord
+          ? '- 这是旧配置里点名过的口癖词，不是禁用词；换个词或换个句式表达同样的意思'
+          : isClause
+            ? '- 这次换个说法，不要再用这一句固定措辞'
+            : '- 这次换个自然的开头，或者直接说事',
     '- ✅ 最好的做法是**直接说事 / 正面回答**，把话说明白',
-    '- ⚠️ 别换成另一个同样顺嘴的语气词顶上，也别只"换一句同样味道的套话" ——',
+    '- ⚠️ 别换成另一个同样顺嘴的语气词顶上，也别只"换一句同样味道的套话"',
     '  要换掉的是**那个姿态**，不是那几个字',
   ].join('\n');
 }
@@ -488,13 +450,16 @@ export function ticHint(groupId) {
 /** 给管理界面/自检看 */
 export function status(groupId) {
   const list = groupId === undefined ? [] : (store.get(String(groupId)) ?? []);
+  const tics = persona.verbalTics();
   return {
     groups: store.size,
     records: [...store.values()].reduce((n, l) => n + l.length, 0),
     windowMs: windowMs(),
     repeatLimit: repeatLimit(),
-    wordLimit: limitOf('word'),
-    words: ticWords(),
+    // 旧接口字段保留，值也统一走通用阈值。
+    wordLimit: limitOf(),
+    words: [...tics.sentenceStart, ...tics.sentenceEnd],
+    tics,
     repeated: groupId === undefined ? null : repeated(groupId),
     recent: list.slice(-8).map((x) => x.g),
   };

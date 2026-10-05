@@ -11,7 +11,8 @@
  *      （他共有的那个群）—— 否则会分裂成两份记忆，她在私聊里听过的、
  *      到群里就"不记得"了。
  *   ② **兜底不能写错地方**：查不到共有群时只能写 `dm:<QQ号>.md`，
- *      🚫🚫 **绝不能掉进共享的 `group-memory.md`** —— 那个文件**所有群都能看到**，
+ *      🚫🚫 **绝不能掉进任何共享文件**（旧的 `group-memory.md` 已删，现在是
+ *      `observe/_shared.md`）—— 那个文件**所有群都能看到**，
  *      私聊内容进那儿就是泄漏。
  *
  * ⚠️ 纯离线：不起进程、不碰真 QQ、不花钱。
@@ -58,34 +59,62 @@ check(
 );
 
 console.log('\n【3】★★ 兜底绝不能写进共享的群记忆（那个文件所有群都看得到）');
+// ⚠️ 2026-09-28：观察记忆搬到了 `knowledge/observe/`，路由变成**纯算术**
+//   （路径只由 scope 决定，"看哪个文件存在就往哪写"那套没了）。
+//   ⇒ 现在是**结构上**就不可能泄漏：算不出 scope 就落 `observe/_shared.md`，
+//   而 `_shared` 永远匹配不到任何真群号 —— 宁可丢也不让别的群读到。
 const dmFile = observe.__targetFileFor(`dm:${ONLY_DM}`);
-check(/dm/.test(dmFile) && dmFile.endsWith(`${ONLY_DM}.md`), '纯好友私聊 → dm/<QQ号>.md', dmFile);
-check(!/group-memory/.test(dmFile), '★★ 纯好友私聊**没有**掉进 group-memory.md', dmFile);
+check(
+  /observe[\\/]dm-/.test(dmFile) && dmFile.endsWith(`${ONLY_DM}.md`),
+  '纯好友私聊 → observe/dm-<QQ号>.md',
+  dmFile,
+);
+check(!/group-memory/.test(dmFile), '★★ 纯好友私聊**没有**掉进共享文件（旧 group-memory.md / observe/_shared.md）', dmFile);
 
-// ⚠️⚠️ 下面这条是**第一版真漏掉的**：私聊归到一个"还没有自己资料库文件"的群时，
-//    `targetFileFor` 会掉回共享的 `group-memory.md` → 私聊内容被所有群看到 ✗
 const freshPrivate = observe.__targetFileFor(GID, true);
 check(!/group-memory/.test(freshPrivate), '★★ 私聊归到"还没资料库的群"时也没掉进共享文件', freshPrivate);
 check(
-  /groups/.test(freshPrivate) && freshPrivate.endsWith(`${GID}.md`),
-  '而是就地给这个群建一份 groups/<群号>.md',
+  /observe/.test(freshPrivate) && freshPrivate.endsWith(`${GID}.md`),
+  '而是落 observe/<群号>.md（观察记忆自己的位置）',
   freshPrivate,
 );
-// 对照：**群自己的消息**维持老行为（那个群没资料库就写共享文件）—— 不惊动别的群
+// ⚠️ 2026-09-28 **行为变了**：旧版这里会回落共享的群资料库（现已删除）
+//   （就是 `test/dm-memory.js` 当年抓出来的那个泄漏口）。现在**没有这个分支**了 ——
+//   群消息一样按 scope 算路径，落 `observe/<群号>.md`。
 const freshPublic = observe.__targetFileFor(GID, false);
-check(/group-memory/.test(freshPublic), '（对照）群消息在没有资料库时仍写共享文件', freshPublic);
+check(freshPublic === freshPrivate, '群消息和私聊归到同一个群 → 同一个观察文件', freshPublic);
+check(
+  !/group-memory/.test(freshPublic) && /observe/.test(freshPublic),
+  '（对照）群消息**不再**写共享文件了（那个回落口去掉了）',
+  freshPublic,
+);
+{
+  // ⚠️ 认不出 scope 时的兜底：必须落在**没有群会读到**的地方
+  const orphan = observe.__targetFileFor('', false);
+  check(
+    /observe[\\/]_shared\.md$/.test(orphan) && !/group-memory/.test(orphan),
+    '认不出属于谁 → observe/_shared.md（不是共享的 group-memory.md —— 那个文件 2026-09-28 已删）',
+    orphan,
+  );
+  const knowledge = await import('../src/knowledge.js');
+  const txt = String(knowledge.knowledgeText({ groupId: '200000002' }) ?? '');
+  check(
+    !txt.includes('_shared') || txt.length < 50,
+    '兜底那份不会被任何群读到（真群号永远匹配不到 _shared）',
+  );
+}
 
-console.log('\n【3b】★★ 已有资料库的群：两种来源进的是**同一个文件**');
+console.log('\n【3b】★★ 同一个群：两种来源进的是**同一个文件**');
 // ⚠️ 这一组**不能在隔离环境里硬断言** —— `run-all` 给每个套件发的是 `knowledge/` 的
-//    **临时副本**，那份副本里没有真实的 `groups/200000006.md`。所以先看这个环境里
-//    那个群到底有没有资料库，有才断言（没有就跳过并说明，不算失败）。
+//    **临时副本**，那份副本里没有真实的 `observe/200000006.md`。所以先看这个环境里
+//    那个群到底有没有观察文件，有才断言（没有就跳过并说明，不算失败）。
 const knownPublic = observe.__targetFileFor('200000006', false);
-if (/groups/.test(knownPublic)) {
+if (/observe/.test(knownPublic)) {
   const knownPrivate = observe.__targetFileFor('200000006', true);
-  check(!/group-memory/.test(knownPublic), '群消息 → groups/200000006.md', knownPublic);
+  check(!/group-memory/.test(knownPublic), '群消息 → observe/200000006.md', knownPublic);
   check(knownPublic === knownPrivate, '★★ 私聊和群消息**同一个文件**（这就是"同一套资料库"）', knownPrivate);
 } else {
-  console.log(`  ⏭  跳过：这个环境里没有 200000006 的群资料库（隔离副本里本来就没有）`);
+  console.log(`  ⏭  跳过：这个环境里没有 200000006 的观察文件（隔离副本里本来就没有）`);
   console.log('     —— "同一套资料库"由上面【3】那条"私聊归到群号"间接覆盖');
 }
 

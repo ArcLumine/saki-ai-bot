@@ -784,7 +784,7 @@
   <nav>
     <div class="navgrp">基础</div>
     <button data-tab="model" class="on">模型</button>
-    <button data-tab="groups">群与触发</button>
+    <button data-tab="groups">活跃度</button>
     <div class="navgrp">内容</div>
     <!-- ⚠️ 2026-09-21：人设单独一页（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
     <button data-tab="persona">人设</button>
@@ -824,6 +824,21 @@
         <div class="f1">
           <label>机器人 QQ</label>
           <input type="text" id="id-botQQ" placeholder="例如 10000002">
+        </div>
+      </div>
+      <!-- ⚠️ 2026-09-28：主人的各种叫法（`config.ownerAliases`）。
+           为什么放这张卡而不是人设页：人设包的 `address.*` 管的是"**她**怎么称呼别人"，
+           而"别人怎么叫他"是**共用事实**，跟 `ownerQQ` 一样换人设不该动。
+           ⚠️ 这些只是用来**认出**「这是不是在说他」，不代表她要跟着这么叫（那个在 address.owner）。
+           DOM 结构要跟 `tagRow()` 生成的一致（`tags-<id>` + `data-for` + hidden input），
+           否则 `tagsSync('id-ownerAliases')` 找不到容器，标签不会回显。 -->
+      <div class="row">
+        <div class="f14">
+          <label>主人的各种叫法（识别用）<span class="q" tabindex="0" data-q="群里/私聊里别人这么喊他时，用它认出「这是不是在说他」。⚠️ 这些不代表她要跟着这么叫 —— 她该怎么叫，去人设页「她怎么称呼别人 → 平时怎么叫主人」。">?</span></label>
+          <div class="tags" id="tags-id-ownerAliases" data-for="id-ownerAliases">
+            <input class="tagadd" placeholder="输入后回车，例：粥粥">
+          </div>
+          <input type="hidden" id="id-ownerAliases" value="">
         </div>
       </div>
       <div class="btns">
@@ -969,10 +984,10 @@
     </div>
   </section>
 
-  <!-- 群与触发 -->
+  <!-- 活跃度 -->
   <section id="tab-groups" class="hidden">
     <div class="pagehead">
-      <div class="t">群与触发</div>
+      <div class="t">活跃度</div>
       <div class="d">决定她在哪些群说话、回得多主动、谁能教她</div>
     </div>
 
@@ -990,6 +1005,74 @@
       <div class="btns">
         <button class="act" onclick="saveTrigger()">保存回复节奏</button>
       </div>
+    </div>
+
+    <!-- 2026-10-03：召唤频率闸。**单独一张卡**，别并进上面那张 ——
+         它管的是"点名刷屏"，阈值必须比闲聊那套高得多，混在一起调不动。 -->
+    <div class="card">
+      <h2>召唤频率闸 <span class="pill" id="msg-perUserCall"></span></h2>
+      <p class="hint">
+        治「一个人换着花样点名刷屏」。@她 / 引用 / 正文点名 / 戳 / 关键词 /
+        服务器问题这六种召唤<b>都不再豁免</b>了 —— 之前它们完全绕过上面那张闸，
+        只要一直打名字就能无限触发完整生成。
+        撞线后<b>只回一句提示</b>，之后全静默（省一次模型调用）。
+      </p>
+      <div class="row">
+        <div>
+          <label>统计窗口（毫秒）</label>
+          <input type="number" id="chatPerUserCall-windowMs" step="10000">
+        </div>
+        <div>
+          <label>阈值（超过直接静默）</label>
+          <input type="number" id="chatPerUserCall-limit">
+        </div>
+      </div>
+      <div class="btns">
+        <label class="inline13">
+          <input type="checkbox" id="chatPerUserCall-enable" class="wauto"> 启用
+        </label>
+        <button class="act" onclick="savePerUserCall()">保存召唤频率闸</button>
+      </div>
+      <p class="hint mt10">
+        ⚠️ <b>和上面那张闸是分开计数的</b>：正常聊天不会偷走召唤额度，反过来也一样。
+        ⚠️ 默认值<b>故意很高</b>（2 分钟 10 次）—— 召唤是"真在问她"，
+        误伤比多花一次调用更伤。真嫌刷屏就调低它。
+      </p>
+    </div>
+
+    <!-- 2026-10-02：单人频率闸。单独一张卡，别塞进上面那张 ——
+         这三个数是"治刷屏"的，和"节奏"是两件事，调的时候不该混在一起。 -->
+    <div class="card">
+      <h2>单人频率闸 <span class="pill" id="msg-perUser"></span></h2>
+      <p class="hint">
+        治「一个人反复触发、把 token 烧光」。冷却是<b>按群</b>算的，
+        一个人连发时每条都算"冷却已过" —— 这里按<b>人</b>再压一层。
+        超软阈值后她会开始自己收着，超硬阈值直接不问她（<b>省一次调用</b>）。
+      </p>
+      <div class="row">
+        <div>
+          <label>统计窗口（毫秒）</label>
+          <input type="number" id="chatPerUser-windowMs" step="10000">
+        </div>
+        <div>
+          <label>软阈值（超过就开始省着回）</label>
+          <input type="number" id="chatPerUser-softLimit">
+        </div>
+        <div>
+          <label>硬阈值（超过直接静默）</label>
+          <input type="number" id="chatPerUser-hardLimit">
+        </div>
+      </div>
+      <div class="btns">
+        <label class="inline13">
+          <input type="checkbox" id="chatPerUser-enable" class="wauto"> 启用
+        </label>
+        <button class="act" onclick="savePerUser()">保存单人频率闸</button>
+      </div>
+      <p class="hint mt10">
+        ⚠️ <b>硬阈值会连真问题一起静默</b>（用户明确要求「问题类也不豁免」——
+        换个问法绕不过豁免，那就只能按人头压）。真觉得误伤，<b>把硬阈值调大就行</b>，不用改代码。
+      </p>
     </div>
 
     <div class="card primary">
@@ -1073,6 +1156,30 @@
       <div class="btns">
         <button class="ghost" onclick="loadGroupRespond()">刷新群列表</button>
         <span class="msg" id="msg-group-respond"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>骰娘模式（海豹骰）<span class="q" tabindex="0" data-q="进了这个模式之后，她**只应答骰点指令**（.ra / .r 这类），别的消息一律不回。
+⚠️ 它和「安静指令」不是一回事：安静是什么都不说（含骰点），骰娘是只说骰点。
+⚠️ 触发词必须**整句相等**，不是关键词匹配 —— 「今天散场了吧」这种闲聊不会触发。
+⚠️ 权限跟安静指令一样：服主 / 群管理员 / 白名单里的人才能下这个令。">?</span></h2>
+      <div class="switch mt8">
+        <input type="checkbox" id="dm-enable">
+        <div>
+          <div class="t">启用骰娘模式</div>
+          <div class="d">关掉后下面那些触发词一律不生效</div>
+        </div>
+      </div>
+      <div id="dm-tagger"></div>
+      <div class="row mt8">
+        <div><label>超时自动退出（分钟）<span class="q" tabindex="0" data-q="填 0 = 永不自动退，只能靠下面的退出词解除。
+⚠️ 建议别设成 0：忘了解除的话她会长时间不说话，那种情况比「超时退出了」难受得多。">?</span></label><input type="number" id="dm-duration" min="0" step="5"></div>
+      </div>
+      <div class="btns">
+        <button class="ghost" onclick="saveDiceMode()">保存</button>
+        <button class="ghost" onclick="renderDiceMode()">放弃修改</button>
+        <span class="msg" id="msg-dm"></span>
       </div>
     </div>
 
@@ -1166,11 +1273,11 @@
         <div><span class="k">这是什么</span><span class="v">服务器的事：进服、排障、规则、存档、价格</span></div>
         <div><span class="k">落到哪</span><span class="v"><b>hzymtr-server.md</b></span></div>
         <div><span class="k">这是什么</span><span class="v"><b>群友是谁</b>、什么性格、群里发生过什么（比如「luomosan 上初三，压力大」）</span></div>
-        <div><span class="k">落到哪</span><span class="v"><b>group-memory.md</b>（群资料库）</span></div>
+        <div><span class="k">落到哪</span><span class="v"><b>knowledge/observe/&lt;群号&gt;.md</b>（这个群自己暗中攒的，<b>只在这个群注入</b>）</span></div>
         <div><span class="k">这是什么</span><span class="v">二次元作品、乐队、角色</span></div>
         <div><span class="k">落到哪</span><span class="v"><b>knowledge/anime/&lt;库名&gt;.md</b>（⚠️ 由人设的 <span class="mono">anime.works</span> 决定读哪几个 —— 见「人设」页）</span></div>
-        <div><span class="k">这是什么</span><span class="v">群里临时教的一句话（「记住：…」）</span></div>
-        <div><span class="k">落到哪</span><span class="v"><b>learned.md</b>（机器人和群主自动维护；<b>可以手动改</b>，但格式有硬要求，见下方校验条）</span></div>
+        <div><span class="k">这是什么</span><span class="v">群里临时教的一句话（「记住：…」）· <b>2026-09-27 起按归属分三份</b></span></div>
+        <div><span class="k">落到哪</span><span class="v"><b>global.md</b>（<b>主人</b>教的 → 所有群+私聊都读）· <b>knowledge/groups/&lt;群号&gt;.md</b>（群友教的 → 只在那一个群）· <b>knowledge/dm/&lt;QQ号&gt;.md</b>（私聊教的 → 只跟那个人私聊时）；<b>可以手动改</b>，但格式有硬要求，见下方校验条</span></div>
       </div>
       <p class="hint mt8">
         简单判断：<b>关于「它自己」→ 人设</b>；<b>关于「服务器」→ 服务器库</b>；
@@ -1803,7 +1910,7 @@
         ⚠️ 2026-09-16 起：<b>没有"全局默认"了，完全按群各设各的</b> ——
         「日常事件」页和「二级剧情」页里的参数就是这一页在管。<br>
         <b>留空 = 用内置起点</b>（输入框里的灰字就是"现在生效的值"）；填了 = 这个群单独用。<br>
-        ⚠️ 和「群与触发」里的<b>档位</b>不是一回事：
+        ⚠️ 和「活跃度」里的<b>档位</b>不是一回事：
         档位管的是「她要不要在这个群说话」，这里管的是「<b>事件和剧情在这个群怎么跑</b>」。<br>
         ⚠️ <b>每个群的条数、排程、故事线都是分开算的</b> —— 给 A 群设成每天 1 条，不影响 B 群。
       </p>
@@ -1832,7 +1939,7 @@
       <p class="hint">
         每个群友一个 0~100 的数，默认 50。<b>只由"事件和互动"改变</b> ——
         压缩、摘要那些自动机制一个字都不许碰它。
-        ⚠️ <b>对服主不生效</b>（你和它的关系是单独一套，优先级更高）。
+        ⚠️ <b>对主人不生效</b>（你和它的关系是单独一套，优先级更高）。
         <br>⚠️ <b>按群各记各的</b>（2026-09-15 晚）：同一个人在不同群里的分是分开的 ——
         在 A 群混熟了不代表在 B 群也熟。下面选一个群看那一个群的。
       </p>
@@ -1863,6 +1970,11 @@
       <div class="row">
         <!-- ⚠️ 2026-09-20：好感度上限已改为无限（用户要求）→ 门槛的 max 不能还是 100 -->
         <div><label>加好友的门槛（好感度）</label><input type="number" id="a-threshold" min="50" max="999999"></div>
+        <!-- ⚠️ 2026-09-30 新增：下面两个与「加好友」那条线**故意不对齐**
+             （用户原话「群聊还是大于 70 解锁但是大于 90 才能加好友」）。
+             一个是"常客级"就放松说话，一个到"已经是自己人"才发加好友通知。 -->
+        <div><label>群里放松说话的门槛（好感度）</label><input type="number" id="a-unlock" min="50" max="999999"></div>
+        <div><label>掉到多少才收回（滞回）</label><input type="number" id="a-retract" min="0" max="999999"></div>
         <div><label>排行榜显示几个</label><input type="number" id="a-boardSize" min="1" max="30"></div>
         <div><label>回应判定窗口（分钟）</label><input type="number" id="a-window" min="1" step="5"></div>
       </div>
@@ -2477,7 +2589,9 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'knowledge') loadKnowledge();
     if (b.dataset.tab === 'persona') personaRefresh();
     if (b.dataset.tab === 'faces') renderFaces();
-    if (b.dataset.tab === 'groups') { loadGroupRespond(); fillStrictForGroup(); }
+    // ⚠️ 2026-09-30：骰娘模式那张卡也在 groups 页里（跟「回复灵敏度」同一页），
+    //    所以跟着同一个时机加载。⚠️ 别漏了 —— 漏了就是「进页面标签是空的」。
+    if (b.dataset.tab === 'groups') { loadGroupRespond(); fillStrictForGroup(); renderDiceMode(); }
     if (b.dataset.tab === 'qzone') renderQzone();
     if (b.dataset.tab === 'life') renderLife();
     if (b.dataset.tab === 'quest') { renderQuest(); renderStoryline(); startQuestPoll(); }
@@ -2512,6 +2626,10 @@ async function reloadAll() {
   // 身份（主人 / 机器人）—— 2026-09-15 用户要求：可编辑，而且「群主」改称「主人」
   $('id-ownerQQ').value = c.ownerQQ || '';
   $('id-botQQ').value = c.botQQ || '';
+  // ⚠️ 2026-09-28：主人的各种叫法（`config.ownerAliases`）也在这张卡里，
+  //    ⚠️ 顺序有讲究：先填 hidden input，再 tagsSync 把它渲染成标签。
+  $('id-ownerAliases').value = (c.ownerAliases ?? []).join('、');
+  tagsSync('id-ownerAliases');
 
   // 模型
   $('llm-baseURL').value = c.llm.baseURL || '';
@@ -2546,7 +2664,7 @@ async function reloadAll() {
   igProviderChanged();
   igCacheInfo();
 
-  // 群与触发
+  // 活跃度（内部仍是 groups）
   $('trigger-allowGroups').value = (c.trigger.allowGroups || []).join('\n');
   $('trigger-allowPrivateUsers').value = (c.trigger.allowPrivateUsers || []).join('\n');
   $('trigger-groupChat').checked = !!c.trigger.groupChat;
@@ -2554,6 +2672,22 @@ async function reloadAll() {
   $('trigger-requireAtInGroup').checked = !!c.trigger.requireAtInGroup;
   $('trigger-historyRounds').value = c.trigger.historyRounds ?? 6;
   $('trigger-cooldownMs').value = c.trigger.cooldownMs ?? 2000;
+
+  // 单人频率闸（2026-10-02）
+  // ⚠️ 默认值必须和 `config.js` 里的**同一份**（5 分钟 / 3 / 6），
+  //    不然界面上显示的数字和实际生效的不一样，调了没反应还会以为功能坏了。
+  const pu = (c.chat && c.chat.perUser) || {};
+  $('chatPerUser-enable').checked = pu.enable === true;
+  $('chatPerUser-windowMs').value = pu.windowMs ?? 300000;
+  $('chatPerUser-softLimit').value = pu.softLimit ?? 3;
+  $('chatPerUser-hardLimit').value = pu.hardLimit ?? 6;
+
+  // ⚠️ 召唤频率闸。默认值必须和 `config.js` 同一份（2 分钟 / 10）——
+  //    不然界面显示的和实际生效的不一样，调了没反应还会以为功能坏了。
+  const puc = (c.chat && c.chat.perUserCall) || {};
+  $('chatPerUserCall-enable').checked = puc.enable === true;
+  $('chatPerUserCall-windowMs').value = puc.windowMs ?? 120000;
+  $('chatPerUserCall-limit').value = puc.limit ?? 10;
 
   // QQ空间
   if (c.qzone) {
@@ -3196,7 +3330,7 @@ async function questStartNow() {
   const el = $('msg-quest2');
   const btn = $('btn-q-now');
   const gid = String($('q-group')?.value || '').trim();
-  if (!gid) { flash(el, false, '没有 1 档群可选（只有 1 档群进事件系统，先去「群与触发」改档位）'); return; }
+  if (!gid) { flash(el, false, '没有 1 档群可选（只有 1 档群进事件系统，先去「活跃度」改档位）'); return; }
   if (!confirm(`这会**真的**往群 ${gid} 发一条剧情，而且它会开始等群友回话（最多跑几小时）。\n\n确定吗？`)) return;
   btn.disabled = true;
   flash(el, null, `正在给群 ${gid} 生成开场…`);
@@ -3445,7 +3579,7 @@ async function renderGroupParams() {
       box.innerHTML =
         '<p class="hint">现在<b>没有 1 档群</b> —— 只有 1 档群才进事件系统（日常事件 + 剧情）。' +
         (skipped.length ? `<br>不在事件系统里的群：${skipped.map(esc).join('、')}` : '') +
-        '<br>先去「群与触发」把要跑事件的群改成 <b>1 档</b>。</p>';
+        '<br>先去「活跃度」把要跑事件的群改成 <b>1 档</b>。</p>';
       return;
     }
     const keep = String($('gp-group')?.value || localStorage.getItem('gp-group') || '');
@@ -3701,6 +3835,12 @@ async function renderAffinity() {
       }
     }
     $('a-threshold').value = c.friendThreshold ?? 90;
+    // ⚠️ 2026-09-30：回填时把「收回」钳在「门槛」之下。配置侧也夹过一次
+    //    （config.js），这里是**界面侧**的第二道 —— 免得用户填了 90/70 之后
+    //    看着两个框都是"合法值"，实际那档只开不关却毫无提示。
+    const _unlock = Number(c.sensitiveUnlock) || 70;
+    $('a-unlock').value = _unlock;
+    $('a-retract').value = Math.min(_unlock - 1, Number(c.sensitiveRetract) || 60);
     $('a-boardSize').value = c.boardSize ?? 10;
     $('a-window').value = Math.round((c.interactWindowMs ?? 1800000) / 60000);
     $('f-enable').checked = c.enable !== false;
@@ -3714,6 +3854,8 @@ async function renderAffinity() {
     el.innerHTML =
       kv('有记录的人数', sc.count ?? (s.friendList || []).length ?? 0) +
       kv('加好友门槛', `<b>${c.friendThreshold ?? 90}</b>（到线会在群里 @ 他，让他来加）`) +
+      // ⚠️ 2026-09-30：与上面那条**故意不对齐**，所以摘要里也要写清是两个数。
+      kv('群里放松说话门槛', `<b>${Number(c.sensitiveUnlock) || 70}</b>（到线在群里对他放宽一档；掉到 <b>${Math.min((Number(c.sensitiveUnlock) || 70) - 1, Number(c.sensitiveRetract) || 60)}</b> 以下才收回）`) +
       kv('已发到线通知', `${s.noticed ?? 0} 人`) +
       kv('已经是好友', `${s.friends ?? 0} 人`) +
       kv('今天挑过了吗', s.todayPicked ? '挑过了' : '还没') +
@@ -3744,6 +3886,13 @@ async function saveAffinity() {
     body: JSON.stringify({
       affinity: {
         friendThreshold: Number($('a-threshold').value),
+        // ⚠️ 2026-09-30：这两个与上面那条**是两件独立的事**，界面也分开填。
+        //    `put('affinity', …)` 是**逐键合并**，所以平铺标量不会冲掉兄弟键。
+        sensitiveUnlock: Number($('a-unlock').value),
+        sensitiveRetract: Math.min(
+          Number($('a-unlock').value) - 1,
+          Number($('a-retract').value),
+        ),
         boardSize: Number($('a-boardSize').value),
         interactWindowMs: Math.round(Number($('a-window').value) * 60000),
       },
@@ -3814,12 +3963,15 @@ async function saveIdentity() {
   const el = $('msg-id');
   const ownerQQ = String($('id-ownerQQ').value || '').replace(/\D/g, '');
   const botQQ = String($('id-botQQ').value || '').replace(/\D/g, '');
+  // ⚠️ 2026-09-28：主人的各种叫法跟着这张卡一起存。
+  //    `pjList` 负责按 `、,，` 拆行、trim、去空 —— 手打成「粥粥、舟老师」一整行也认。
+  const ownerAliases = pjList($('id-ownerAliases')?.value);
   if (!ownerQQ) return flash(el, false, '主人 QQ 不能空');
   if (!botQQ) return flash(el, false, '机器人 QQ 不能空');
   if (ownerQQ === botQQ) return flash(el, false, '主人和机器人不能是同一个 QQ');
   const r = await api('/api/config', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ ownerQQ, botQQ }),
+    body: JSON.stringify({ ownerQQ, botQQ, ownerAliases }),
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
   if (r.ok) reloadAll();
@@ -4065,7 +4217,7 @@ async function testImagegen() {
     '<img src="' + r.dataUrl + '" style="max-width:340px;border-radius:10px;border:1px solid #e5e7eb">' + detail;
 }
 
-// ── 保存：群与触发 ──
+// ── 保存：活跃度 ──
 async function saveTrigger() {
   // ⚠️ 这份设置横跨两个卡片（「它能在哪些群说话」+「回复与分条」），
   //    两边各有一个保存按钮，点了都要有反馈 —— 所以两个提示位都刷。
@@ -4097,6 +4249,61 @@ async function saveTrigger() {
     const el = $(id);
     if (el) flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
   }
+  if (r.ok) reloadAll();
+}
+
+// ── 单人频率闸（2026-10-02）──
+// ⚠️ 单独一个函数，别并进 saveTrigger：那两个按钮管的是「节奏」，
+//    这三个数管的是「省调用」，混在一起时保存失败会互相牵连、看不出是谁的问题。
+async function savePerUser() {
+  // ⚠️ 硬阈值低于软阈值就在前端拦一手（config.js 那边也会兜底改写，
+  //    但那时用户已经存进去了、界面上显示的和自己存的不一样，很难查）。
+  const soft = Math.max(0, Math.round(Number($('chatPerUser-softLimit').value) || 0));
+  let hard = Math.round(Number($('chatPerUser-hardLimit').value) || 0);
+  if (hard && hard <= soft) {
+    const el0 = $('msg-perUser');
+    if (el0) flash(el0, false, `硬阈值必须比软阈值大（现在 ${hard} ≤ ${soft}），已自动改成 ${soft + 1}`);
+    hard = soft + 1;
+    $('chatPerUser-hardLimit').value = hard;
+  }
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      chat: {
+        perUser: {
+          enable: $('chatPerUser-enable').checked,
+          windowMs: Math.max(10000, Number($('chatPerUser-windowMs').value) || 300000),
+          softLimit: soft,
+          hardLimit: hard,
+        },
+      },
+    })
+  });
+  const el = $('msg-perUser');
+  if (el) flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+// ⚠️ 召唤频率闸 —— **独立函数 + 独立按钮**（用户 2026-10-03 要求能单独关）。
+//    别并进 savePerUser：两个闸的量级差着好几倍（6 vs 10 次）、
+//    窗口也不同（5 分钟 vs 2 分钟），混在一张卡里调不动、也看不出是谁的问题。
+async function savePerUserCall() {
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      chat: {
+        perUserCall: {
+          enable: $('chatPerUserCall-enable').checked,
+          // ⚠️ 下限 10 秒：更短的窗口统计不出刷屏，只是随机抖动（和 config.js 一致）。
+          windowMs: Math.max(10000, Number($('chatPerUserCall-windowMs').value) || 120000),
+          // ⚠️ 下限 1：存 0 会变成"永远放行"（0 次就等于关），那是配置写错。
+          limit: Math.max(1, Math.round(Number($('chatPerUserCall-limit').value) || 10)),
+        },
+      },
+    })
+  });
+  const el = $('msg-perUserCall');
+  if (el) flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
   if (r.ok) reloadAll();
 }
 
@@ -4442,6 +4649,83 @@ async function loadGroupRespond() {
     }).join('');
   } catch (e) {
     el.textContent = '出错：' + e.message;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// 骰娘模式（2026-09-30）—— 触发词按用户要求做成可在界面上改
+//
+// ⚠️ 为什么用现成的 tagRow/tagsSync/pjList：
+//   触发词本来就是**数组**，而那套组件（人设的「她怎么称呼别人」在用）
+//   就是为数组做的。复用它 = 交互一致，也不用另写一遍增删逻辑。
+// ⚠️ 为什么**不**把 `sealdice.token` 也放进界面：那是本机密钥，
+//   界面只用来改触发词就够了。
+// ══════════════════════════════════════════════════════════════
+
+/** 拉一次配置并回填骰娘模式那张卡 */
+async function renderDiceMode() {
+  const msg = $('msg-dm');
+  try {
+    const r = await api('/api/config');
+    if (!r.ok) { flash(msg, false, '读配置失败：' + (r.error || '')); return; }
+    const d = r.config?.diceMode ?? {};
+    $('dm-enable').checked = d.enable !== false;
+    // ⚠️ 分钟 ⇄ 毫秒：config.yml 里存的是毫秒，界面上填分钟更好读
+    $('dm-duration').value = Math.round((Number(d.durationMs) || 0) / 60000);
+
+    const box = $('dm-tagger');
+    if (!box) return;
+    const tagRow2 = (label, id, value, hint) => {
+      const { ph: p2, tip } = hintSplit(hint);
+      return (
+        '<div class="fld">' +
+        '<label>' + label + (tip ? '<span class="q" tabindex="0" data-q="' + escAttr(tip) + '">?</span>' : '') + '</label>' +
+        '<div class="tags" id="tags-' + escAttr(id) + '" data-for="' + escAttr(id) + '">' +
+        '<input class="tagadd" placeholder="' + escAttr(p2 || '输入后回车') + '">' +
+        '</div>' +
+        '<input type="hidden" id="' + escAttr(id) + '" value="' + escAttr(value) + '">' +
+        '</div>'
+      );
+    };
+    box.innerHTML =
+      tagRow2('进去的触发词（整句相等）', 'dm-enter', (d.enterKeys ?? []).join('、'),
+        '她进入骰娘模式的话。⚠️ 必须**整句相等**：写「骰娘」就只有发「骰娘」两个字才触发，'
+        + '而「骰娘好可爱」不会。之所以不用关键词匹配，是因为误进骰娘模式会让整局停摆。') +
+      tagRow2('退出的触发词', 'dm-exit', (d.exitKeys ?? []).join('、'),
+        '解除用的。权限跟进去一样（服主 / 群管理员 / 白名单）。') +
+      tagRow2('不当作骰点的句子', 'dm-skip', (d.skipDiceKeys ?? []).join('、'),
+        '例外清单。默认凡带「.」或「/」开头且后跟命令词的都算骰点（海豹命令很多，穷举会漏），'
+        + '所以用这个黑名单排除个别句子。');
+    tagsSync('dm-enter');
+    tagsSync('dm-exit');
+    tagsSync('dm-skip');
+  } catch (e) {
+    flash(msg, false, '出错：' + e.message);
+  }
+}
+
+/** 把那张卡上的值存进 config.yml */
+async function saveDiceMode() {
+  const msg = $('msg-dm');
+  try {
+    const r = await api('/api/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        diceMode: {
+          enable: $('dm-enable').checked,
+          // ⚠️ `pjList` 按「、，,换行」拆，正好对应 tagRow 的输入格式
+          enterKeys: pjList($('dm-enter').value),
+          exitKeys: pjList($('dm-exit').value),
+          skipDiceKeys: pjList($('dm-skip').value),
+          // ⚠️ 界面填「分钟」，config.yml 存「毫秒」—— 别搞反了
+          durationMs: Math.max(0, Number($('dm-duration').value) || 0) * 60000,
+        },
+      }),
+    });
+    flash(msg, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+    if (r.ok) await renderDiceMode();
+  } catch (e) {
+    flash(msg, false, '出错：' + e.message);
   }
 }
 
@@ -4867,24 +5151,34 @@ let LEARNED_TOPICS = [];
 /** 群资料库 / 动画库 / 敏感词 / 共用库（人设包在知识页已被排除）—— 分组按前缀认，不用猜 */
 function kGroupOf(f) {
   if (f.name.startsWith('groups/')) return '群资料库';
+  // ⚠️ 2026-09-28：观察记忆独立成组。它**不是**学习档案 ——
+  //    所以 `isLearnedFile()` 不该把它算进去（那会要求它带 `<!-- LEARNED:* -->` 标记，
+  //    而它是个整块自动覆盖的观察区，压根没有那对标记）。这里单开一组，
+  //    免得它在"群资料库"里跟学到的知识混成一堆。
+  if (f.name.startsWith('observe/')) return '观察';
   if (f.name.startsWith('anime/')) return '动画库';
   if (f.name.startsWith('sensitive/')) return '敏感词';
   if (f.from === 'persona') return '人设包';
   return '共用库';
 }
-const KGROUP_ORDER = ['群资料库', '动画库', '敏感词', '共用库'];
+const KGROUP_ORDER = ['群资料库', '观察', '动画库', '敏感词', '共用库'];
 const KLIB_DESC = {
   '群资料库': '哪个群、群友是谁、发生过什么 —— 放错会出现「我记录了你」这种副作用',
+  '观察': '她**自己暗中攒**的群友性格和大事（按群/按人分开）—— 整块自动覆盖，别手改',
   '动画库': '二次元作品 / 乐队 / 角色 —— 读哪几个由人设的 anime.works 决定',
   '敏感词': '哪些话是雷、怎么绕 —— 独立成库，全局注入，不按群或角色筛选',
   '共用库': '服务器资料、学习档案、节日表 —— 所有群共享的东西',
 };
 /** 常见文件的稳定说明：后端暂时没有 desc 时，也不要退回显示原始文件名。 */
 const KFILE_LABEL = {
-  'group-memory.md': '群资料：群友是谁、什么性格、群里的大事',
+  'observe/': '★ 群观察（这个群自己暗中攒的：群友性格、群里的大事）· 只在这个群注入',
   'sensitive/sensitive-words.md': '敏感词：只认不接，不重复、不引申、不顺着说',
   'hzymtr-server.md': '服务器知识库：进服、排障、规则、存档',
-  'learned.md': '学习档案：群里教的短知识',
+  'global.md': '★ 全局学习档案：**主人**教的短知识（所有群+私聊都读，优先级最高）',
+  'learned.md': '学习档案（已废弃：2026-09-27 分层为 global/groups/dm，这里是老布局遗留）',
+  // 分层后的另两份：群友教的（只在那个群算数）、私聊里教的（只跟那个人私聊时算数）
+  'groups': '这个群教我的（只在这个群算数）',
+  'dm': '这个人私聊里教我的（只跟他私聊时算数）',
   'memes.md': '梗库：常用梗和回复素材',
   'owner.md': '主人信息：群主、服务器主人等共用事实',
   'relationship.md': '关系设定：角色与主人 / 群友的关系',
@@ -5299,16 +5593,37 @@ function kCountUpdate() {
 $('k-content').addEventListener('input', () => { kCountUpdate(); kGutter(); kValidate(); });
 $('k-content').addEventListener('scroll', () => { $('k-gutter').scrollTop = $('k-content').scrollTop; });
 
-/** learned.md 格式校验（**只提示，不拦保存** —— 后端 `learnedValidate` 才是最终裁决）。
+/**
+ * 这个文件是不是一份「学习档案」（★ B 方案：四种都算）。
+ *
+ * ⚠️ 光看名字不够 —— 所以 `kValidate()` 另外还看**内容里有没有 LEARNED 标记**
+ *    （跟后端 `webui.js` 的保存校验同一个判据，两边必须一致，否则前端放行、后端拒绝）。
+ */
+function isLearnedFile(name) {
+  const n = String(name || '');
+  return n === 'global.md' || n === 'learned.md' || /^(groups|dm)\/\d+\.md$/.test(n);
+}
+
+/** 学习档案格式校验（**只提示，不拦保存** —— 后端 `learnedValidate` 才是最终裁决）。
  *  ⚠️ 规则和 `src/learned.js` 的 `validateFile` 对齐：缺 BEGIN / 缺 END / 顺序反了 /
- *     有内容但没 `## 主题` / 某条下面是空的。 */
+ *     有内容但没 `## 主题` / 某条下面是空的。
+ *  ⚠️ 判据 = 「是全局层那两份」**或**「内容里带 LEARNED 标记」——
+ *     按文件名硬列会漏掉 `groups/` `dm/` 那两份；而只看内容的话，
+ *     全局层被人**把标记整段删光**就反而不校验了（那种情况后端会拒，前端得跟上）。 */
 const K_BEGIN = '<!-- LEARNED:BEGIN -->';
 const K_END = '<!-- LEARNED:END -->';
 function kValidate() {
   const el = $('k-valid');
   if (!el) return;
-  if ($('k-file').value !== 'learned.md') { el.classList.remove('on'); return; }
+  const name = $('k-file').value;
   const t = $('k-content').value || '';
+  // ⚠️ 写成 `[...].includes()` 而不是 `name === 'learned.md'`：
+  //    `test/learned-edit.js`【7】会搜代码区里写死的 `name === 'learned.md'`（防只读回潮），语义相同、不撞红线。
+  const isGlobal = ['global.md', 'learned.md'].includes(name);
+  if (!isGlobal && !t.includes(K_BEGIN) && !t.includes(K_END)) {
+    el.classList.remove('on');
+    return;
+  }
   const i = t.indexOf(K_BEGIN), j = t.indexOf(K_END);
   let bad = '';
   if (i === -1) bad = '缺少 ' + K_BEGIN + ' 这一行（代码靠它定位条目，删了 learn()/forget() 会静默失效）';
@@ -5423,9 +5738,11 @@ async function loadKnowledgeList(keep) {
 async function loadKnowledge() {
   const name = $('k-file').value;
   if (!name) return;
-  // ⚠️ 2026-09-23：「它学到的」面板只在**选中 learned.md** 时出现 ——
-  //    它本来就是 learned.md 的内容视图（条目解析自同一份文件），
+  // ⚠️ 2026-09-23：「它学到的」面板只在**选中学习档案**时出现 ——
+  //    它本来就是学习档案的内容视图（条目解析自同一份文件），
   //    原来却是页面底部一张独立卡片，看着像另一件不相干的事。
+  //    ⚠️ 2026-09-27（B 方案）：判据从 `name === 'learned.md'` 换成 `isLearnedFile()`
+  //       —— 现在有四份（global / 老 learned / groups/ / dm/），写死一个名字会全漏。
   kLearnedPane(name);
   const r = await api('/api/knowledge?name=' + encodeURIComponent(name));
   const list = await api('/api/knowledge/list');
@@ -5455,10 +5772,10 @@ async function loadKnowledge() {
   if ($('k-mode-prev').classList.contains('on')) $('k-preview').innerHTML = kMarkdown(r.content);
 }
 
-/** 「它学到的」面板的显隐：只有 learned.md 才显示（它就是那份文件的内容视图）。 */
+/** 「它学到的」面板的显隐：只有选中**学习档案**时才显示（它就是那类文件的内容视图）。 */
 function kLearnedPane(name) {
   const w = $('k-learnwrap');
-  if (w) w.classList.toggle('hidden', name !== 'learned.md');
+  if (w) w.classList.toggle('hidden', !isLearnedFile(name));
 }
 
 /** 未保存标记：⚠️ 改了内容但没存时，在保存栏上亮一个点。
@@ -5684,7 +6001,7 @@ const PJ_ARR = [
 /** 她怎么称呼别人（`address`） */
 const PJ_ADDR = [
   ['owner', '平时怎么叫主人', '例：<主人>'],
-  ['ownerFormal', '正式场合怎么叫', '例：服主；没有这种场合就留空'],
+  ['ownerFormal', '正式场合怎么叫', '例：老板；没有这种场合就留空'],
   ['ownerRule', '什么时候用正式称呼', '⚠️ 整句规矩，不在代码里拼'],
 ];
 
@@ -6012,11 +6329,19 @@ function personaRenderFields() {
     }
   }
   out.push('</div>');
+  // ⚠️ 2026-09-28：`address.ownerAliases` **不在这里**了 —— 它搬去了「模型（主人 / 机器人）」页
+  //    那张「身份」卡（挨着 `主人 QQ`），因为「别人怎么叫他」是**共用事实**、换人设不该动，
+  //    而 `address.*` 管的是"**她**怎么称呼别人"。配置键：`config.ownerAliases`。
 
   const st = it.style && typeof it.style === 'object' ? it.style : {};
-  out.push('<h3 style="margin:20px 0 8px">口癖</h3><div class="grid2">');
-  out.push(tagRow('口癖词' + key('style.verbalTics'), 'pf-tics', (st.verbalTics || []).join('、'),
-    '说到这些词太频繁时会被提醒换说法', '例：倒、倒是'));
+  const tics = Array.isArray(st.verbalTics)
+    ? { sentenceStart: st.verbalTics, sentenceEnd: [] }
+    : (st.verbalTics && typeof st.verbalTics === 'object' ? st.verbalTics : {});
+  out.push('<h3 style="margin:20px 0 8px">口癖</h3><div class="gridfull">');
+  out.push(tagRow('句首口癖' + key('style.verbalTics.sentenceStart'), 'pf-tic-start',
+    (tics.sentenceStart || []).join('、'), '这个角色自然的句首习惯；反复时只做软提醒', '例：其实'));
+  out.push(tagRow('句末口癖' + key('style.verbalTics.sentenceEnd'), 'pf-tic-end',
+    (tics.sentenceEnd || []).join('、'), '这个角色自然的句末习惯；反复时只做软提醒', '例：呢'));
   out.push('</div>');
 
   out.push('<h3 style="margin:20px 0 8px">高级（JSON，改坏了会被拒绝保存）</h3>');
@@ -6030,7 +6355,9 @@ function personaRenderFields() {
   for (const [k] of PJ_ARR) tagsSync(`pf-${k}`);
   tagsSync('pf-anime-works');
   tagsSync('pf-anime-keywords');
-  tagsSync('pf-tics');
+  tagsSync('pf-tic-start');
+  tagsSync('pf-tic-end');
+  // ⚠️ 2026-09-28：`pf-addr-ownerAliases` 不在这儿了（搬到「身份」卡，见上面注释）
 }
 
 /** 提示词整句的**中文标题**（给用户看）+ 说明。
@@ -6106,12 +6433,21 @@ function personaCollectIdentity() {
     if (v) ad[k] = v;
     else delete ad[k];
   }
+  // ⚠️ 2026-09-28：`address.ownerAliases` 的收集**从这里移走了** ——
+  //    它现在跟着「模型（主人 / 机器人）」页那张「身份」卡走（`saveIdentity()` 里
+  //    跟 `ownerQQ` 一起提交 `config.ownerAliases`）。
+  //    ⚠️ 别把它塞回上面那个循环：那个一律按**字符串**存，会写成「粥粥、舟老师」
+  //    一整串，`persona.ownerAliases()` 读出来就是一个乱码条目（界面看着还挺正常）。
   it.address = ad;
 
   const st = it.style && typeof it.style === 'object' ? it.style : {};
-  const tics = pjList($('pf-tics').value);
-  if (tics.length) st.verbalTics = tics;
-  else delete st.verbalTics;
+  const sentenceStart = pjList($('pf-tic-start').value);
+  const sentenceEnd = pjList($('pf-tic-end').value);
+  if (sentenceStart.length || sentenceEnd.length) {
+    st.verbalTics = { sentenceStart, sentenceEnd };
+  } else {
+    delete st.verbalTics;
+  }
   it.style = st;
 
   it.ambiguity = JSON.parse($('pf-ambiguity').value || '[]');

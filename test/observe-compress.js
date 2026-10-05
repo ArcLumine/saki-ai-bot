@@ -29,7 +29,7 @@ mkdirSync(join(ROOT, 'logs'), { recursive: true });
 const LLM_PORT = 40501;
 const CFG_REL = 'logs/__test-obs-compress.yml';
 const STATE_REL = 'logs/__test-obs-state.json';
-const MEM_REL = 'logs/__test-group-memory.md';
+const MEM_REL = 'logs/__test-obs-shared.md';
 
 writeFileSync(
   join(ROOT, CFG_REL),
@@ -81,19 +81,32 @@ const llm = createServer((req, res) => {
 });
 await new Promise((r) => llm.listen(LLM_PORT, '127.0.0.1', r));
 
-// ⚠️ observe.js 的 FILE 指向 `knowledge/group-memory.md`（现在跟 `KNOWLEDGE_DIR` 走）。
-//    跑回归时它已经是**这套件自己的副本**了；单独跑（没设环境变量）时指的才是真实文件，
-//    所以这里照样先备份、测试完还原。
-const REAL_MEM = join(KNOW, 'group-memory.md');
-const memBackup = readFileSync(REAL_MEM, 'utf8');
+// ⚠️ 2026-09-28：观察记忆搬到 `knowledge/observe/` 了（跟"学到的知识"分开，
+//    一个目录一种记忆）。这里跟着改 —— 夹具写进 `observe/_shared.md`
+//    （不给 scope 时 `compress()` 会挑"有内容的那一份"，正好就是它）。
+//    ⚠️ 跑回归时 KNOW 是**这套件自己的副本**；单独跑时指真实目录 —— 所以照样先备份、测完还原。
+const OBS_DIR = join(KNOW, 'observe');
+mkdirSync(OBS_DIR, { recursive: true });
+const SHARED_OBS = join(OBS_DIR, '_shared.md');
+// 2026-09-28: observe memories are now split per scope, so compress() must be told WHICH one
+// (no groupId = picks whichever has content - standalone that is the real data).
+const TEST_SCOPE = '_shared';
+const sharedExisted = existsSync(SHARED_OBS);
+const sharedBackup = sharedExisted ? readFileSync(SHARED_OBS, 'utf8') : '';
 
 /** 造一份"自动区里已经有内容"的观察，然后 import 模块 */
 async function freshModule(body) {
-  const raw = memBackup.replace(
+  const raw = (
+    sharedExisted ? sharedBackup : '# 观察记忆（测试夹具）\n'
+  ).replace(
     /(<!-- AUTO-OBSERVE:BEGIN -->)[\s\S]*?(<!-- AUTO-OBSERVE:END -->)/,
     `$1\n${body}\n$2`,
   );
-  writeFileSync(REAL_MEM, raw, 'utf8');
+  // 没有标记区就补一段（新建文件的情况）
+  const withBlock = /<!-- AUTO-OBSERVE:BEGIN -->/.test(raw)
+    ? raw
+    : `${raw}\n\n<!-- AUTO-OBSERVE:BEGIN -->\n${body}\n<!-- AUTO-OBSERVE:END -->\n`;
+  writeFileSync(SHARED_OBS, withBlock, 'utf8');
   return import(`../src/observe.js?t=${Date.now()}${Math.random()}`);
 }
 
@@ -106,14 +119,14 @@ console.log('\n【1】★ 正常压缩：性格不许变少，大事可以压短
   const obs = await freshModule(BIG_BODY);
   nextReply = ['### 群友', '', ...PEOPLE, '', '### 大事', '', '- 9 月上旬：群里几次闲聊，无大事'].join('\n');
   const before = calls;
-  const r = await obs.compress({ force: true });
+  const r = await obs.compress({ force: true, groupId: TEST_SCOPE });
   check(r.ok === true, '压缩成功', r.reason ?? '');
   check(calls > before, '确实调了一次模型');
   check(r.peopleBefore === 8, `压前 8 条性格（${r.peopleBefore}）`);
   check(r.peopleAfter >= 8, `★ 压后性格没变少（${r.peopleAfter}）`);
   check(r.eventsAfter < r.eventsBefore, `大事被压短了（${r.eventsBefore} → ${r.eventsAfter}）`);
 
-  const written = readFileSync(REAL_MEM, 'utf8');
+  const written = readFileSync(SHARED_OBS, 'utf8');
   check(written.includes('群友0'), '性格内容写进文件了');
   check(!written.includes('9/12：某人随便聊了'), '被压掉的大事不在文件里了');
 }
@@ -121,24 +134,24 @@ console.log('\n【1】★ 正常压缩：性格不许变少，大事可以压短
 console.log('\n【2】★★ 模型想删性格条 → 整次作废、不写盘');
 {
   const obs = await freshModule(BIG_BODY);
-  const snapshot = readFileSync(REAL_MEM, 'utf8');
+  const snapshot = readFileSync(SHARED_OBS, 'utf8');
   // ⚠️ 模拟"模型自作主张把性格砍成 2 条"
   nextReply = ['### 群友', '', '- 群友0：爱发脑洞梗', '- 群友1：说话短', '', '### 大事', '', '- 无'].join('\n');
-  const r = await obs.compress({ force: true });
+  const r = await obs.compress({ force: true, groupId: TEST_SCOPE });
   check(r.ok === false, `★ 被拒绝了（reason: ${r.reason}）`);
   check(/砍到|变少/.test(r.reason ?? ''), '理由说清了是"性格变少"');
   check(r.peopleBefore === 8 && r.peopleAfter === 2, `报出了前后条数（${r.peopleBefore} → ${r.peopleAfter}）`);
-  check(readFileSync(REAL_MEM, 'utf8') === snapshot, '★ 文件**一个字都没动**（作废生效）');
+  check(readFileSync(SHARED_OBS, 'utf8') === snapshot, '★ 文件**一个字都没动**（作废生效）');
 }
 
 console.log('\n【3】★ 模型返回空 → 也不许动文件');
 {
   const obs = await freshModule(BIG_BODY);
-  const snapshot = readFileSync(REAL_MEM, 'utf8');
+  const snapshot = readFileSync(SHARED_OBS, 'utf8');
   nextReply = '';
-  const r = await obs.compress({ force: true });
+  const r = await obs.compress({ force: true, groupId: TEST_SCOPE });
   check(r.ok === false, '拒绝了');
-  check(readFileSync(REAL_MEM, 'utf8') === snapshot, '文件没动');
+  check(readFileSync(SHARED_OBS, 'utf8') === snapshot, '文件没动');
 }
 
 console.log('\n【4】★ 距上次压缩不够久 → 不压（省调用）');
@@ -146,11 +159,11 @@ console.log('\n【4】★ 距上次压缩不够久 → 不压（省调用）');
   const obs = await freshModule(BIG_BODY);
   // 先真的压一次，让它记住"上次时间"
   nextReply = ['### 群友', '', ...PEOPLE, '', '### 大事', '', '- 9 月上旬：闲聊'].join('\n');
-  const r1 = await obs.compress({ force: true });
+  const r1 = await obs.compress({ force: true, groupId: TEST_SCOPE });
   check(r1.ok === true, '第一次（force）压成功');
 
   const before = calls;
-  const r2 = await obs.compress(); // 不带 force
+  const r2 = await obs.compress({ groupId: TEST_SCOPE }); // 不带 force
   check(r2.ok === false, '紧接着再压 → 被拒绝');
   check(/不到|还有/.test(r2.reason ?? ''), `理由提到时间间隔（"${r2.reason}"）`);
   check(calls === before, '★ 根本没调模型（省了一次调用）');
@@ -165,7 +178,7 @@ console.log('\n【5】★「上次压缩时间」要落盘（不然重启就能�
   // 模拟重启：新模块实例应当读到那个时间，仍然拒绝立刻再压
   const obs2 = await freshModule(BIG_BODY);
   const before = calls;
-  const r = await obs2.compress();
+  const r = await obs2.compress({ groupId: TEST_SCOPE });
   check(r.ok === false, '★ 重启后**仍然**不会立刻再压（说明时间真的读回来了）');
   check(calls === before, '没白花调用');
 }
@@ -175,7 +188,7 @@ console.log('\n【6】内容太少就不压（压了也没意义）');
   const obs = await freshModule(['### 群友', '', '- 群友0：随便一个人', '', '### 大事', '', '- 9/1：一件小事'].join('\n'));
   rmSync(join(ROOT, STATE_REL), { force: true });
   const before = calls;
-  const r = await obs.compress({ force: true });
+  const r = await obs.compress({ force: true, groupId: TEST_SCOPE });
   check(r.ok === false && /还不多/.test(r.reason ?? ''), `理由合理（"${r.reason}"）`);
   check(calls === before, '没调模型');
 }
@@ -194,8 +207,8 @@ console.log('\n【7】★ 观察频率相关的配置（用户要求"提升记�
   check(/群友观察尽量多写\*\*（最多 12 条）/.test(src), '提示词里的条数和代码上限一致（12）');
 }
 
-// ── 收尾：还原真实 group-memory.md ──────────────────────
-writeFileSync(REAL_MEM, memBackup, 'utf8');
+// ── 收尾：还原真实的 observe/_shared.md ──────────────────────
+writeFileSync(SHARED_OBS, sharedBackup, 'utf8');
 try {
   rmSync(join(ROOT, CFG_REL), { force: true });
   rmSync(join(ROOT, STATE_REL), { force: true });

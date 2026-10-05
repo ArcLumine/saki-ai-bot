@@ -2,12 +2,14 @@
  * 加载 knowledge/ 目录下的 markdown 知识文件，供系统提示词使用。
  * 改完文件重启机器人即生效。
  */
-import { readFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, KNOWLEDGE_DIR, config, personaId, personaDir } from './config.js';
 import { log } from './log.js';
-import { learnedText, listEntries } from './learned.js';
-import { animeWorks } from './persona.js';
+import { learnedText, listEntries, stripLearned } from './learned.js';
+import { animeWorks, fillOwnerTerms } from './persona.js';
+// ⚠️ 2026-09-28：敏感词库改成"总规则常驻 + 词条撞库"（见 SENSITIVE_DIR 那段注释）
+import { sensitiveRules } from './sensitive.js';
 // ⚠️ 2026-09-17 加：群友常**@着某人**问「介绍一下他」，而文本里**没有名字** ——
 //    得靠 at 段的 QQ 号反查出群名片，才能判断"这是在说资料里的某个人"。
 import * as names from './names.js';
@@ -16,6 +18,15 @@ import * as names from './names.js';
 const DIR = KNOWLEDGE_DIR;
 /** 学习档案单独处理（优先级更高），不参与下面的通用拼接 */
 const LEARNED = 'learned.md';
+/**
+ * ⚠️ **2026-09-27（B 方案）**：`learned.md` 那个全局单文件**已废**，改成按作用域分片：
+ *    `global.md`（owner 教的，全局）/ `groups/<群号>.md` / `dm/<QQ号>.md`。
+ *    `global.md` 和 `learned.md` 一样**单独处理**（由 `learnedText(scope)` 按需挑、
+ *    挂最高优先级声明），所以这里也要从通用扫描里跳过 —— 否则它会**被注入两遍**。
+ *    ⚠️ 留着 `LEARNED` 这个常量是因为老布局升级上来时 `knowledge/learned.md`
+ *       还在磁盘上，得继续跳过它（别让废弃文件溜进提示词）。
+ */
+const GLOBAL = 'global.md';
 /**
  * ⚠️ **群资料库**目录（2026-09-15 晚加，<主人> 要求）：
  *    `knowledge/groups/<群号>.md` —— **只在该群里注入**。
@@ -42,15 +53,22 @@ const GROUP_DIR = join(DIR, 'groups');
  */
 const ANIME_DIR = join(DIR, 'anime');
 /**
- * 敏感词库（`knowledge/sensitive/<文件名>.md`）—— 2026-09-25 加，独立于共用库和动画库。
+ * 敏感词库（2026-09-29 起在 `safety/sensitive/<文件名>.md`）—— 2026-09-25 加。
  *
- * ⚠️ **全局注入**：不按群、角色、关键词筛选，`selectFor()` 无条件带上它。
- *    目的是让模型**随时知道哪些词是雷、怎么绕**，不能等消息里先命中才补规则。
- * ⚠️ 子目录故意不放进根目录扫描：这里是**独立库**，不是共用库的一份文件。
+ * ⚠️⚠️ **2026-09-29 搬家**：从 `knowledge/sensitive/` 挪到 `safety/sensitive/`，
+ *    理由见 `config.js` 的 `SAFETY_DIR`（"敏感"和"safety"合成一个安全模块，
+ *    别再有两个都叫 sensitive 的地方）。**这一层是软的**（拼进提示词给模型看），
+ *    跟 `safety/*.md` 那层硬拦截（代码开关）**是两回事**。
+ *    ⇒ 所以这里**没有** `SENSITIVE_DIR` 了：`knowledge/` 不再收这份文件。
+ *
+ * ⚠️ **不再整份注入**（2026-09-28 用户要求：「敏感词库改成撞库吧」）：
+ *    原来 `selectFor()` 无条件带上**整份**（68 行 / 每条消息都带），而绝大多数
+ *    消息**根本没提任何敏感词** —— 白占 4.4 万字提示词的一大块。
+ *    ⇒ 拆成两半：**总规则**（"只认不接"那 3~4 行）**继续无条件注入**，
+ *      一直都在她眼前；**具体词条**由 `sensitive.js` **撞到才注入**
+ *      （`bot.js` 里调 `sensitiveFor(currentText)`）。
  * ⚠️ 文件头**不能写数据文件声明** —— 写了会被 `load()` 当成不进聊天的知识跳过。
- *    敏感词的唯一来源从 `memes.md` 迁到这里（梗库仍是"按需注入"，不再重复一套）。
  */
-const SENSITIVE_DIR = join(DIR, 'sensitive');
 /**
  * 私聊记忆目录（2026-09-17 加）。
  *
@@ -69,6 +87,34 @@ const SENSITIVE_DIR = join(DIR, 'sensitive');
 const DM_DIR = join(DIR, 'dm');
 /** 群号 → { name, content }（`name` 是给人看的相对路径 `groups/<群号>.md`） */
 let groupFiles = new Map();
+
+/**
+ * ⚠️ 2026-09-28 **观察记忆独立目录** `knowledge/observe/`。
+ *
+ * 为什么要拆：以前 `observe.js`（群友观察/大事）和 `learned.js`（学到的知识）
+ * **写进同一份文件**（`groups/<群号>.md` / `dm/<QQ号>.md`），只是用
+ * `AUTO-OBSERVE` / `LEARNED` 两个标记区隔开。看着能用，实际有四个问题：
+ *   ① 注入时得 `stripLearned()` 把对方的区摘掉才能拼进提示词（漏一次就重复一遍）；
+ *   ② 界面里 `isLearnedFile()` 一旦把这类文件算成"学习档案"，
+ *      就会要求它带 `LEARNED` 标记 —— 而它其实是个混合体；
+ *   ③ 备份/回滚粒度对不上（观察是整块覆盖，学到的是逐条追加）；
+ *   ④ 两边生命周期不同，迟早有一半被当成另一半清掉。
+ *
+ * ⇒ 拆成两个目录：**一个目录一种记忆**。学到的在 `groups/` `dm/`，
+ *   观察到的在 `observe/`，代码层面不可能再混。
+ *
+ * ⚠️ key 跟 `groupFiles` 一样用 `dm:<QQ号>` 表示私聊 —— `knowledgeText()` /
+ *    `selectFor()` 只认一个 groupId 参数，两边能白蹭同一套注入逻辑；
+ *    但**表是分开的**，因为它们是两个 scope 的东西。
+ */
+const OBSERVE_DIR = join(DIR, 'observe');
+/** `group:<群号>` / `dm:<QQ号>` → { name, content } */
+let observeFiles = new Map();
+
+/** 观察记忆的文件名（`observe/<群号>.md` / `observe/dm-<QQ号>.md`），没有就返回 '' */
+export function observeFileName(groupId) {
+  return observeFiles.get(String(groupId ?? '').trim())?.name ?? '';
+}
 
 /**
  * ⚠️⚠️ 「数据文件」**不进聊天提示词**（2026-09-15 加）。
@@ -144,8 +190,130 @@ let loadedAt = 0;
 /** 被当成数据文件跳过的（给界面/日志看） */
 let skippedData = [];
 
+const OB_BEGIN = '<!-- AUTO-OBSERVE:BEGIN -->';
+const OB_END = '<!-- AUTO-OBSERVE:END -->';
+
+/**
+ * **升级自愈**：把老文件里混着的 AUTO-OBSERVE 区搬到 `observe/`（2026-09-28）。
+ *
+ * ⚠️ 为什么必须做：2026-09-28 之前，`observe.js`（群友观察/大事）和 `learned.js`
+ *   （学到的知识）写的是**同一份文件**，只是用两个标记区隔开。拆开以后，
+ *   老文件里那段就变成了"孤儿"：
+ *     · 注入时它会被当成学到的知识、以散文形式带进提示词
+ *       （而下一轮 observe 写的是新地方，两边就此分叉）；
+ *     · 界面里它又不算 `LEARNED` 区，校验和编辑都会别扭。
+ *   ⇒ 第一次加载时**就地搬一次**：写进 `observe/<同名>.md`，原文件里那段删掉。
+ *
+ * ⚠️ 只在「目标文件还不存在」时搬 —— 绝不覆盖已经写好的观察记忆。
+ */
+function migrateLegacyObserveFiles() {
+  const move = (dir, outName) => {
+    let names = [];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return 0; // 目录还不存在（第一次用）＝ 没有老文件要搬
+    }
+    let n = 0;
+    for (const f of names) {
+      if (!f.toLowerCase().endsWith('.md')) continue;
+      const src = join(dir, f);
+      let raw = '';
+      try {
+        raw = readFileSync(src, 'utf8');
+      } catch {
+        continue;
+      }
+      const i = raw.indexOf(OB_BEGIN);
+      const j = raw.indexOf(OB_END);
+      if (i === -1 || j === -1 || j < i) continue;
+      const outFile = join(OBSERVE_DIR, outName(f));
+      if (existsSync(outFile)) continue; // ⚠️ 已经有新的观察文件了，别动老的
+      try {
+        mkdirSync(OBSERVE_DIR, { recursive: true });
+        const body = raw.slice(i, j + OB_END.length);
+        writeFileSync(
+          outFile,
+          '# 观察记忆（机器人自己暗中攒的）\n\n' +
+            '> 这一份是**自动维护**的观察区，别手改（下次总结会整块覆盖）。\n' +
+            '> 只在对应的那个群 / 那次私聊里注入，别的群看不到。\n\n' +
+            `${body}\n`,
+          'utf8',
+        );
+        // 原文件：连同上面那行「## 四点半、自动观察…」标题一起去掉（它下面已经空了）
+        let rest = raw.slice(0, i) + raw.slice(j + OB_END.length);
+        rest = rest.replace(/[ \t]*#+[^\n]*自动观察[^\n]*\n(\s*\n)*/g, '');
+        writeFileSync(src, rest.replace(/\n{3,}/g, '\n\n').trim() + '\n', 'utf8');
+        n++;
+        log.info(`[观察] 老文件里的 AUTO-OBSERVE 区已搬到 observe/${outName(f)}`);
+      } catch (e) {
+        log.warn(`[观察] 迁移 ${f} 失败（不影响运行）：${e.message}`);
+      }
+    }
+    return n;
+  };
+  let n = move(join(DIR, 'groups'), (f) => f);
+  n += move(DM_DIR, (f) => `dm-${f.replace(/\.md$/i, '')}.md`);
+
+  // ── 共享的 `group-memory.md` 里那段旧观察 ──────────────────────────
+  // ⚠️ 2026-09-28 用户要求：这个文件**整个删掉了**（手写的"群里的人""这个群什么样"
+  //    全部由每个群的 `observe/` 承担）。但**老机器上升级时它可能还在**，
+  //    所以这段搬迁逻辑**保留** —— 别的机器升上来时靠它自愈。
+  // ⚠️⚠️ 必须先 `existsSync` 判一下：文件不在时 `readFileSync` 会抛，
+  //    而下面那个 catch 故意不静默（迁移失败意味着旧观察会继续混进每个群的提示词），
+  //    于是**每次启动都会吵一条"迁移失败"** —— 那是假警报，文件压根不存在不是失败。
+  const shared = join(DIR, 'group-memory.md');
+  if (!existsSync(shared)) return n;
+  try {
+    const raw = readFileSync(shared, 'utf8');
+    const i = raw.indexOf(OB_BEGIN);
+    const j = raw.indexOf(OB_END);
+    if (i !== -1 && j > i) {
+      const gdir = join(DIR, 'groups');
+      const gs = existsSync(gdir) ? readdirSync(gdir).filter((f) => f.endsWith('.md')) : [];
+      if (gs.length === 1 && !existsSync(join(OBSERVE_DIR, gs[0]))) {
+        const gid = gs[0].replace(/\.md$/i, '');
+        mkdirSync(OBSERVE_DIR, { recursive: true });
+        writeFileSync(
+          join(OBSERVE_DIR, gs[0]),
+          '# 观察记忆（机器人自己暗中攒的）\n\n' +
+            '> 这一份是**自动维护**的观察区，别手改（下次总结会整块覆盖）。\n' +
+            '> 只在这个群注入，别的群看不到。\n\n' +
+            `${raw.slice(i, j + OB_END.length)}\n`,
+          'utf8',
+        );
+        const rest = (raw.slice(0, i) + raw.slice(j + OB_END.length))
+          .replace(/[ \t]*#+[^\n]*自动观察[^\n]*\n(\s*\n)*/g, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+        writeFileSync(shared, `${rest}\n`, 'utf8');
+        n++;
+        log.info(`[观察] group-memory.md 里的旧观察已归到 observe/${gs[0]}（这机器只有一个群资料库，归属确定）`);
+      } else {
+        log.warn(
+          `[观察] group-memory.md 里还有一段旧观察，**没动它** —— 那段没有群号归属，` +
+            `而这机器有 ${gs.length} 个群资料库，猜一个就是「把 A 群的观察讲给 B 群」。` +
+            `请自己把它挪到 knowledge/observe/<群号>.md（挪完这段提示就不再出现）。`,
+        );
+      }
+    }
+  } catch (e) {
+    // ⚠️ 这里**不能静默**：迁移失败意味着那段旧观察会继续以散文形式混进每个群的提示词
+    //    （正是这次要修的毛病）。吵出来，宁 Start 机时吵一次。
+    log.warn(`[观察] 旧观察迁移失败（那段会继续混在 group-memory.md 里）：${e.message}`);
+  }
+  return n;
+}
+
 function load() {
   try {
+    // ⚠️ 2026-09-28：**先**把老文件里混着的 AUTO-OBSERVE 区搬走，再扫目录 ——
+    //    否则扫进来的是搬之前的内容（等于这次加载白搬一趟）。
+    try {
+      migrateLegacyObserveFiles();
+    } catch (e) {
+      log.warn(`观察记忆迁移失败（不影响本次运行）：${e.message}`);
+    }
     // ── 收集 md 文件：**人设包优先**，然后是共用的 knowledge/ ────────────
     // ⚠️ 2026-09-21：人设的 md 现在住在 `personas/<id>/`（以前全在 knowledge/）。
     // ⚠️ 同名文件**以人设包为准**（不把两边的内容混起来看）——
@@ -160,23 +328,45 @@ function load() {
     } else {
       log.warn(`人设包目录不存在（${pdir}）—— 她将没有任何性格设定，去 personas/ 下建一个`);
     }
+    // ── 人设「共用层」`personas/_shared/`（2026-09-30 拆出）──────────────────
+    // ⚠️ 为什么它归 `from: 'persona'` 而不是另开一类：
+    //    它就是**人设的一部分**（"怎么扮演"），不是世界知识（"世界是什么样"）。
+    //    `personas/README.md` 的老判据（「换个角色还成立 ⇒ 放 knowledge/」）对它
+    //    **是个例外**，那里已补了说明。
+    // ⚠️ 相对名统一写成 `_shared/<文件名>` —— 跟 `anime/`、`groups/` 同一个约定，
+    //    界面的分组、路径白名单都按这个名字认。
+    //
+    // ⚠️⚠️ 别把这条当成"再搬一次资料进提示词"：`_shared/` 里**只有说话方式**，
+    //    搬之前它就常驻（只是住在 persona.md 里），所以这条**不增加任何字数**。
+    // ⚠️⚠️ 共用层在 **`personas/_shared/`**（顶层），**不在** `personas/<id>/_shared/`。
+    //
+    //    为什么在顶层：它不属于任何一个人设包 —— 换角色时它**不动**。
+    //    放进人设包会有个陷阱：切角色（改 `persona.id`）之后共用层跟着消失，
+    //    新角色会退回"完全没风格"，而且**不报错**。
+    //
+    //    ⚠️ 别改成 `join(pdir, '_shared')`：那里的 `_shared/` 会随人设包一起被
+    //    新建/改名/删除操作带走（`persona-admin.js` 管着那个目录）。
+    const sdir = join(personaDir(), '..', '_shared');
+    if (existsSync(sdir)) {
+      for (const n of readdirSync(sdir)) {
+        if (!n.toLowerCase().endsWith('.md')) continue;
+        collected.push({ name: `_shared/${n}`, file: join(sdir, n), from: 'persona' });
+      }
+    }
     for (const n of readdirSync(DIR)) {
       if (!n.toLowerCase().endsWith('.md')) continue;
-      if (n.toLowerCase() === LEARNED) continue; // 学习档案单独处理
+      if (n.toLowerCase() === LEARNED) continue; // 学习档案单独处理（老布局遗留）
+      if (n.toLowerCase() === GLOBAL) continue; // 全局层学习档案同样单独处理（防注入两遍）
       if (collected.some((c) => c.name.toLowerCase() === n.toLowerCase())) continue;
       collected.push({ name: n, file: join(DIR, n), from: 'knowledge' });
     }
-    // ── 敏感词库（`knowledge/sensitive/<文件名>.md`）：独立第三类，**全局注入** ──
-    // ⚠️ 名字带 `sensitive/` 前缀，和 `anime/<库名>.md` / `groups/<群号>.md` 同一个风格，
-    //    这样界面分组、路径白名单、按需选择都能各自认得，又不会混进根目录的共用库。
-    if (existsSync(SENSITIVE_DIR)) {
-      for (const n of readdirSync(SENSITIVE_DIR)) {
-        if (!n.toLowerCase().endsWith('.md')) continue;
-        const rel = `sensitive/${n}`;
-        if (collected.some((c) => c.name === rel)) continue;
-        collected.push({ name: rel, file: join(SENSITIVE_DIR, n), from: 'knowledge' });
-      }
-    }
+    // ── 敏感词库：**这里不再收**（2026-09-29）──────────────────────────────
+    // ⚠️ 它搬去了 `safety/sensitive/`（用户要求把"敏感"和"safety"合成一个安全模块，
+    //    见 `config.js` 的 `SAFETY_DIR`）。⇒ `knowledge/` 的扫描天然看不见它；
+    //    界面那边由 `webui.js` 的 `knowPath()` 把 `sensitive/` 单独指到 `SAFETY_DIR`，
+    //    相对名仍然是 `sensitive/<名>.md`（界面分组、路径白名单都按这个名字认）。
+    // ⚠️ 别"顺手"把 `SAFETY_DIR` 根目录那三个 md 加进来当知识读：那是**代码开关**，
+    //    进了提示词就等于把红线逐条告诉模型（这一层存在的意义就是"一个字都不进提示词"）。
     // persona 放最前面，其余按文件名排序
     collected.sort((a, b) => {
       const pa = a.name.toLowerCase().startsWith('persona') ? 0 : 1;
@@ -241,6 +431,32 @@ function load() {
     scanDir(GROUP_DIR, (id) => id, (n) => `groups/${n}`);
     const dmCount = scanDir(DM_DIR, (id) => `dm:${id}`, (n) => `dm/${n}`);
     groupFiles = gmap;
+    // ⚠️ 2026-09-28：观察记忆扫**另一个目录**、进**另一张表**。
+    //    文件名约定：群 → `<群号>.md`；私聊 → `dm-<QQ号>.md`（`dm-` 前缀还原成 `dm:<QQ>`）。
+    const obmap = new Map();
+    const scanObserve = (dir, keyOf, nameOf) => {
+      try {
+        if (!existsSync(dir)) return 0;
+        let n0 = 0;
+        for (const n of readdirSync(dir)) {
+          if (!n.toLowerCase().endsWith('.md')) continue;
+          const content = readFileSync(join(dir, n), 'utf8').trim();
+          if (!content) continue;
+          obmap.set(keyOf(n.replace(/\.md$/i, '').trim()), { name: nameOf(n), content });
+          n0++;
+        }
+        return n0;
+      } catch (e) {
+        log.warn(`读 ${dir} 失败（当作没有）：${e.message}`);
+        return 0;
+      }
+    };
+    const obCount = scanObserve(
+      OBSERVE_DIR,
+      (id) => (id.startsWith('dm-') ? `dm:${id.slice(3)}` : id),
+      (n) => `observe/${n}`,
+    );
+    observeFiles = obmap;
 
     // ⚠️ 人设包和共用库**分开报** —— 换人设那一下能不能生效，看这行最直观
     const pFiles = files.filter((f) => f.from === 'persona');
@@ -256,10 +472,9 @@ function load() {
     if (animeKept.length) {
       log.info(`动画库 ${animeKept.length} 份（**由人设声明**）：${animeKept.map((f) => f.name).join(', ')}`);
     }
-    const sensitiveKept = files.filter((f) => f.name.startsWith('sensitive/'));
-    if (sensitiveKept.length) {
-      log.info(`敏感词库 ${sensitiveKept.length} 份（**全局注入**）：${sensitiveKept.map((f) => f.name).join(', ')}`);
-    }
+    // ⚠️ 2026-09-29：敏感词库搬去 `safety/sensitive/` 之后，这份文件清单里不再有它
+    //    （原来这里会打一行「敏感词库 N 份（**全局注入**）」）。软层那几行总规则
+    //    照样无条件注入，只是它"从哪儿来"已经不归 `knowledge/` 管了。
     if (groupFiles.size) {
       log.info(
         `群资料库 ${groupFiles.size - dmCount} 份（**只给对应的群用**）：${[...groupFiles.keys()].filter((k) => !k.startsWith('dm:')).join(', ') || '（无）'}`,
@@ -268,6 +483,14 @@ function load() {
     // ⚠️ 私聊记忆**只报条数，不报 QQ 号** —— 这一行会进日志（用户可能截图分享），
     //    里面混着真实 QQ 号不好看，而且和知识库那行的风格也对不上。
     if (dmCount) log.info(`私聊记忆 ${dmCount} 份（**只在跟那个人私聊时注入**）`);
+    // ⚠️ 2026-09-28：观察记忆单独报一份（群号可以报，私聊那份仍然只报条数）
+    if (obCount) {
+      const g = [...observeFiles.keys()].filter((k) => !k.startsWith('dm:'));
+      log.info(
+        `群观察 ${g.length} 份（**只给对应的群用**）：${g.join(', ') || '（无）'}` +
+          (obCount - g.length > 0 ? ` · 私聊观察 ${obCount - g.length} 份` : ''),
+      );
+    }
   } catch (e) {
     log.error(`加载知识库失败: ${e.message}`);
     files = [];
@@ -297,7 +520,7 @@ export function hasKnowledge() {
 }
 
 /**
- * **只取人设**（`persona.md` 的正文）。
+ * **只取人设**（`persona.md` + 共用层 `_shared/` + `voices.md`）。
  *
  * ⚠️ 为什么单独开一个（2026-09-15）：随机事件/剧情的"润色"用的是 `llm.phrase()`
  *    —— 那个接口**只发 system + user 两条消息**，不会自动带任何知识库。
@@ -307,10 +530,21 @@ export function hasKnowledge() {
  *
  * 用途：给 `phrase()` 那种"一句话润色"的调用补上人设。
  * 不带服务器库/群记忆 —— 中午丢了份饭不需要 Minecraft 资料。
+ *
+ * ⚠️⚠️ 2026-09-30 改：原来是 `files.find(...)` **只取第一个**。
+ *    拆出 `personas/_shared/`（说话方式，共用）之后这行就坏了 ——
+ *    `isPersona()` 会同时命中 `persona.md` 和 `_shared/style.md`，
+ *    而 `files` 的顺序**只保证 persona 排在 knowledge 前面**，
+ *    `_shared/style.md` 排在哪儿全看文件名排序 ⇒ **可能只拿到共用层、
+ *    把"她是谁"整个丢掉**，而且**不报错**（返回的还是一大段人设）。
+ *    ⇒ 改成拼接全部常驻人设，顺序固定：专属在前、共用在后。
  */
 export function personaText() {
-  const f = files.find((x) => isPersona(x.name));
-  return f ? String(f.content ?? '') : '';
+  const picked = files.filter((x) => isPersona(x.name));
+  return picked
+    .map((f) => String(f.content ?? ''))
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -500,8 +734,44 @@ export function castRosterBrief() {
  *    ⚠️ 改成精确匹配之后，那两份分册仍然会**按需**进来 ——
  *       聊到钱走 `needMoney`，带图/表情走 `needMedia`，功能一点没丢。
  */
+const PERSONA_ALWAYS = new Set(['persona.md', 'voices.md']);
+
+// ⚠️⚠️ 2026-09-30：`voices.md` 进了「永远读」。
+//
+//    `voices.md` 是**示例对话**。`personas/README.md` 专门有「关于 `voices.md`
+//    （"人味"的关键）」一节 —— 光写"她说话短、有点傲娇"没用，
+//    模型只会给你一个**平均的动漫角色**；得贴具体的话。
+//
+//    它之前是**纯装饰**：`identity.voices` 指向它、`personas/README.md` 承诺了它、
+//    `persona-draft.js` 会生成它、`webui` 能编辑它 ——
+//    **但没有任何一处把它注入提示词**（`TODO.md` 第 9 条早记着「存了没人读」）。
+//    ⇒ 写得再好也白写。列进常驻，这个字段才真正兑现。
+//
+//    为什么它该常驻、`persona-money.md` 不该：钱/表情包是**话题性**内容
+//    （不聊就不需要），说话方式是**这个人本身的底色**，每句话都用得上。
+//
+//    ⚠️ 这里是**精确名单，不是前缀匹配** —— 09-17 踩过的坑（「上午拆出去的
+//    按需分册一次都没省下来」）就是 `startsWith('persona')` 惹的。
+//    以后加常驻文件要显式写进来。
 function isPersona(name) {
-  return String(name).toLowerCase() === 'persona.md';
+  const n = String(name).toLowerCase();
+  if (PERSONA_ALWAYS.has(n)) return true;
+  // ⚠️ 2026-09-30：`personas/_shared/` 里的**全部** md 都常驻。
+  //
+  //    那是「共用层」—— 说话的方式、行为边界、群私切换、知识纪律。
+  //    它跟 `persona.md` / `voices.md` 的区别只是**归属**（所有角色共用一份，
+  //    不属于任何一个人设包），但**注入方式完全一样**：每句话都用得上，必须常驻。
+  //
+  //    ⚠️⚠️ 为什么这里用的是「前缀 + 目录内全部」而不是精确名单：
+  //    精确名单（`PERSONA_ALWAYS`）是 09-17 踩坑换来的 —— `startsWith('persona')`
+  //    会把按需分册一起捞进来，拆分白做。
+  //    但 `_shared/` 目录**按设计只放常驻内容**：往里放分册等于自己破坏这条约定，
+  //    而那种错误会在**写文件的人**那边发生（她以为分册是按需的）。
+  //    ⇒ 想省字请新建别的目录，别往 `_shared/` 里放按需内容。
+  //    风险兜底：`webui` 那侧对 `_shared/` 只**列目录不给编辑**（见 webui.js），
+  //    所以正常操作路径里改不出这种错。
+  if (n.startsWith('_shared/')) return n.endsWith('.md');
+  return false;
 }
 
 /**
@@ -600,14 +870,22 @@ function mentionsSomeone(text, content) {
  *
  * ⚠️ 这两个文件都只有几 K，读起来很便宜；**故意不缓存**（知识库是热重载的，
  *    缓存反而容易读到过期内容，得不偿失）。
+ * ⚠️ 2026-09-28 用户要求：`group-memory.md` **整个删掉了**（手写的"群里的人"
+ *    "这个群什么样"全部由每个群的 `observe/` 承担），所以从这份表里移除。
+ *    群友资料现在有两个来源，都在这里扫：`groupFiles`（这个群的资料库）
+ *    和 `observeFiles`（这个群的观察区）—— 见 `whoIsBrief`。
  */
-const EXTRA_PEOPLE_FILES = ['owner.md', 'relationship.md', 'group-memory.md'];
+const EXTRA_PEOPLE_FILES = ['owner.md', 'relationship.md'];
 function extraPeopleContent() {
   let out = '';
   for (const f of EXTRA_PEOPLE_FILES) {
     try {
       const p = join(DIR, f);
-      if (existsSync(p)) out += `\n${readFileSync(p, 'utf8')}`;
+      // ⚠️ 2026-09-28：**填掉「<主人>」再扫**。这三份文件里主人的名字写成占位符，
+      //    而下面 `whoIsBrief` 是拿 `**名字**` 去匹配用户说的字的 —— 不填的话
+      //    档案里是 `**<主人>**`、用户说的是「<主人>」，永远匹配不上，
+      //    表现就是"我明明在 owner.md 里写了他，她说不认识"。
+      if (existsSync(p)) out += `\n${fillOwnerTerms(readFileSync(p, 'utf8'))}`;
     } catch {
       /* 读不到就算了，不影响主流程 */
     }
@@ -621,12 +899,25 @@ export function whoIsBrief(text, groupId = '') {
   const gf = groupFiles.get(String(groupId ?? '').trim());
   const sources = [];
   if (gf?.content) sources.push(gf.content);
+  // ⚠️ 2026-09-28：观察记忆（群友性格/大事）现在在**独立文件**里，
+  //    不加这一行的话 `whoIsBrief()` 扫不到观察区 → 「XX 是谁」会答不出来。
+  const of = observeFiles.get(String(groupId ?? '').trim());
+  if (of?.content) sources.push(of.content);
   const extra = extraPeopleContent();
   if (extra) sources.push(extra);
   if (!sources.length) return '';
   const hits = [];
   for (const src of sources) {
     const lines = src.split('\n');
+    // ⚠️⚠️ 2026-09-28（用户要求：昵称会一直变、QQ 不会变）：**先按 QQ 认一遍**。
+    //    观察区的条目是 `- **昵称**（QQ 12345678）：…` —— 昵称匹配不中时，
+    //    用户很可能直接贴 QQ 号问「1234567890 是谁」。光靠昵称认人，这两种都认不出。
+    for (const l of lines) {
+      if (!l.trim().startsWith('-')) continue;
+      const qq = /[（(]\s*QQ\s*:?\s*(\d{5,12})\s*[）)]/i.exec(l);
+      if (!qq || !t.includes(qq[1])) continue;
+      if (!hits.includes(l)) hits.push(l.trim().slice(0, 300));
+    }
     // ⚠️ 只认**加粗的名字** —— 群资料/人资料里就是这么写的（`| **喵喵三三** | … |`、
     //    `- **MEI**（他现实里的朋友…）`）。
     //    不去猜"哪几个字是人名"，那样误命中率太高（「群里」「大家」都会被当成名字）。
@@ -684,11 +975,25 @@ export function selectFor(text, opts = {}) {
     skipped.push('hzymtr-server.md');
   }
 
-  // ── 敏感词库：**无条件全局注入**（2026-09-25）────────────────────
-  // 不看群、角色、触发词 —— 这些规则必须"一直在她眼前"，
-  // 等消息里出现敏感词才临时补，模型早就已经顺着接下去了。
-  // 走 `files` 而不是写死文件名：以后往 sensitive/ 加文件自动生效。
-  for (const s of files.filter((f) => f.name.startsWith('sensitive/'))) picked.push(s.name);
+  // ── 敏感词库：**这里什么都不做**（2026-09-28 从"整份"改成"总规则 + 撞库"）──
+  //
+  // 原来这里是无条件 `for (const s of files.filter(…sensitive/…)) picked.push(s.name)`，
+  // 把整份（68 行词典）**每条消息都带**进提示词，而绝大多数消息根本没提敏感词。
+  //
+  // 现在拆成两半：
+  //   · **总规则**（"只认不接""调戏→冷淡装傻岔开"那几行）
+  //     → 在 `knowledgeText()` 里单独 push（用 `sensitiveRules()` 的内容）。
+  //   · **词典**（16 条 / ~68 行）→ `sensitive.js` 的 `sensitiveFor(text)`
+  //     **撞到才注入**（`bot.js` 里调）。
+  //
+  // ⚠️⚠️ **这里不能 `picked.push(...)`**：`picked` 装的是**文件名**，
+  //    `knowledgeText()` 照着它读盘再拼 —— 敏感词库**不能被当知识文件读**
+  //    （那等于整份词典又回来了，等于这次改动白做）。
+  //    所以 `knowledgeText()` 的 `chosen` 那里也明确把 `sensitive/` 排除了。
+  //
+  // ⚠️ 原来那句注释担心「等消息里出现敏感词才临时补，模型早就接下去了」——
+  //    **不成立**：提示词是同步拼完再发，不存在那个时序（梗库一直这么干）。
+  //    而**总规则**本来就常驻，方法论不会因为词条按需而丢。
 
   // ⚠️⚠️ 2026-09-17 修（<主人> 报的：「699 群有群友让机器人介绍另一个群友，但是机器人说不知道。
   //    **应该先对应上名字**，直接调用群知识库来回答」）。
@@ -711,13 +1016,14 @@ export function selectFor(text, opts = {}) {
   // ⚠️ 只在 at 段确实带出人名时才拼，纯文本时 `probe` 就等于 `t`（不会更差）
   const probe = atNames.length ? `${t}　${atNames.join('　')}` : t;
 
-  const gm = files.find((f) => f.name.includes('group-memory'));
-  const needGroup =
-    !!gm &&
-    (/你还记得|上次那个|记得那次|群里|群友|大家|谁是谁|群主|服主|腐竹/.test(probe) ||
-      mentionsSomeone(probe, gm.content));
-  if (needGroup) picked.push(gm.name);
-  else if (gm) skipped.push(gm.name);
+  // ⚠️ 2026-09-28 用户要求：`group-memory.md` 删掉了。群友资料现在住**这个群自己的
+  //    两份文件**：`groups/<群号>.md`（学到的知识，走下面的 `needMine` 按需判据）
+  //    和 `observe/<群号>.md`（群友观察，**无条件注入**、见下面的 buildKnowledge）。
+  //    所以这里**不再挑任何文件** —— 观察区那条路径压根不走 `chosen`，
+  //    在这儿再 push 一次就是**同一份内容塞两遍**。
+  // ⚠️ 触发词里**同时留着旧叫法「服主」**：那是用户以前真会打出来的字，
+  //    提示词里已经不用它了（统一成「主人」），但**输入侧**不该因此认不出。
+  //    新叫法「老板」一并收着（`identity.address.ownerFormal` 现在配的就是它）。
 
   // ── **这个群自己的资料库**（2026-09-15 晚加）──────────────────
   //
@@ -728,7 +1034,7 @@ export function selectFor(text, opts = {}) {
   const gf = groupFiles.get(gid);
   if (gf) {
     const needMine =
-      /你还记得|上次那个|记得那次|群里|群友|大家|谁是谁|群主|服主|腐竹/.test(probe) ||
+      /你还记得|上次那个|记得那次|群里|群友|大家|谁是谁|群主|主人|老板|服主|腐竹/.test(probe) ||
       mentionsSomeone(probe, gf.content) ||
       mentionsAnyTerm(probe, gf.name);
     if (needMine) picked.push(gf.name);
@@ -828,6 +1134,15 @@ export function knowledgeText(opts = {}) {
   const gid = String(opts.groupId ?? '').trim();
 
   const chosen = files.filter((f) => {
+    // ⚠️⚠️ 2026-09-28：**敏感词库不再是知识文件**。
+    //    原来它是一份普通 md，被这里当知识文件**整份读进来**（68 行 / 每条消息都带）。
+    //    现在拆成"总规则常驻 + 词条撞库"，那 68 行由 `sensitive.js` 按需注入 ——
+    //    这里必须**排除掉**，否则等于整份词典又回来了（改了也白做）。
+    //    总规则走 `sensitiveRules()`，见下面 `sensitiveExtra` 那段。
+    // ⚠️ 2026-09-29：它已经**搬出 `knowledge/`** 了（现在在 `safety/sensitive/`），
+    //    所以这个判据正常情况下**永远不命中**。留着是**带保险**：万一有人又往
+    //    `knowledge/` 里放一份 `sensitive/`，也不会被当普通知识整份读进提示词。
+    if (f.name.startsWith('sensitive/')) return false;
     if (isPersona(f.name)) return true; // 人设永远读
     if (only) return only.has(f.name);
     return true;
@@ -838,6 +1153,16 @@ export function knowledgeText(opts = {}) {
     // ⚠️ 过一遍"群归属"：不属于这个群的群标签块会被摘掉（内容不会丢，只是不给别的群看）
     parts.push(chosen.map((f) => scopeForGroup(f.content, gid)).filter(Boolean).join('\n\n---\n\n'));
   }
+  // ── 敏感词库：**只放总规则**（2026-09-28）────────────────────────
+  //
+  // ⚠️ 词典那 68 行**不在这里**：`chosen` 上面已经把 `sensitive/` 整个排除了
+  //    （否则它会当普通知识文件被**整份**读进来，等于这次改动白做）。
+  //    词典由 `sensitive.js` 的 `sensitiveFor(text)` **撞到才注入**（bot.js 里调）。
+  //    这里只放**总规则**（"只认不接""调戏→冷淡装傻岔开"那几行）——
+  //    方法论必须一直在她眼前，词典是按需的。
+  const S_RULES = sensitiveRules();
+  if (S_RULES) parts.push(['# 【敏感词 · 总规则】', '', S_RULES].join('\n'));
+
   // ── 这个群自己的资料库：**永远带上**（2026-09-15 晚加）────────────────
   //
   // ⚠️⚠️ 2026-09-17 的教训（我一度把这段删了，被 `test/knowledge-groups.js` 拦下）：
@@ -852,8 +1177,14 @@ export function knowledgeText(opts = {}) {
   //       不去重就是**同一份内容塞两遍**（探针抓到的就是这个）。
   const gf = groupFiles.get(gid);
   if (gf && !chosen.some((f) => f.name === gf.name)) {
-    parts.push(['# 【这个群自己的资料】', '', gf.content].join('\n'));
+    parts.push(['# 【这个群自己的资料】', '', stripLearned(gf.content)].join('\n'));
   }
+
+  // ⚠️ 2026-09-28：**观察记忆独立注入**（`knowledge/observe/<群号>.md`）。
+  //    以前它是混在 `groups/<群号>.md` 里的 AUTO-OBSERVE 区，得靠 `stripLearned()`
+  //    摘掉另一半才能拼 —— 现在两边各一份文件，各注入各的，**不用再互相摘**。
+  const of = observeFiles.get(gid);
+  if (of) parts.push(['# 【这个群里她观察到的】', '', of.content].join('\n'));
 
   // ★★ 2026-09-17（用户要求）：「**在群聊聊天时也调用正在对话的那个人的私聊库**」。
   //    私聊记忆如果已经归到某个群（`observe.scopeFor()` 的规则），上面那份里就有了，
@@ -864,25 +1195,77 @@ export function knowledgeText(opts = {}) {
   const dmKey = dmId ? `dm:${dmId}` : '';
   if (dmKey && dmKey !== gid) {
     const dm = groupFiles.get(dmKey);
-    if (dm) parts.push(['# 【你跟这个人的私聊记忆】', '', dm.content].join('\n'));
+    // 同上：私聊记忆文件里的 learned 部分交给下面统一处理
+    if (dm) parts.push(['# 【你跟这个人的私聊记忆】', '', stripLearned(dm.content)].join('\n'));
+    // ⚠️ 2026-09-28：这个人**私聊里的观察**也一起带（只带当前说话人，不带别人的）
+    const odm = observeFiles.get(dmKey);
+    if (odm) parts.push(['# 【你跟这个人私聊时观察到的】', '', odm.content].join('\n'));
   }
 
-  // ⚠️ 2026-09-17：`learnedText(text)` 现在**按需挑条目**（原来无条件全带 12.4K）。
-  //    传 `opts.text` 才会挑；不传（界面预览那种）仍然全带。
-  const learned = learnedText(opts.text ?? '');
-  if (learned) {
-    parts.push(
-      [
-        '# 【最高优先级】群主后来补充/更正的知识',
-        '',
-        '以下内容是群主（服务器负责人）后续亲自教给你的，**与上面知识库冲突时，一律以下面为准**。',
-        '如果上面写的是旧说法，直接按下面回答，不要说"知识库里没写"，也不要把两套说法都讲给群友。',
-        '',
-        learned,
-      ].join('\n'),
-    );
+  // ── 学来的知识（★ 2026-09-27 B 方案：按 scope 分片）────────────────
+  //
+  //    原来只有**一个** `learned.md`，于是 A 群教的东西 B 群和私聊全看得到。
+  //    现在按归属分三层，**每层都单独按需挑条目**，各自挂着自己的适用范围：
+  //
+  //      scope        谁写的                带给谁
+  //      ───────────  ────────────────────  ──────────────────────────
+  //      `global`     owner（服主）         **所有群 + 所有私聊**
+  //      `group:<群>` 那个群里的非 owner     有这个 gid 就带（含私聊时的共有群）
+  //      `dm:<QQ>`    那个人的私聊           **只在跟那个人私聊时**带
+  //
+  //    ⚠️⚠️ **不能拿 `gid` 直接当群 scope**：`observe.scopeFor()` 在私聊时
+  //    会返回「他跟机器人共有的那个群」的**群号**（查不到才退 `dm:<QQ>`）——
+  //    直接拼 `group:${gid}` 会 ① 私聊时把群条目带进两人对话 ② 拼出 `group:dm:123`
+  //    这种没人认识的 scope。所以群 scope 要挡掉 `dm:` 开头的值。
+  //
+  //    ⚠️ `dm` 那层**只有明确是私聊才带**（`messageType === 'private'`）：
+  //    私聊里教的东西带进群里就是泄露。场景不知道（界面预览、老调用点没传）时
+  //    **宁可少带** —— 这跟 862 行「A 的私聊记忆不该让 B 看见」是同一条原则。
+  //
+  //    ⚠️ 判定"谁写的"在写入端 `saveKnowledge()`（权限驱动），这里只管读。
+  //    ⚠️ `global` 那段的标题**沿用老文案** —— 它接的正是原 `learned.md` 的位置，
+  //       改标题会让所有场景的提示词平白多一处 diff，看不出真正有意义的变化。
+  const picks = opts.text ?? '';
+  const mt = String(opts.messageType ?? '').trim();
+  /** @type {{scope:string, title:string, lead:string}[]} */
+  const learnedScopes = [
+    {
+      scope: 'global',
+      title: '# 【最高优先级】群主后来补充/更正的知识',
+      lead: '以下内容是群主（服务器负责人）后续亲自教给你的，**与上面知识库冲突时，一律以下面为准**。\n如果上面写的是旧说法，直接按下面回答，不要说"知识库里没写"，也不要把两套说法都讲给群友。',
+    },
+  ];
+  const groupScope = gid && !gid.startsWith('dm:') ? `group:${gid}` : '';
+  if (groupScope) {
+    learnedScopes.push({
+      scope: groupScope,
+      title: '# 【最高优先级】这个群教我的知识（**只在这个群算数**）',
+      lead:
+        '以下是**这个群**里群友/群主教给你的，**只在这个群里适用**：\n' +
+        '换到别的群、或者换成私聊，都**不要**照搬这里的说法 —— 别的群没听过这些梗。\n' +
+        '它和上面知识库冲突时，**只在这个群里**以它为准。',
+    });
   }
-  return parts.join('\n\n---\n\n');
+  if (mt === 'private' && dmId) {
+    learnedScopes.push({
+      scope: `dm:${dmId}`,
+      title: '# 【最高优先级】这个人私聊里教我的（**只对这个人私聊时算数**）',
+      lead:
+        '以下是**这个人**在私聊里教给你的，**只在跟他本人私聊时适用**：\n' +
+        '在群里、或者跟别人私聊时都不要带出去 —— 这是你们两个人之间的事。',
+    });
+  }
+  for (const it of learnedScopes) {
+    const learned = learnedText(picks, it.scope);
+    if (learned) parts.push([it.title, '', it.lead, '', learned].join('\n'));
+  }
+
+  // ⚠️ 2026-09-28：整个知识库**统一填一次**称呼占位符。
+  //    为什么在这儿而不是每份文件各填：`persona.md` / `relationship.md` / `owner.md` /
+  //    `group-memory.md` 全是从磁盘读的 md，用户能在管理界面里直接编辑 ——
+  //    在这里填一次，它们就都能写「<主人>」而不必各写各的接法。
+  //    没占位符时 `fillOwnerTerms` 原样返回，代价约等于零。
+  return fillOwnerTerms(parts.join('\n\n---\n\n'));
 }
 
 export function knowledgeStats() {

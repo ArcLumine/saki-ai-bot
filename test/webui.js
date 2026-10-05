@@ -14,9 +14,18 @@
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, copyFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+// ⚠️ 2026-09-29：**创建接口的落盘目录以 env 为准**，别再写死 `knowledge/`。
+//    run-all 会给每个套件一份隔离知识库（`QQBOT_KNOWLEDGE_DIR`，值是相对 ROOT 的路径），
+//    起的机器人进程（`...process.env` 照单全收）会把新库写进**副本**，
+//    而这里原来拿 `join(ROOT,'knowledge','anime',…)` 去 existsSync/unlinkSync
+//    ⇒ 断言假红 + unlinkSync ENOENT（既有 bug，跟④ 词库搬家无关）。
+//    单跑时没人设这个变量 ⇒ resolve 不到，回落真目录，两种跑法都对。
+const KNOW_DIR = process.env.QQBOT_KNOWLEDGE_DIR
+  ? resolve(ROOT, process.env.QQBOT_KNOWLEDGE_DIR)
+  : join(ROOT, 'knowledge');
 const PORT = 39701;
 const CFG = join(ROOT, 'config.webui-test.yml');
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -130,7 +139,11 @@ const post = (path, body) =>
 let proc = null;
 let uploadedFile = null;
 
-async function waitUp(timeout = 15000) {
+// ⚠️ 2026-09-29：15s → 30s。实测这个进程**从 spawn 到接口起来要 ~13 秒**
+//    （人设 + 4 份知识库 + 64 个表情逐个加载），15s 只剩 2s 余量；
+//    run-all 并行跑两三个套件时抢 CPU 必超 —— 表现就是"服务已就绪"那条假红
+//    （服务其实是好的，只是起得慢）。等 30s 不会让套件变慢：起来了就立刻往下走。
+async function waitUp(timeout = 30000) {
   const t = Date.now();
   while (Date.now() - t < timeout) {
     try {
@@ -228,7 +241,7 @@ async function main() {
   check(layout.allTabsInWrap, '所有页面都留在 .wrap 两栏容器内');
   check(layout.tabsMatch, '导航 data-tab 与页面 section 一一对应');
   check(layout.duplicateIds.length === 0, `页面没有重复 id${layout.duplicateIds.length ? `：${layout.duplicateIds.join(', ')}` : ''}`);
-  check(layout.groupReplyFirst, '「回复与分条」是群与触发页第一张独立卡片');
+  check(layout.groupReplyFirst, '「回复与分条」是活跃度页第一张独立卡片');
   check(layout.groupReplyComplete, '「回复与分条」的五个字段、保存按钮和反馈位都在首卡内');
   check(
     /const currentFile = KFILES\.find\(\(f\) => f\.name === current\)/.test(html) &&
@@ -237,7 +250,12 @@ async function main() {
     '知识库首次打开会选中过滤后的可用文件，不再回落到已移走的 persona.md',
   );
   check(
-    /「它学到的」面板的显隐：只有 learned\.md 才显示（它就是那份文件的内容视图）。\s*\*\/\s*function kLearnedPane\(/.test(html),
+    // ⚠️ 2026-09-27（B 方案）：**不要再把说明文案的原话写进正则**。
+    //    原来这里是 `只有 learned\.md 才显示（它就是那份文件的内容视图）` 整句精确匹配 ——
+    //    于是 ③ 把注释改成「只有选中**学习档案**时才显示」之后，这条断言直接假红。
+    //    它真正要防的是**注释没闭合、把 kLearnedPane 整段吞掉**（踩过：面板永远不显示）。
+    //    所以判据改成「题头还是这段注释」+「`*/` 紧挨着函数定义」，跟文案无关。
+    /\/\*\*?[^\n]*「它学到的」[\s\S]{0,300}?\*\/\s*function kLearnedPane\(/.test(html),
     '「它学到的」说明注释已闭合，kLearnedPane 不会被整段注释掉',
   );
   check(
@@ -287,6 +305,13 @@ async function main() {
       /class="kedit-body hidden" id="k-editwrap"/.test(html) &&
       /class="kpreview" id="k-preview"/.test(html),
     '知识文件默认打开预览，预览按钮排在编辑按钮前面',
+  );
+  check(
+    /'pf-tic-start'[\s\S]*'pf-tic-end'/.test(html) &&
+      /const sentenceStart = pjList\(\$\('pf-tic-start'\)\.value\)/.test(html) &&
+      /const sentenceEnd = pjList\(\$\('pf-tic-end'\)\.value\)/.test(html) &&
+      !/id=["']pf-tics["']/.test(html),
+    '人设口癖拆成句首口癖和句末口癖两行，并分别保存',
   );
   check(
     /id="p-doc-mode-prev"[\s\S]*id="p-doc-mode-edit"/.test(html) &&
@@ -379,6 +404,47 @@ async function main() {
       html.includes("const el = $('pp-' + k);"),
     '★★ 人设页移除「高级提示词设置」，但保存逻辑仍克隆原 identity 并保留未渲染字段',
   );
+  // ⚠️ 2026-09-28：主人的**昵称名单**（`config.ownerAliases`）在 owner 页那张「身份」卡里，
+  //    **不在人设页** —— 「别人怎么叫他」是共用事实（跟 ownerQQ 一样换人设不该动），
+  //    人设包的 `address.*` 只管"她怎么称呼别人"。
+  //    盯四件事，任一没做到都会静默出问题：
+  //    ① 「身份」卡里有这个标签输入框（DOM 结构得跟 tagRow 一样，否则 tagsSync 找不到容器）
+  //    ② `saveIdentity()` 跟 ownerQQ 一起把它提交
+  //    ③ 人设页**没有**这个字段（两处都填会变成两个事实源）
+  //    ④ 服务端四处联动齐全（configForUi / saveConfig / HANDLED 白名单 / order）——
+  //       漏一处就是"存得进去、显示不出来"，webui.js 自己在那段注释里写过这个坑
+  check(
+    /id="tags-id-ownerAliases"[^>]*data-for="id-ownerAliases"/.test(html) &&
+      /id="id-ownerAliases"/.test(html),
+    'owner 页「身份」卡里有主人的各种叫法输入框',
+  );
+  check(
+    /const ownerAliases = pjList\(\$\('id-ownerAliases'\)\?\.value\)/.test(html) &&
+      /body: JSON\.stringify\(\{ ownerQQ, botQQ, ownerAliases \}\)/.test(html),
+    '「身份」卡的保存按钮会把它一起提交',
+  );
+  {
+    // ⚠️ 剥掉注释再搜：我自己在这儿留了「`pf-addr-ownerAliases` 不在这儿了」这句说明，
+    //    直接搜整份源码会**误报**（`learned-edit.js` 踩过同一个坑）。
+    const codeOnly = html
+      .split('\n')
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join('\n');
+    check(
+      !/pf-addr-ownerAliases/.test(codeOnly) && !/address\.ownerAliases'\)/.test(codeOnly),
+      '人设页没有这个字段（避免两个事实源）',
+    );
+  }
+  {
+    const js = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
+    check(
+      /ownerAliases: \[\.\.\.\(config\.ownerAliases \?\? \[\]\)\]/.test(js) &&
+        /if \(patch\.ownerAliases !== undefined\) raw\.ownerAliases = patch\.ownerAliases;/.test(js) &&
+        /'ownerQQ', 'botQQ', 'ownerAliases', 'logLevel'/.test(js) &&
+        /^\s*'ownerAliases',$/m.test(js),
+      '服务端四处联动齐全（显示 / 写入 / 白名单 / 字段顺序）',
+    );
+  }
   check(
     /id="k-anime-mode-ai"[\s\S]*kAnimeMode\('ai'\)[\s\S]*id="k-anime-mode-manual"[\s\S]*kAnimeMode\('manual'\)/.test(html) &&
       /id="k-anime-characters"/.test(html) && /function kAnimeInputs\(\)/.test(html) &&
@@ -415,6 +481,36 @@ async function main() {
   check(!!st.config?.llm?.model, `读到当前模型：${st.config?.llm?.model}`);
   check(Array.isArray(st.faces), `读到表情列表 ${st.faces?.length} 张`);
   check(!!st.files?.config, '返回了配置文件路径');
+
+  console.log('\n[2b] 请求体不是合法 JSON 时返 400，不是 500');
+  {
+    // ⚠️ 2026-09-29 修的真 bug：路由里那行 `JSON.parse(await readBody(req))`
+    //    **在各自的 try 外面**，body 写坏了异常一路冒到 createServer 的兜底 catch，
+    //    那里统一返 500。可「你发来的 JSON 写错了」是 400 类问题（请求本身不对），
+    //    500 会让调用方以为自己程序崩了。现在 jsonBody() 打 badBody 标记、由外层认出来。
+    // ⚠️ 这条**必须真的发一个坏 body 出去** —— 纯源码断言证明不了 HTTP 状态码。
+    const r = await fetch(`${BASE}/api/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{ 这不是 json', // 故意不合法
+    });
+    const j = await r.json().catch(() => ({}));
+    check(r.status === 400, `坏 JSON 返 400（实得 ${r.status}，修之前是 500）`);
+    check(j.ok === false, '★ 响应体带 ok:false（前端能识别成失败，而不是当成崩了）');
+    check(/JSON/.test(j.error ?? ''), '★ 错误信息说清是 JSON 的问题', j.error ?? '(无)');
+
+    // 反面对照：合法 JSON 仍然要能走到业务逻辑（别把好请求也毙了）
+    const good = await fetch(`${BASE}/api/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }).catch(() => null);
+    check(
+      good && good.status !== 400,
+      '★ 合法 JSON 不被当成坏请求挡掉',
+      good ? `实得 ${good.status}` : '(无响应)',
+    );
+  }
 
   console.log('\n[3] 改模型配置 → 热重载生效');
   const before = st.config.llm.model;
@@ -621,7 +717,7 @@ async function main() {
   });
   check(manualEmptyWork.ok === false, '手动模式同样要求作品名必填');
 
-  const manualPath = join(ROOT, 'knowledge', 'anime', `${manualName}.md`);
+  const manualPath = join(KNOW_DIR, 'anime', `${manualName}.md`);
   const manualCreated = await post('/api/knowledge/create', {
     kind: 'anime',
     name: manualName,
@@ -633,7 +729,7 @@ async function main() {
   check(!existsSync(manualPath), '手动模式回归临时动画库已删除');
 
   const createName = `webui-test-anime-${process.pid}`;
-  const createPath = join(ROOT, 'knowledge', 'anime', `${createName}.md`);
+  const createPath = join(KNOW_DIR, 'anime', `${createName}.md`);
   const createBody = '# WebUI 测试动画库\n\n仅用于接口回归。';
   const createdAnime = await post('/api/knowledge/create', { kind: 'anime', name: createName, content: createBody });
   check(createdAnime.ok === true, '★★ 知识库页创建接口能真正落盘', createdAnime.error || '');
