@@ -51,7 +51,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT, thinkingField } from './config.js';
+import { config, ROOT, thinkingField, stateDir } from './config.js';
 import { log } from './log.js';
 import { streamChat } from './llm.js';
 import * as persona from './persona.js';
@@ -65,7 +65,7 @@ async function collect(messages, opts) {
 
 const STATE_FILE = process.env.QQBOT_STORYLINE_FILE
   ? join(ROOT, process.env.QQBOT_STORYLINE_FILE)
-  : join(ROOT, 'state', 'storyline.json');
+  : join(stateDir(), 'storyline.json');
 
 /** 重要度 1~5，只影响**一级**条目的压缩优先级；二级一律锁定 */
 export const MIN_IMP = 1;
@@ -178,7 +178,7 @@ function load() {
 
 function save() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
     const groups = {};
     for (const [gid, b] of buckets) {
@@ -268,7 +268,15 @@ export function forQuest(questId, groupId = undefined) {
     .sort((a, b) => a.at - b.at);
 }
 
-/** 拼一段给模型看的故事线（按时间正序，**只给这个群的**） */
+/**
+ * 拼一段给模型看的故事线（按时间正序，**只给这个群的**）。
+ *
+ * ⚠️ 2026-10-07 改标题（用户原话：「**要带上时间，不是一直觉得是刚发生的事**」）：
+ *    每行本来就带 `10/6 04:15` 这种时间戳 ✓，但**标题**原来写的是
+ *    「最近发生过的事」—— 那是**现在时**的说法，模型容易当成"此刻正在发生"
+ *    ⇒ 她一开口就像还在现场。改成明确写"**过去**发生的、已经过去了"。
+ * ⚠️ 也别写成"很久以前"：这几条可能就在几十分钟前，说成陈年旧事同样不对。
+ */
 export function promptBlock(n = 20, groupId = '') {
   const list = recent(n, groupId);
   if (!list.length) return '';
@@ -278,7 +286,14 @@ export function promptBlock(n = 20, groupId = '') {
     const tag = e.tier === 2 ? '【主线】' : '';
     return `${when} ${tag}${e.text}`;
   });
-  return ['## 你这条世界线上最近发生过的事（时间正序）', '', ...lines].join('\n');
+  return [
+    '## 这条世界线上**已经发生过**的事（时间正序，前面都带日期时间）',
+    '',
+    '⚠️ 这些是**过去**的事，不是此刻正在发生的 —— 你记得它们，但别当成现场。',
+    '⚠️ 提到的时候按上面的时间说（"刚刚" / "早上" / "昨天"），**别含糊成"刚才"**。',
+    '',
+    ...lines,
+  ].join('\n');
 }
 
 /** 有内容的群号（给定时器/界面用） */
@@ -748,8 +763,62 @@ export function __clear(groupId) {
   clear(groupId);
 }
 
-/** 配置热重载后调一下（重读阈值等） */
-export function reload() {
+/**
+ * ⚠️ 2026-10-03 加（`/清除剧情` 用）：删掉**某一条剧情**写下的全部条目。
+ *
+ * 故事线条目带 `questId`（见 `note()`）——开始 / 每一段 / 结局 / 插曲都是同一条剧情的，
+ * 「清除上一条剧情」就该按它精确删，**不能**用上面的 `clear()`（那是一整个群全清，
+ * 会把一级事件、群友的建议、别的剧情全带走）。
+ *
+ * ⚠️ 只认 `questId` 相等的条目，别的**一条都不动**。
+ *
+ * @param {string} questId
+ * @param {string} [groupId] 给了就只在这一个群里找；不给＝所有群
+ * @returns {number} 删掉几条
+ */
+export function removeQuest(questId, groupId = undefined) {
+  const id = String(questId ?? '');
+  if (!id) return 0;
+  const pools =
+    groupId === undefined ? [...buckets.values()] : [bucketOf(groupId)].filter(Boolean);
+  let n = 0;
+  for (const b of pools) {
+    const before = b.entries.length;
+    b.entries = b.entries.filter((e) => e.questId !== id);
+    n += before - b.entries.length;
+  }
+  if (n) save();
+  return n;
+}
+
+/**
+ * ⚠️ 2026-10-07 加（`/清除剧情` 用）：按**时间窗口**删条目。
+ *
+ * 为什么不能只靠 `removeQuest()`：它只认 `questId`，而实测有几条
+ * 「Anon说：…我踩着柜子去够墙…」「她说：柜子散架剩的呗」**压根没有 questId**
+ * （它们是"群友发言 / 插曲"那条路写进去的）⇒ 清剧情时**漏掉** ⇒
+ * 她们过一会儿又想起来了 ✗（用户报：「**甚至还记住了之前柜子烂了**」）
+ *
+ * @param {string} groupId
+ * @param {{from?:number, to?:number}} opts 时间窗口（毫秒）
+ * @returns {number} 删掉几条
+ */
+export function removeWindow(groupId, { from = 0, to = 0 } = {}) {
+  const b = bucketOf(groupId);
+  if (!b?.entries?.length) return 0;
+  const f = Number(from) || 0;
+  const t = Number(to) || Date.now();
+  const before = b.entries.length;
+  b.entries = b.entries.filter((e) => {
+    const at = Number(e?.at ?? 0) || 0;
+    return at < f || at > t; // 窗口外 ⇒ 留着
+  });
+  const n = before - b.entries.length;
+  if (n) save();
+  return n;
+}
+
+/** 配置热重载后调一下（重读阈值等） */export function reload() {
   load();
 }
 

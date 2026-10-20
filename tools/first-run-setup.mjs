@@ -84,14 +84,15 @@ const groups = String(answers.groups ?? arg('groups', ''))
  *   ② `安装信息.txt` 里给用户的那套上手步骤 —— NapCat 要抄 token、开反检测，
  *      SnowLuma / LLBot 都不需要那些。
  *
- * ⚠️ 默认 `snowluma`（用户定的）。手动装的人可以 `--provider napcat` 改回去。
+ * ⚠️ 默认 `napcat`（用户 2026-09-30 改回：安装器能自动把它下载并配好）。
+ *    手动装的人可以用 `--provider snowluma` 换成它 —— 实测 SnowLuma 的**登录态更稳定**。
  * ⚠️ 名字写错不至于让机器人挂掉 —— `src/config.js` 会把不认识的名字退回 `onebot`
  *    （原值留在 `provider.nameRaw` 里便于排查）。
  * ⚠️⚠️ **SnowLuma 只写配置，绝不由安装器下载/部署它**：它的 EULA 5.4 明确要求
  *    事先书面授权才能「并入第三方安装包或通过自动化脚本部署」——
  *    所以那套步骤是"你自己装好它"，安装包里不含它。
  */
-const provider = String(answers.provider ?? arg('provider', 'snowluma')).trim() || 'snowluma';
+const provider = String(answers.provider ?? arg('provider', 'napcat')).trim() || 'napcat';
 
 const problems = [];
 if (!botQQ) problems.push('没给机器人 QQ 号（--bot-qq）');
@@ -263,7 +264,10 @@ const guide =
         '     SnowLuma 是**注入式**的：它会注入**所有**被发现的 QQ 进程，',
         '     你要是连自己的号一起登着，那个号也会被它接管。',
         '  3. 启动它（它自己的启动脚本，内部就是 node index.mjs）。',
-        '     它的 WebUI：http://127.0.0.1',
+// ⚠️ 2026-10-04：取上游 —— 本地原来写 `http://127.0.0.1`（**没有端口**），
+        //   照着抄的人点不开。实际端口见 `src/provider.js`：
+        //   NapCat = `napcat.webuiPort ?? 6099`、SnowLuma = `5099`。
+        '     它的 WebUI：http://127.0.0.1:5099',
         '     ⚠️ WebUI 的**初始密码只打印在它的控制台窗口里**（不写日志文件），',
         '        第一次启动时记得抄下来。',
         '  4. 它的 OneBot WebSocket 服务端**默认就开在 3001** ——',
@@ -284,18 +288,23 @@ const guide =
           '  1. 到官方仓库下载 NapCat.Shell：https://github.com/NapNeko/NapCatQQ/releases',
           '  2. 解压到 <本目录>\\napcat\\NapCat.Shell\\',
           '  3. 双击那个目录里的 launcher-win10-user.bat（会启动 QQ 并注入 NapCat）',
-          '  4. 打开 NapCat 的 WebUI（默认 http://127.0.0.1）→ 网络配置 →',
+          '  4. 打开 NapCat 的 WebUI（默认 http://127.0.0.1:6099）→ 网络配置 →',
           '     新建 WebSocket 服务端：端口 3001、token 填上面那串',
           '     ★ 懒人做法（推荐）：这串 token **不用手填** —— 服务端建好之后，',
           '       回到本目录跑一次：  node tools\\napcat-align-token.mjs',
           '       它会自动把这串 token 写进 NapCat 的配置（两边本来就是明文 JSON，能对齐）。',
           '       ⚠️ 改完要**重启一次 NapCat** 才生效，跑之前可以先加 --check 只看不动手。',
           '  5. ★★ **反检测一定要开**（不开这个号容易被 QQ 风控）：',
-          '       打开 NapCat 的 WebUI（http://127.0.0.1）→ 左侧「系统配置」→「反检测」',
+          '       打开 NapCat 的 WebUI（http://127.0.0.1:6099）→ 左侧「系统配置」→「反检测」',
           '       → 把 Hook / Window / Module / Process / Container / JS 六项**全开**，',
           '         O3 Hook 模式也开着 → 点保存 → **然后重启 NapCat**',
           '       （那一页自己写着「修改后需重启生效」）。',
           '  6. 回来双击「一键启动（QQ+机器人）.bat」',
+          '',
+          '💡 **之后想换成 SnowLuma 也完全可以**（实测它的**登录态更稳定** ——',
+          '   不容易被踢下线，也就少扫码）：把 config.yml 里的 provider.name 从',
+          '   napcat 改成 snowluma 就行，收发完全不用动。它本身要你自己装，',
+          '   步骤见 config.example.yml 顶部那一段。',
         ];
 
 const licenseNote =

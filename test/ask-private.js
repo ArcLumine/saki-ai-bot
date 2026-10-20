@@ -9,6 +9,7 @@
  *       node test/ask-private.js "你的问题"   只问一个
  */
 import { spawn } from 'node:child_process';
+import { configWithOnebot } from './_config-base.mjs';
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import yaml from 'js-yaml';

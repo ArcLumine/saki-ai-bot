@@ -45,7 +45,22 @@ if "%NAP%"=="0" (
     echo.
 )
 
-echo 机器人正在后台启动，日志写入 logs\bot.log
+rem ⚠️ 2026-10-02 取上游：日志改成**按天一个文件**（`logs\bot-YYYY-MM-DD.log`，由 `src/log.js`
+rem    追加写）。这里必须算出同一个文件名，否则下面 `findstr` 会一直等一个
+rem    **再也不会更新**的旧 bot.log ⇒ 白等到超时。
+rem ⚠️ 2026-10-04：本地原来 echo 的是 `logs\bot.log` —— 那个文件重定向已经不再写了
+rem    （改到 `%TEMP%\saki-bot-console.log`），提示用户去看它会误导。
+rem    ⚠️ 日期不用 `%DATE%`（中文区域带"周五"）——照 AGENTS 的老办法：写临时文件再读。
+rem    ⚠️ 临时文件名带 `%RANDOM%`（和 `_run-bot.bat` 同一个理由：可能同时有两份在跑，别抢同一个文件）。
+set "DAYFILE=%TEMP%\_qqbot_day_%RANDOM%.txt"
+powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd" > "%DAYFILE%" 2>nul
+set "DAY="
+if exist "%DAYFILE%" set /p DAY=<"%DAYFILE%"
+del "%DAYFILE%" >nul 2>&1
+if not defined DAY set "DAY=unknown"
+set "DAYLOG=logs\bot-%DAY%.log"
+
+echo 机器人正在后台启动，日志写入 %DAYLOG%
 echo 管理界面： http://127.0.0.1:3099
 echo.
 echo 这个窗口可以关掉，机器人会继续在后台运行。
@@ -62,7 +77,7 @@ ping -n 2 -w 1000 127.0.0.1 >nul 2>&1
 set /a WAITED+=2
 rem ⚠️ 2026-09-21 修：原来只找 "已连接到 NapCat"，协议端换成 SnowLuma 之后日志写的是
 rem    "已连接到协议端（snowluma），等待消息…" ⇒ 匹配不上，会白等到超时。改用通用那句。
-findstr /C:"已连接到" "logs\bot.log" >nul 2>&1
+findstr /C:"已连接到" "%DAYLOG%" >nul 2>&1
 if not errorlevel 1 goto ready
 if %WAITED% GEQ 20 goto showlog
 <nul set /p "=."
@@ -73,7 +88,7 @@ echo.
 echo       机器人已连接。
 :showlog
 echo --------------------------------------------
-type logs\bot.log 2>nul
+type "%DAYLOG%" 2>nul
 echo --------------------------------------------
 echo.
 

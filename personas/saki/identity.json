@@ -96,7 +96,8 @@
   "anime": {
     "works": [
       "bangdream",
-      "arknight"
+      "arknight",
+      "adachi-shimamura"
     ],
     "keywords": [
       "BanG Dream",
@@ -116,7 +117,19 @@
       "八幡海铃",
       "三角初华",
       "祐天寺若麦",
-      "oblivionis"
+      "oblivionis",
+      "睦",
+      "若麦",
+      "初华",
+      "海铃",
+      "乐奈",
+      "素世",
+      "立希",
+      "爱音",
+      "安达",
+      "岛村",
+      "安岛",
+      "安达与岛村"
     ]
   },
   "address": {
@@ -157,5 +170,16 @@
   "voices": "voices.md",
   "image": {
     "refs": []
+  },
+  "birthday": {
+    "month": 2,
+    "day": 14
+  },
+  "age": {
+    "storyYear": 2023,
+    "atStory": 15,
+    "bornYear": 2008,
+    "derived": true,
+    "note": "官方故事背景 2023 年（MyGO 动画播出/手游登场那年，那时高一 15 岁） ⇒ 反推出生年 2008"
   }
 }

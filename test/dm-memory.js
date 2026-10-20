@@ -18,8 +18,20 @@
  * ⚠️ 纯离线：不起进程、不碰真 QQ、不花钱。
  * 用法: node test/dm-memory.js
  */
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const KNOWLEDGE_REL = `logs/__dm-memory-${process.pid}`;
+const SHARED_MARKER = 'DM_MEMORY_SHARED_SCOPE_MUST_NOT_LEAK_7F3A';
+const sharedDir = join(ROOT, KNOWLEDGE_REL, 'observe');
+mkdirSync(sharedDir, { recursive: true });
+writeFileSync(join(sharedDir, '_shared.md'), SHARED_MARKER, 'utf8');
+
 // ⚠️ 必须在 import 之前设 —— `names.js` 是在模块加载时 reload 的（和 tic/qzone 一个套路）
 process.env.QQBOT_NAMES_FILE = process.env.QQBOT_NAMES_FILE || 'logs/__dmtest-names.json';
+process.env.QQBOT_KNOWLEDGE_DIR = KNOWLEDGE_REL;
 
 const names = await import('../src/names.js');
 const observe = await import('../src/observe.js');
@@ -99,7 +111,7 @@ check(
   const knowledge = await import('../src/knowledge.js');
   const txt = String(knowledge.knowledgeText({ groupId: '200000002' }) ?? '');
   check(
-    !txt.includes('_shared') || txt.length < 50,
+    !txt.includes(SHARED_MARKER),
     '兜底那份不会被任何群读到（真群号永远匹配不到 _shared）',
   );
 }
@@ -155,4 +167,5 @@ for (const ev of [
 }
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
+rmSync(join(ROOT, KNOWLEDGE_REL), { recursive: true, force: true });
 process.exit(failures ? 1 : 0);

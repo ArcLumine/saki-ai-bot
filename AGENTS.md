@@ -11,6 +11,52 @@
 - “可以提交 / 测试通过 / 门禁通过 / dry-run 通过”都不等于允许 push。
 - 没有明确授权时，只能在本地 commit；`git push --dry-run` 也只能用于检查，不得把它当成授权。
 - 即使之前授权过 push，下一次要推新的内容仍需重新确认。
+- commit message（标题和正文）也要脱敏：不得写真实 QQ 号、群号、令牌、私有路径或其他个人信息；用占位符描述。已经推送的历史提交不要为了脱敏而改写历史，避免破坏他人的拉取。
+
+---
+
+## 🔪 重启机器人：**不许信 lock 里的 pid**（2026-10-14 踩了真事故）
+
+**现象**：我按 `state/bot.lock` 里记的 pid 去"重启主号"，结果**杀掉了一个不是机器人的进程** ——
+那份锁是**几个小时前**的陈旧记录，而那个 pid **早被 Windows 复用了**（用在了别的进程上）✗
+（同一次我还顺手把她的锁删了 ⇒ 看门狗以为她没跑 ⇒ **差点补出第二个实例** ✗）
+
+**规矩（重启 / 杀进程一律照这个走）**：
+
+1. **先只读列出所有 `node src\index.js`**，**人工认出**那个号对应的 pid
+   （比对启动时间、命令行；⚠️ 命令里**不要出现要匹配的字面量** —— 会打中我自己的 runner ✗）；
+2. **再按硬编码 PID 杀** ✓；
+3. ⚠️ **锁文件只用来"看它以为谁在跑"，永远不能当"要杀谁"的依据** ✗；
+4. ⚠️ **别随手删锁**（删了看门狗会判断"它没跑"⇒ 再补一个 ⇒ **可能变成两个实例** ✗）；
+   真要救"掉线了但没补"的号 ⇒ **先按真实 pid 补一份正确的锁**，或者**直接起一个**，
+   然后**等半分钟数一遍实例数**（必须正好等于账号数）✓
+
+---
+
+## ⚠️⚠️ 新建人设时：角色的名字**就是她自己**，别当成第三个人（2026-10-13 用户定）
+
+**用户原话**：「**她自己不就是祥子吗**，还是有点不对」+「**建其他人设时也不要出同样的错误**」。
+
+**现场**：本机 agent 任务开工那句，她说的是「这就动手**给祥子**写简历」—— 可她自己就是丰川祥子 ✗。
+真因：任务原文里写的是"丰川祥子"，而她开口那一步的提示词里只有一句抽象的「你就是客服小祥」，
+**没人告诉她那三个字指的就是她自己** ⇒ 她的模型把自己当成了第三个人。
+
+**规矩（凡是"以人设身份开口 / 落笔"的地方都适用）**：
+
+1. **提示词里点名**：「你就是〈本名〉（自称〈X〉），别人还可能叫你 A、B、C —— 他说的这些名字
+   **全都是你自己**，🚫 不许把自己说成第三个人（「给祥子写」「帮她做」这种一律不许出现）」。
+   ⚠️ 名字 / 自称 / 外号**一律从 `personas/<id>/identity.json` 取**
+   （`charName()` / `selfName()` / `shortName()` / `callNames()`），
+   **绝不在代码里写死某个角色的名字** —— 不然换人设立刻全错。
+   📌 现成实现：`src/agent-bridge.js` 的 `selfIdentity()` + `identityRule()`（`voiceize` / `asideFor` 都接了）。
+2. **验收动作**（新建 / 改完人设必须做一遍）：让她做一件**跟她自己有关**的活
+   （例如「做一份〈本名〉的简历」），看她开口说的是「我」还是「她 / 祥子」——
+   说成第三个人 = 不合格。
+3. **同类错误一起防**（本质都是"把角色当成别人"或"把某个人设写死"）：
+   - 产物 / 回答里提到自己要用"我"（第一人称）；
+   - 「别人怎么称呼她」是 `callNames`、「她怎么称呼别人」是 `identity.json` 的 `address`，两套别混；
+   - `accounts/<QQ>.yml` 里按号分文件的那些值（`persona.ownerException` 之类）——
+     ⚠️ 新建 / 切换人设时**要一起核对**（2026-10-13 那次"她说自己是老板跟员工"就是这个值没跟上）。
 
 ---
 
@@ -92,8 +138,8 @@
 
 - **人设那几份 md 现在住在 `personas/<id>/`**，别再去 `knowledge/` 找：
   `persona.md` / `persona-money.md` / `persona-media.md` / `cast.md` / `life-events.md` / `quest-ideas.md`。
-- `knowledge/` 只剩**共用**的：`hzymtr-server` / `owner` / `relationship` / `groups/` /
-  `anime/` / `learned` / `holidays` / `memes`。
+- `knowledge/` 只剩**共用**的：`server-*`（四份服务器库）/ `owner` / `relationship` / `groups/` /
+  `anime/` / `global`（主人教的知识）/ `holidays` / `memes`。
 - ⚠️ 代码两侧都认（`knowledge.js` / `webui.js` 的 `knowPath()` / `personaDataFile()` 都是
   「**人设包优先、`knowledge/` 回落**」），所以漏挪不会崩；但要验证「挪对了、没改味」，
   **硬证据是 `node test/prompt-snapshot.js` 逐字节一致**。
@@ -282,6 +328,26 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
 ⚠️ **别因为"我很确定"就跳过**。`owner.md`、群号、群名、`LICENSE` 这四个问题都是这么抓出来的
 （尤其 `LICENSE` —— 它是公开副本独有的、由用户维护的文件，导出工具差点把它删掉）。
 
+### ⚠️⚠️ **commit message 也要脱敏**（2026-10-05 用户抓到的）
+
+用户截图问：「**readme 有还隐私信息没脱敏**」—— 一查，问题不在 README，而在**一条 commit 的正文**里
+写着 **`10000008`**（群里另一个机器人的真实 QQ 号），而**公开仓库上这条 message 是能看到的**。
+
+⚠️ **`tools/make-public.cjs` 的 `scrub()` 只管「文件内容」，管不到 commit message** ——
+它替换的是导出后的源码/配置/文档，**git 历史里的信息它一个字都碰不到**。
+（脱敏表里**早就有**这个号，见 `make-public.cjs` 的 `['10000008', '10000008']` —— 照样漏。）
+
+**规矩**：
+
+- 🚫 **commit message 里不写真实 QQ 号 / 群号 / 域名 / 路径** —— 一律用占位符：
+  `999000001`（群）、`10000001`（人）、`203.0.113.1`（TEST-NET-3 的 IP）、`example.com`。
+- ⚠️ **公开副本尤其要紧**：live 仓库的 message 只在你本机，公开副本的**全世界都看得到**。
+- ⚠️ 想说明"是哪个号的问题"就写**特征**：「群体里另一个机器人那个号」「同类池里那个号」——
+  反正代码和配置里有，git 里不必有。
+- 🔁 **改历史要用户点头**：已经推上去的 message 想清掉，只能改写历史 + `--force`，
+  那会让群友的 `git pull` 直接冲突 ⇒ **先问，别自己动**。
+  （2026-10-05 那次就是：规矩定在"以后不再写"，没有改写历史。）
+
 ### 📣 阶段做完要**主动提醒用户推**（2026-09-17 用户定）
 
 **用户原话**：「以后阶段性成果之后再提醒我推」。
@@ -290,6 +356,35 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
 - 到了这个点，我**主动说一句**：「这批算一个阶段了，要推吗？」+ 附上面那张三行清单。
 - ⚠️ 反向也要守：**别在阶段中间反复问**（改一个文件就问一次 = 噪音）。
 - ⚠️ 例外：**隐私/安全隐患类**的修复**立刻推**，不等阶段。
+
+---
+
+## 🌐 两个机器人跑在**不同机器**上时（2026-10-09 用户问过）
+
+用户问：「如果有其他机器上的机器人也接收到了剧情开始命令，会自动让位吗」。
+**答案分两层，第二层是真缺口**：
+
+| 谁 | 会不会让位 | 知不知道"在演剧情" |
+| --- | --- | --- |
+| **同一台机器、同一个项目目录**的第二个账号（现在的爱音） | ✅ 会 | ✅ 知道（读得到 `state/quest-shared.json`） |
+| **另一台机器**、但**在同类池里** | ✅ 会 —— `quest.orderFor()` 只依赖**配置里的同类池**，两边池子配得一样就算出**同一个名单**，不需要通信 | ❌ **不知道** —— 判据 `state/quest-shared.json` 是**本地文件**，跨机器读不到 ⇒ 它那边 `questLive=false` ⇒ **所有剧情约束失效**（会把剧情拉走、说"明天放学""上课去"这种）✗ |
+
+**解法（一行环境变量）**：把那个文件指到**两台机器都能读写**的地方 ——
+
+```powershell
+setx QQBOT_QUEST_SHARED_FILE "\\NAS\share\quest-shared.json"
+# 或者同步盘里的一个文件（OneDrive 目录等）
+```
+
+⚠️ 两个已知代价（都能接受）：
+· 两边**同一时刻写**会互相覆盖（没有文件锁）—— 实际只有**开剧情那一下**会写 ✓
+· 文件里的时间戳来自**各自机器**，差几分钟不影响判定 ✓
+
+⚠️ **前提**：两台机器的 `config.yml` 里**同类池 / 群号配置必须一致**，否则名单算不到一块去 ✗
+
+⚠️ **别用"名字像机器人就拒"那道闸去挡同类池的号** ——
+那条闸（`tryQuestStart` 里）只拒 `otherBotsFor` + 昵称像机器人的，**同类池的号必须放行**
+（它们要走下去执行 `questTurnYield` 让位）✓
 
 ---
 
@@ -313,6 +408,20 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
 
 ⚠️ 名字写错会**退回 `onebot`**（不让机器人挂掉），原值留在 `provider.nameRaw` 里便于排查。
 ⚠️ `src/provider.js` 只读 `provider.*`，**不碰 `onebot.*`** —— 回归套件 `test/provider.js` 专门盯这条。
+
+---
+
+## 🌐 协议端可以挂在**另一台机器**上（2026-10-20 用户就这么用）
+
+- `onebot.url` 可以是 `ws://203.0.113.5:3001` 这种**别的机器**的地址（Tailscale 内网）——
+  **收发照常**，跟协议端装在哪台机器无关。
+- ⚠️⚠️ 所以**不许把「本机 127.0.0.1:3001」当成唯一真相**：`provider-watch.js` 原来探活写死本机，
+  表现是「WebSocket 明明连着、日常事件照发，日志却每 30 秒报 3001 连不上」，
+  还会去拉本机根本不存在的 launcher（`spawn cmd.exe ENOENT` 未捕获异常）。
+- 现在探活用 `hostOf()` 从 `onebot.url` 取 host；**远端协议端只探活、绝不拉起**
+  （本机 launcher 管不到别人的机器），刚断只记一条 warn、之后降到 debug。
+- ⚠️ 换协议端在哪台机**不用改代码**，改 `accounts/<QQ>.yml` 的 `onebot.url` 即可；
+  但 `provider.name` / `provider.dir` / launcher **只对「本机协议端」有意义**。
 
 ---
 
@@ -381,15 +490,17 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
    都是原子写（写 `.tmp` 再 `renameSync`）。
 4. **重启前想一下**：这次会不会让它忘掉什么、或者重做什么？
    （典型：刚发过说说、刚提醒过用户、冷却计时中）
-5. **⚠️ 两次重启之间至少隔几分钟，绝对不要背靠背** —— 见下面「重启就是一次登录」。
+5. ⚠️ **两次重启别 1 分钟内背靠背** —— 见下面「重启就是一次登录」。
+   （⚠️ 2026-09-30 起**不再强制 5 分钟**：协议端换成 SnowLuma 后稳定得多。）
 
 ### ⚠️⚠️ **别为了重启而干等**（2026-09-18 用户定）
 
 **用户原话**：「不要等时间重启，在这一段时间**我不能打断你，我说不了话**，
 你**直接在下一次重启**就行了」。
 
-⚠️ 背景：下面那条「两次重启之间至少隔 5 分钟」是真的（重启 = 一次 QQ 登录，
-这个号是风险设备）。但我为了守它，写过好几次 `Start-Sleep -Seconds 250` 再重启 ——
+⚠️ 背景：当时那条「两次重启之间至少隔 5 分钟」是真的（重启 = 一次 QQ 登录，
+这个号是风险设备）—— ⚠️ **2026-09-30 已放宽，见下面那节**。但这一节的道理不变：
+我当时为了守它，写过好几次 `Start-Sleep -Seconds 250` 再重启 ——
 **那 4 分钟里用户被我晾着**：这一轮我占着，他想改主意、想让我先干别的，**都插不进来**。
 
 **所以**：
@@ -401,53 +512,33 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
   把重启排在它之后是合理的；**但别为了凑那 5 分钟专门 sleep**。
 - ⚠️ 一句话判断：**这段时间里用户是不是"插不进来话"？** 是 → 就不该等。
 
-### ⚠️⚠️ 重启就是一次登录：别在 1 分钟内连着重启
+### ⚠️ 重启就是一次登录（**2026-09-30 放宽：不再强制 5 分钟**）
 
-**2026-09-14 查证的**：一次"重启机器人"= **一次新的 QQ 登录会话**。
-连着重启就是连着登录，而**这个号已经被 QQ 安全中心标记成"风险设备"**了
-（收到过「设备存在外挂或其他软件影响 QQ 正常使用」的处罚通知）。
-短时间内的会话更迭是风控**最敏感**的特征。
+> **用户原话（2026-09-30）**：「现在**不用那么严格遵守了**，**snowluma 的稳定性高很多**」。
+>
+> 这条规矩是 **2026-09-14 为 NapCat 立的** —— 那时协议端是注入式、走的是 QQ 官方客户端，
+> 这个号还被标记成"风险设备"、几小时就掉一次线，所以短时间内的**会话更迭**是最敏感的风控特征。
+> 现在协议端换成 **SnowLuma**，实测登录态稳定得多 ⇒ **"隔 5 分钟"降级成"能攒就攒"的建议**。
+>
+> ⚠️ **仍然保留的硬下限：别在 1 分钟内背靠背重启** ——
+> 那是真正的"会话秒级更迭"，跟"几分钟里改了两次"不是一回事。
+>
+> ⚠️ **哪天换回 NapCat（或别的注入式协议端），这条要恢复成 5 分钟** ——
+> 放宽的依据是 **SnowLuma 的稳定性**，不是"风控不存在了"。
 
-**实测（2026-09-14 19:02）**：我为了跑一个临时探针，
-在 **45 秒内重启了 3 次**机器人（19:02:18 起 → 杀掉 → 再起）。
-**25 秒后** NapCat 报：
-
-```
-09-14 19:02:43 [error] ZYHG | [KickedOffLine] [下线通知] 你的账号当前登录已失效，请重新登录。
-```
-
-⚠️ **注意分寸，别把这条读成"都是我害的"**：这个号**今天在 00:32 / 07:19 / 14:46
-已经被踢过 3 次了**（都在我开始干活之前），09-13 一天踢了 6 次 ——
-**它本来就在每几个小时掉一次**。所以 19:02 这次**大概率是它自己的节奏**，
-但"45 秒内三次登录"是我**确实送出去的一个真信号**，我不该那样做。
+**2026-09-14 查证的**：一次"重启机器人" = **一次新的 QQ 登录会话**，
+而**这个号被 QQ 安全中心标记过"风险设备"**（收到过外挂类处罚通知）——
+短时间内的会话更迭是风控最敏感的特征。
+（当时实测过 45 秒内重启 3 次；⚠️ 也**别把掉线都算成重启害的**，
+那个号那阵子本来就是每几小时掉一次。）⇒ **别 1 分钟内背靠背**就够了。
 
 **规矩**：
 
 - 改完**攒一次**再重启，别为了跑个临时脚本又重启一遍
 - 需要"测真实模型"就跑**离线/假模型**的套件 —— 那类**不需要重启**（也不碰真 NapCat）
-- 真要连着重启时，**中间隔 5 分钟以上**
+- **能攒就攒**（几件改动一起重启更省事），但**不再强制**"中间隔 5 分钟以上" ——
+  2026-09-30 放宽；**唯一硬下限是别 1 分钟内背靠背**
 - 重启完先看日志确认 `已登录 QQ`，再往下做别的
-
-### 快速重启（改完立刻执行）
-
-> ⚠️⚠️ **2026-09-15 晚修过一次，别照下面这段原样用了** ——
-> 它**会和看门狗撞车**：你杀完 3 秒就自己起，而看门狗也在 5~20 秒内补一个 →
-> **同一时间会有 2~3 个 `src/index.js`**（两套定时器、两个进程写同一批 `state/*.json`）。
-> 实测那次同时跑了 3 个。**正确顺序**见本节末尾那段。
-
-```powershell
-cd '<项目目录>\qq-ai-bot'
-Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-  Where-Object { $_.CommandLine -match 'src[\\/]index\.js' } |
-  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Start-Sleep -Seconds 3
-Remove-Item logs\bot.log -Force -ErrorAction SilentlyContinue
-Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','_run-bot.bat' -WorkingDirectory (Get-Location).Path -WindowStyle Hidden
-Start-Sleep -Seconds 8
-Get-Content logs\bot.log | Select-String -Pattern '知识库|已连接|已登录'
-```
-
-看到「已连接到协议端」+「已登录 QQ」就是好了，**这时就告诉用户可以测**。
 
 #### ✅ 正确顺序（2026-09-15 晚起用这个）
 
@@ -455,9 +546,10 @@ Get-Content logs\bot.log | Select-String -Pattern '知识库|已连接|已登录
 > ```powershell
 > (Get-Content logs\bot.log | Select-String '已登录' | Select-Object -Last 1).Line
 > ```
-> **不足 5 分钟就别重启**（这条是"重启=一次登录"，不是"消息会不会丢"）——
-> 我 22:10:57 重启完，22:11:42 又重启了一次（**只隔 31 秒**），
-> 而 AGENTS 白纸黑字写着「绝对不要背靠背」。等够时间再做，或者把两次改动攒一次。
+> **能攒就攒，但 2026-09-30 起不再强制 5 分钟**（协议端换成 SnowLuma，稳定性高得多）。
+> ⚠️ 唯一硬下限：**别 1 分钟内背靠背** —— 那才是真正的"会话秒级更迭"。
+> （下面这句留作背景：2026-09-15 我 22:10:57 重启完、22:11:42 又重启了一次，
+> **只隔 31 秒** —— 那是 NapCat 时代，确实不该。）
 
 1. **按 PID** 杀掉机器人（绝不按名字杀，见下）；
 2. **等 10~15 秒，先看门狗**：它多半会自己补一个。
@@ -505,32 +597,25 @@ Get-Content logs\bot.log | Select-String -Pattern '知识库|已连接|已登录
    我杀进程时把它一起杀了，behavior 直接 4 项失败（看着像代码坏了，其实是误杀）；
    单独重跑（带隔离 env）全过。
 
-### ⚠️ 2026-09-15 用户放宽了这条：「加了掉线补看就可以适当增加重启次数了」
+### ⚠️ 重启次数的两次放宽（结论）
 
-**为什么放宽**：`bot.catchUpMissed()` 会在每次登录后，把**上线前 10 分钟内**的
-「@ 她 / 命中关键词 / 服务器问题」从群历史里**捞回来补答**（三道防重闸，见 `src/bot.js`）。
-实测：我改代码重启吞掉的那条 @，9 分钟后被补看捞回来并正常回复了。
-所以「重启会丢用户的 @」这条顾虑，现在**大部分被兜住了** → 改完一个功能就可以重启，不必再攒。
+- **2026-09-15**：有了 `catchUpMissed()`（上线前 10 分钟内被吞掉的 @ / 关键词 / 服务器问题
+  会被捞回来补答）⇒ **改完一个功能就可以重启**，不必攒到最后。
+- **2026-09-30**：协议端换成 SnowLuma 后登录态稳得多 ⇒
+  **"两次重启至少隔 5 分钟"作废**，降级成"能攒就攒"的建议。
 
-⚠️ **但仍然有一个理由要求别背靠背**：**重启就是一次 QQ 登录**，
-而这个号被标记成"风险设备"（见上一节）。那是**风控问题，不是消息丢失问题** ——
-补看解决不了它。所以：
-
-| 放宽的 | 没放宽的 |
+| 已放宽的 | **还留着的** |
 | --- | --- |
-| 改完一个功能就重启（不用等回归跑完） | **不许 1 分钟内连着重启**（登录风控） |
-| 为了验证播种/清洗重启一次 | 用户正在连着你测时，**先问一句再重启** |
+| 改完一个功能就重启（不用等回归跑完） | **别 1 分钟内背靠背**（真正的会话秒级更迭） |
+| ~~至少隔 5 分钟~~（2026-09-30 起不强制） | 用户正在连着你测时，**先问一句再重启** |
 | 重启后不必手工补消息 | 别拿"反正有补看"当理由去刷重启 |
 
 ### ⚠️ 补看**不覆盖**的东西（别以为它万能）
 
-- **闲聊 / 主动搭话的机会**：她本来可能接一句梗，那段时机过去了就过去了（不补）
-- **图片/表情的即时反应**：补看只认 @ / 关键词 / 服务器问题
-- **正在生成中的那条回复**：进程被杀时**已经写了一半的回复会丢**（补看只管"没处理过的"消息）
-- **说说 / 主动私聊 / 日常事件**的时点（那些是定时任务，重启会重排）
-- ≠ 10 分钟以外的（用户明确指定只看 10 分钟）
-
----
+它只认 **@她 / 关键词 / 服务器问题**，而且**只看上线前 10 分钟**。
+⇒ 下面这些**不补**：闲聊和主动搭话的时机（过去了就过去了）、图片表情的即时反应、
+**正在生成中的那条回复**（进程被杀时写了一半的会丢）、
+说说 / 主动私聊 / 日常事件的时点（那些是定时任务，重启会重排）。
 
 ## ⚠️ 不许断言「没扫码 / 不用扫码」（用户 2026-09-15 明确要求）
 
@@ -629,37 +714,18 @@ $c = [System.IO.File]::ReadAllText($p) -replace "`r`n","`n" -replace "`n","`r`n"
 
 ### 手工命令（脚本不好使时）
 
-**第 1 步：确认 / 启动 NapCat**
-
 ```powershell
-# 检查 3001 是否在监听
-Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue |
-  Select-Object LocalAddress, LocalPort
-```
+# ① 协议端：现在多数情况是 SnowLuma（自带 node，必须在它自己目录里跑）
+Start-Process -FilePath 'C:\SnowLuma\node.exe' -ArgumentList 'index.mjs' -WorkingDirectory 'C:\SnowLuma' -WindowStyle Hidden
+# ⚠️ NapCat 那条路（只有退回 NapCat 才用）：launcher 的窗口**必须可见** ——
+#    登录态失效时它会停在二维码等你扫，隐藏窗口启动你就会看到"QQ 起了但 3001 一直不监听"。
 
-没有输出 = NapCat 没在跑，需要启动：
-
-```powershell
-# ⚠️ NapCat 是在 QQ 启动时注入的，所以必须先完全退出 QQ
-Get-Process -Name QQ, NapCatWinBootMain -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Seconds 3
-
-# 必须在 NapCat.Shell 目录下启动（脚本用 %cd% 定位自己）
-$shell = '<项目目录>\napcat\NapCat.Shell'
-Start-Process -FilePath (Join-Path $shell 'launcher-win10-user.bat') -WorkingDirectory $shell
-
-# 等它就绪
-do { Start-Sleep -Seconds 3 } while (-not (Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue))
-```
-
-> **窗口必须可见。** 登录态失效时 NapCat 会停在二维码等你扫。
-> 如果用隐藏窗口启动，你会看到「QQ 起来了但 3001 一直不监听」——那是它在等扫码，而且没人看得见。
-
-**第 2 步：启动机器人**
-
-```powershell
+# ② 机器人
 cd '<项目目录>\qq-ai-bot'
 node src/index.js
+
+# ③ 确认连上了（日志里必须出现这几行，缺一不可）：
+#   已加载表情库 N 张 / 已连接到协议端 / 已登录 QQ: 10000002 / 管理界面: http://127.0.0.1:3099
 ```
 
 **第 3 步：确认连上了**
@@ -674,7 +740,7 @@ node src/index.js
 [..] INF  管理界面: http://127.0.0.1:3099
 ```
 
----
+⚠️ 更省事的做法：双击 `一键启动（QQ+机器人）.bat`（里面就是这套顺序）。
 
 ## 启动前的四项自检
 
@@ -683,7 +749,7 @@ node src/index.js
 | 检查 | 为什么 |
 | --- | --- |
 | **`library/index.json` 登记的图片文件都在** | 表情文件丢过两次（OneDrive 同步），启动日志会警告「登记了但文件不存在」。用 `node test/tidy-library.js` 查 |
-| **`knowledge/` 三个 md 都在** | `persona.md`（人设）、`hzymtr-server.md`（知识库）、`learned.md`（学习档案） |
+| **知识库活文件都在** | `personas/<id>/persona.md`（人设，在人设包里）、`knowledge/server-*.md`（服务器库四份）、`knowledge/global.md`（学习档案）。⚠️ 后两类都**不进仓库**（`.gitignore`），本机没建过也不影响启动，只是那些问题答不上来 |
 | **`config.yml` 能解析** | YAML 缩进错会直接启动失败。`npm run check` 能查出来 |
 | **配置项没写错值** | `node --check src/*.js` 查语法；`npm run check` 查配置 |
 
@@ -697,7 +763,18 @@ npm run check
 
 ## 测试脚本会抢 NapCat 连接（重要）
 
-**NapCat 的 WebSocket 服务端只允许一个客户端。** 机器人占着它的时候，任何自己连 3001 的脚本都会 `ECONNREFUSED`。
+⚠️ **2026-10-06 更正**：这里原来写「NapCat 的 WebSocket 服务端**只允许一个客户端**」—— **这是错的**。
+读 `napcat.mjs:95219` 起的 `OB11HttpServerAdapter`：`wsClients = []` / `wsClientWithEvent = []`，
+连接时 `push`（:95367），事件**广播给数组里所有客户端**（:95232），断开时按 `indexOf` + `splice`
+只移除那一个（:95352）。⇒ **多客户端是显式支持的**，机器人占着连接时别的脚本照样能连上。
+
+那这些脚本为什么会 `ECONNREFUSED`？`ECONNREFUSED` 是**连接层**错误（端口没人监听），不是应用层拒绝。
+所以真正的原因通常是：**当时 NapCat 没在跑 / 端口写错 / 只起了机器人没起 NapCat**。
+⇒ 排查顺序：先 `Get-NetTCPConnection -State Listen | ? LocalPort -eq 3001` 看有没有人听，
+再确认 `config.yml` 里 `onebot.url` 的端口对得上。**别再当成"客户端只能有一个"。**
+
+⚠️ 另一个真实副作用（跟连接数无关，但同样会互相干扰）：这些脚本**会发真消息**，
+所以跑之前仍要先停机器人，跑完起回来。
 
 会抢连接的脚本：
 
@@ -740,6 +817,30 @@ Stop-Process -Id <PID> -Force
 
 ### ⚠️⚠️ 更阴的一手：**宽匹配会杀到我自己**（2026-09-15 踩了）
 
+> ## 🚨 硬规矩（2026-10-05 一晚**又踩两次**之后定的，别讨价还价）
+>
+> **杀进程的命令里，不许出现任何 `CommandLine` 匹配。** 一次都不许。
+> 一律走这三步：**① 只读列出全部 node → ② 人工认出 PID → ③ 用硬编码 PID 杀。**
+>
+> ⚠️ 为什么连"顺手加个 `-like`"都不行：**DSH 跑我的命令时外面套的 runner 本身就是
+> `node.exe`，而它的命令行里带着我这一整段脚本的原文** —— 我在脚本里写什么串，
+> runner 的命令行里就有什么串 ⇒ **过滤条件必然命中它自己** ⇒ 命令跑到一半、
+> 我自己把自己杀了（`exit code 4294967295`，什么都不输出）。
+>
+> ⚠️ **两次都不是"手滑"，都是"看起来很合理"的写法**：
+> · 第一次：装完包想看看「验证进程起来没有」→ `-like "*saki-install-test*"` ✗
+> · 第二次：收尾想「按 PID 杀验证进程」→ 循环里还是那个 `-like` ✗
+> ⇒ **验证脚本、收尾脚本一样算数** —— 不是只有"清理"才危险。
+>
+> ✅ 安全写法（**唯一**）：
+> ```powershell
+> # ① 只读列出，人工看（命令里不要出现任何要匹配的串）
+> Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+>   Select-Object ProcessId, CreationDate, @{n='cmd';e={$_.CommandLine.Substring(0,80)}}
+> # ② 认出 PID 之后，硬编码杀掉
+> foreach ($id in 480300, 332844) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+> ```
+
 我用 `CommandLine -match 'watchdog\.ps1|看门狗\.bat'` 批量停看门狗 ——
 结果**把我自己那条 pwsh 也杀了**：因为**我的命令行里就写着这个正则**，
 它当然匹配上了。表现是命令直接 `exit code -1`、什么都没输出，查半天。
@@ -781,57 +882,30 @@ $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 ⚠️ 反过来：**别指望 `Start-Process` 起的东西能活久** —— 短命令里查一下状态没事，
 但要交付给用户长期跑的服务，就得走上面这条路（或者让用户双击 bat）。
 
-### ⚠️⚠️ 但 WMI **起不了 PowerShell 脚本**（2026-09-20 实测，别再拿这招补看门狗）
+### ⚠️⚠️ WMI 起不了 PowerShell —— AI 会话里补不了看门狗（2026-09-20 实测）
 
-上面那条对 `cmd /c start …` 这类**辅助进程**成立，但**对 PowerShell 不成立**：
-WMI 创建的进程跑在**非交互式窗口站**里，PowerShell 在里面起不来 / 一起来就没。
-三种起法实测（都是 WMI `Win32_Process Create`）：
+WMI（`Win32_Process Create`）能起 `cmd /c start …` 这类**辅助进程**，
+但**起不了 PowerShell** —— 它建出来的进程跑在非交互式窗口站里，一起来就没。
+三种起法实测（`powershell -File watchdog.ps1` / 用 vbs 包一层 / `cmd /c start "" /min powershell …`）
+**都不行**，`watchdog.log` 一行都不写。
 
-| 起的命令 | 结果 |
-| --- | --- |
-| `powershell -File watchdog.ps1` | ❌ 5 秒就没，`watchdog.log` **一行都不写** |
-| `wscript //nologo _watchdog-hidden.vbs`（vbs 里 `Run(…,0,False)`） | ❌ 35 秒后没有看门狗进程、日志无新行 |
-| `cmd /c start "" /min powershell -File watchdog.ps1` | ⚠️ 活到 ~22 秒（**可能是我那条命令结束时 job 连坐**带走的，不能算它自己死） |
+⇒ **要补看门狗只有两条**：
+- 用户**双击 `看门狗.bat`**；或者
+- 走**计划任务**（`Register-ScheduledTask` + `-LogonType Interactive` +
+  `ExecutionTimeLimit` 设 `[TimeSpan]::Zero`，**故意不配触发器**以免和开机自启的
+  `SakiBot` 重复起两个）—— 2026-10-06 实测可行。
 
-⇒ **结论**：
+⚠️ **正道还是开机自启**（`SakiBot` → `autostart.ps1` 最后一行起它）：那是 explorer 在
+**用户会话**里启动的，能连续跑几小时。⚠️ 查它的时候**别用 `-match 'watchdog'`** ——
+我自己的命令行里就写着那个词，会**打中我自己**，于是"看见"一个根本不存在的 PID。
 
-- ✅ 看门狗**该由开机自启负责**（`SakiBot` → `_autostart-hidden.vbs` → `autostart.ps1`
-  最后一行起它，是 explorer 在**用户会话**里启动的）。
-  证据：`autostart.log` 09-20 12:03 那轮到「启动看门狗…」，`watchdog.log` 里 12:05~15:18
-  是它干的活 → **能连续工作几小时** ✓
-- ❌ **AI 会话里没法"补一个活着的看门狗"** —— WMI 那几条路都不通。
-  要补只有两条：**用户双击 `看门狗.bat`**，或者走计划任务（`schtasks /it`，
-  属于改系统设置 —— **先问再动**）。
-- ⚠️ 顺带：查它的时候**别用 `-match 'watchdog'`** —— 我自己的命令行里就写着那个词，
-  会**打中我自己**，于是"看见"一个根本不存在的看门狗 PID（2026-09-20 就这么误判了一次）。
-  拼字符串：`'watch' + 'dog\.ps1'`。
+### ⚠️ 起 NapCat 必须走 launcher（只在"哪天退回 NapCat"时才用得上）
 
-### ⚠️⚠️ 起 NapCat 必须走 launcher（或补齐那五个环境变量）
-
-`launcher-win10-user.bat` 看着只是"调一下 NapCatWinBootMain.exe"，其实它真正干的事是
-**设五个环境变量**：
-
-```
-NAPCAT_PATCH_PACKAGE / NAPCAT_LOAD_PATH / NAPCAT_INJECT_PATH
-NAPCAT_LAUNCHER_PATH / NAPCAT_MAIN_PATH
-```
-
-（`NAPCAT_LOAD_PATH` 指的那个 `loadNapCat.js` 才是"把 napcat.mjs 注入进 QQ"的入口。）
-
-**直接调 `NapCatWinBootMain.exe` 而不设这些变量**的后果（2026-09-15 实测）：
-**QQ 起来了、但 NapCat 完全没跑** —— 6099/3001 都不监听、
-`logs/` 里也不会有新日志。看着像"NapCat 启动失败"，其实是**注入根本没发生**。
-
-```powershell
-# 要么走 launcher（推荐）
-Start-Process -FilePath (Join-Path $shell 'launcher-win10-user.bat') -ArgumentList '-q', $BotQQ -WorkingDirectory $shell -WindowStyle Minimized
-
-# 要么自己把五个变量设齐再调 exe
-$env:NAPCAT_LOAD_PATH = "$shell\loadNapCat.js"   # ← 少这一个就静默失败
-...
-```
-
----
+`launcher-win10-user.bat` 看着只是调一下 exe，真正干的事是**设五个环境变量** ——
+其中 `NAPCAT_LOAD_PATH` 指的那个 `loadNapCat.js` 才是"把 napcat.mjs 注入进 QQ"的入口。
+**直接调 `NapCatWinBootMain.exe` 而不设这些** ⇒ **QQ 起来了、但 NapCat 完全没跑**
+（6099/3001 都不监听、日志也不写），看着像"启动失败"，其实是**注入根本没发生**
+（2026-09-15 实测）。⇒ **走 launcher，别自己拼 exe。**
 
 ## ⚠️ 写测试假模型的两条铁律（踩了 4 次，务必照做）
 
@@ -901,16 +975,109 @@ const { stdout } = await pExecFile(process.execPath, [tool], { cwd: ROOT, env: {
 
 **记住**：**只要那个假服务跟你写在同一个进程里，就不能用任何 `*Sync` 去等对面**。
 
+### ④ 收请求体：**先把分片拼成 Buffer，再一次性解码**（2026-10-06 抓到的，19 个套件全中招）
+
+```js
+// ❌ 别这么写：`c` 是 Buffer，`+=` 会**每个 TCP 分片各自 toString()** ——
+//    中文正好跨分片时那个字就烂成 `��`
+let body = '';
+req.on('data', (c) => (body += c));
+
+// ✅ 先收 Buffer，最后一次性按 UTF-8 解码
+const chunks = [];
+req.on('data', (c) => chunks.push(c));
+req.on('end', () => {
+  const body = Buffer.concat(chunks).toString('utf8');
+});
+```
+
+**为什么这个坑特别阴**：只在**中文跨分片**时发作，而分片时机由请求体大小和 TCP 决定 ⇒
+表现是**偶发假失败**，而且**报出来的完全不是那件事**。
+实测（`test/attitude.js` 的【5】）：约 **1/5** 概率挂在「私聊里的陌生人按群友对待」，
+看着像"态度注入错了"；实际是假模型收到的正文里**那个「问」字烂了**，
+`probes` 里 `user.includes('问个事')` 永远匹配不上。
+而 bot 自己的日志还显示「她明明回复了」⇒ 更让人怀疑自己的代码。
+
+⚠️ 顺带纠正一个**假结论**：清理测试的隔离状态后曾经"连过 13 次" ——
+那只是让提示词变短、大概率一个分片发完，**降低概率、不是修复**。
+（请求体越容易跨分片越容易中：提示词攒多了、`recent` 长了。）
+
+⚠️ **2026-10-06 已把 `test/*.js` 里 19 处全部改成 `Buffer.concat` 版**，写新的假模型照抄。
+
+⚠️ **教训**：碰到"偶发失败"，除了上面那两条，再加一条 ——
+**把发给假模型的原文打印出来看一眼**（`user=「…」`）。
+字节级被破坏的东西一眼能看出来，比读代码猜快得多（这次绕了很久）。
+
 ---
 
 ## 交付前要跑的回归
 
-**首选一条命令**（并行跑全部套件，约 2.5 分钟，各套件用独立端口互不干扰）：
+### ⚠️ 动了人设 / 知识库 → **顺手存一次提示词基线**（2026-10-06 用户拍板）
+
+**规矩**：只要改了 `personas/**/persona.md`、`quest-ideas.md`、`cast.md`，或者
+`knowledge/**` 里的东西 —— 交付前**必须**跑一次，然后**再跑一次不带 `--save` 的**：
+
+```powershell
+cd '<项目目录>\qq-ai-bot'
+node test/prompt-snapshot.js --save      # 存基线（会自己打印差异 + 敏感自检）
+node test/prompt-snapshot.js             # 复跑，必须「逐字节一致」
+```
+
+⚠️ **别用 `run-all` 跑这条** —— `--save` 是它自己的参数，`run-all` 传不进去。
+
+**为什么单独立这条**：改人设 ⇒ 提示词必然变 ⇒ `prompt-snapshot` 套件必然红，
+而那个红**长得像"我这次把人设改坏了"**，实际只是"基线该更新了"。
+2026-10-06 就攒了两轮没存（旧基线连更早加的「黑祥」那一节都没有），
+回归里一次报「提示词变了，1837 行不同」，白查了一阵。
+
+**`--save` 现在会自己打印两样东西**（2026-10-06 加，别再手工核对）：
+
+| 打印什么 | 干什么用 |
+| --- | --- |
+| 跟现有基线的**差异摘要**（哪些场景变了几行、新增了哪些行） | 一眼确认"变的就是我刚改的那一节" |
+| **敏感内容自检**（绝对路径 / `sk-`、`ark-`、`accessToken`） | 别把真凭据存进基线 |
+
+⚠️ **看一眼那两段再说"存好了"** —— 别盲存；差异里要是冒出你**没改过**的东西，先查。
+
+### ⚠️⚠️ **回归一律在「后台 job」里跑，不许占着前台等**（2026-10-06 用户定）
+
+**用户原话**：
+
+> 「**以后跑回归都像刚才那样在后台跑**，这个时候我可以发送新发现插话」
+
+- ✅ 起命令时就用 **`run_in_background: true`**（DSH 的后台 job），
+  命令**立刻返回一个 job id**；过几分钟它跑完了会**主动通知**结果。
+- ✅ 启动之后**马上告诉用户一句**「回归在后台跑着」，然后**该干嘛干嘛** ——
+  他在这几分钟里随时能发新发现、改主意、让你先干别的。
+- ✅ 后台 job 跑完会**主动通知**我 ⇒ **通知一到就立刻去 `job_output` 读结果、
+  马上把结论报给他**（哪几套过了、哪几套没过、为什么）。
+  🚫 **不许攒着**、不许等他问、更不许当没看见 —— 他刚才就是为这个补的要求。
+- ✅✅ **红了就当场修，不许只报不修**（同一句要求的下半句：「**出问题要修复**」）。
+  修的顺序：① 读 `logs/test-<套件名>.log` 定位是哪一项；
+  ② 分清**是我这次改动引起的**（就去改代码，或者改那条已经过时的断言）
+  还是**并发偶发**（先单独重跑：`node test/run-all.js <套件名>` ——
+  带隔离 env，别直接 `node test/<套件名>.js`）；
+  ③ 改完**复跑那一套**，必要时再跑一遍全量；④ 把"修了什么、为什么"一起报给他。
+  ⚠️ 只有**确实需要他拍板**的（比如要动真实数据、要改配置）才停下来问。
+- ⚠️ 改完**一定要重启机器人**（铁律②），别让"回归绿了"和"用户能测"脱节。
+- 🚫 **不要**前台阻塞着等那 2.5~4 分钟 —— 那段时间**他插不进话**，
+  和上面「⚠️⚠️ 别为了重启而干等」是**同一个毛病**（占着会话 = 让人干等）。
+- ⚠️ 回归跑着的时候**不许去杀任何 `src/index.js`**（`test/behavior.js` 自己会
+  spawn 一个真机器人，见下面那节）—— 但**可以**继续改代码、写测试、读日志。
+- ⚠️⚠️ **2026-10-16 实测补一条**：**回归跑着时别去改 `src/` 里的文件** ✗
+  套件是**起子进程**去 `import` 那些源文件的，我一边跑一边改，子进程就读到**改到一半的**
+  那一份 ⇒ 当场红了 6 项（`private-work` 的"文件预读"整段），**看着像代码坏了**。
+  单独重跑：**全绿** ✅ ⇒ 白查一轮。
+  ⇒ 规矩：**要改 `src/` 就先等回归跑完**（读日志、写 TODO、改文档都没事 ✓）。
+
+**首选一条命令**（并行跑全部套件，约 2.5~4 分钟，各套件用独立端口互不干扰）：
 
 ```powershell
 cd '<项目目录>\qq-ai-bot'
 node test/run-all.js            # 默认 2 个并行
 node test/run-all.js --jobs 1   # 退化成串行（排查某个套件时用）
+node test/run-all.js poke quest # 只跑指定套件（**仍然带隔离 env**，
+                                #   比自己 node test/poke.js 安全，见下面那节）
 ```
 
 ⚠️ **并发别调高**：并发 5 时超时更容易触发。但要注意 —— **2026-09-13 查清了，
@@ -969,7 +1136,7 @@ node test/quest.js       # 二级剧情：阶段数≤10/最佳3指数下降 + �
 node test/qzone.js        # 发说说的计数/冷却**必须落盘**（不然重启就重置）+ 陈旧时间戳不采信
 node test/bilibili-scope.js # 「问B站热门视频」不许被当成「查我的投稿」+ 退避按接口 + 不泄露错误码
 node test/imagegen.js    # ★ 生图（她「拍个照」）：标记剥净 + **失败话术不许泄露故障码** + 换服务商只改配置 + 串行只跑一个（**离线假服务器，不花钱**）
-node test/learned-edit.js # learned.md 能在界面改（保存时校验格式）+ /api/reload 带知识库
+node test/learned-edit.js # 学习档案（global/groups/dm）能在界面改（保存时校验格式）+ /api/reload 带知识库
 node test/affinity.js     # 好感度（默认50/0~100）+ 对服主不注入 + 自动机制不许改它
 node test/observe-compress.js # 群记忆压缩：性格条数不许变少（少了整次作废）
 npm run check             # 配置与模型连通性
@@ -998,47 +1165,34 @@ node test/ask-attitude.js
 | 表情图纸空白 | 图片文件丢了，看启动警告 |
 | 测试脚本 `ECONNREFUSED 3001` | 机器人占着连接，先停它 |
 | 看门狗窗口反复刷 `Cannot validate argument on parameter 'ArgumentList'` + 「等了 90 秒 NapCat 仍未监听 3001」 | **空数组传给了 `Start-Process -ArgumentList`**：`@()` 会抛异常，命令直接中断 → NapCat **压根没被启动**（2026-09-17 修的 `watchdog.ps1`；同一次还修了它读 `config.yml` **不认单引号** `botQQ: '10000002'` 的 bug）。⚠️ 这个坑 `start-all.ps1` 09-15 就修过，watchdog 那份漏了 —— **两个脚本都要看** |
+| `logs/watchdog.log` 反复写「机器人未在 30 秒内连上」，但当日 `logs/bot-YYYY-MM-DD.log` 里明明有「已连接到协议端」 | ⚠️ **看门狗进程跑的是旧脚本**（2026-10-06 实测）。`powershell -File watchdog.ps1` 是**常驻循环**，脚本只在**启动那一刻**读进内存 ⇒ **改了 `watchdog.ps1` 必须重启看门狗**，否则旧进程永远按老逻辑判断。那次是两个 10-02 启动的看门狗还在找 `logs\bot.log` —— 而那个文件在 10-02 的「日志按天留存」改造后**就不存在了** ⇒ 每次启动都白等 30 秒、报假警报（`Start-Bot` 的返回值被 `Out-Null` 丢掉，所以**只是误报、不会重复拉起**）。<br>⚠️ 顺带：**`logs\bot.log` 不是当前日志**，别照它去查；当日日志是 `logs\bot-YYYY-MM-DD.log`（由 `src/log.js` 按天追加写）。<br>⚠️ 补一个看门狗的办法（AI 会话里 WMI / `Start-Process` 都留不住它）：**计划任务**，`Register-ScheduledTask` + `-LogonType Interactive` + `ExecutionTimeLimit` 设 `[TimeSpan]::Zero`（默认 72 小时会把长驻循环杀掉），**故意不配触发器**以免和开机自启的 `SakiBot` 重复起两个 |
 | 在管理界面点了「重启 NapCat」，它到底会不会自己回来 | ✅ **会，而且很快**（2026-09-17 03:12 实测：03:12:05 点 → WS 断开 → 03:12:08 QQ 进程换新 → **03:12:11 已登录，6 秒**）。`RestartNapCat` 自己就会把 QQ 重新拉起来，**看门狗都来不及出手**（它 20 秒才查一次）。<br>⚠️ 那 03:04 用户点完为什么就没回来？**因为当时坏掉的看门狗把恢复过程打断了**：`Start-NapCat` 每轮先 `Stop-Process QQ` 再 `Start-Process`，而后者又因为空数组抛异常 → **QQ 被强杀、NapCat 又没起来**，于是死循环。两处都修好（`e4ad20b`）后这条链才是通的。<br>→ 所以**点重启是安全的**（约 6 秒不可用），出问题才需要看门狗兜底；点完 1 分钟还不通，去看 `logs/watchdog.log` |
 
 ---
 
-## 🔄 协议端已换成 LLBot（2026-09-20）—— 重要
+## 🔄 协议端换过好几次（NapCat → LLBot → SnowLuma）—— 只留结论
 
-**为什么换**：NapCat 依赖 `napcat/.credential` 那份**快速登录凭据**，而腾讯在 09-20
-把它**从快登名单里删掉了**（探针报 `online:nocred`）→ 之后**每次被踢都得扫码**。
-LLBot 是**独立实现、不注入 QQ 客户端**，客户端特征和 NapCat 不一样。
+**现状**：`config.yml` 里 `provider.name: snowluma`（`dir: C:\SnowLuma`，管理页 `http://127.0.0.1:5099`）。
+它是**独立实现、不注入 QQ 客户端**，登录态比 NapCat 稳得多 —— 2026-09-30 之所以能把
+"两次重启至少隔 5 分钟"放宽成"能攒就攒"，依据就是这一点。
 
-**现状**：
+⚠️ **换协议端时踩过的坑（换哪一家都适用）**：
 
-| | |
-| --- | --- |
-| `config.yml` | `provider.name: llonebot` |
-| LLBot 位置 | `C:\LLBot\llbot.exe`（**故意不放 OneDrive 里**，免得同步拖累） |
-| 它的 OneBot | **也是 3001**（`ob11.connect[0]`；token 已和 `config.yml` 的 accessToken 对齐） |
-| 它的 WebUI | **3081**（⚠️ 它默认 3080，和 DSH 自己的 Web GUI **撞车**，已改） |
-| 启动方式 | 双击 `llbot.exe` → 界面里点「启动」；**它也在开机自启里**（2026-09-20 核实：注册表 `HKCU\...\Run` 值名 `LuckyLilliaDesktop` = `"C:\LLBot\llbot.exe" --startup-delay=5`）<br>⚠️ **原来这里写的是「它不随开机自启」，是错的** —— 我照着印象写的，没查注册表 |
-| 签名 | 它自己向官方签名服务取 token（`ttl=86400s`，24 小时自动续） |
-| 看门狗 | **已改**：读到 `provider.name=llonebot` 时**只保机器人，绝不碰 NapCat** |
+1. **两个协议端不能同时跑** —— 都抢 3001，而且连的是同一个号；顺序必须是
+   **停旧的（连 QQ 一起）→ 再起新的**。
+2. **NapCat 的 launcher 会把 QQ 拉回来**（就是那个 cmd 窗口），光杀 QQ 没用。
+3. **首次登录要扫码**；各家"自动登录"的凭据都可能被腾讯作废（NapCat 那份就被作废过）。
+4. 管理能力按家分派（出码 / 重启 / 快速登录），**不支持就明确说"不支持"**，见 `src/provider.js`。
 
-**⚠️ 换协议端时踩到的坑（别再踩）**：
+⚠️ `src/cred-backup.js` + `tools/napcat-cred.mjs` 是 **NapCat 专用**的（现在不会执行，
+留着是"哪天退回 NapCat 还能用"）—— **不是死代码，别删**。
 
-1. **两个协议端不能同时跑** —— 都抢 3001，而且连的是同一个号。切换顺序必须是：
-   **停 NapCat（连 QQ 一起）→ 再起 LLBot**。
-2. **NapCat 的 launcher 会守护着把 QQ 拉回来**（`launcher-win10-user.bat` 那个 cmd 窗口），
-   光杀 QQ 没用，得连它一起停。
-3. **LLBot Desktop 包里缺 `bin\llbot\node.exe`** → 启动时报 `获取Node.js版本失败`。
-   拿系统任意 node 拷过去即可（实测 v24.20.0 可用）。
-4. **首次登录必须扫码**；扫完它会**自动把号登记进签名白名单**
-   （报错里那句 `login that QQ once via wtlogin.login to auto-enroll`）。
-   在那之前它会 `[Sign] FATAL auth failure ... uin not in your allowed list` 并退出。
-5. LLBot 的管理能力**只有 `launch`**（不支持出码/重启）→ 界面上那些按钮显示"不支持"，
-   这是**对的**，不是 bug。
+## 🚀 发 GitHub Release（2026-09-30 加）
 
-**怎么退回去用 NapCat**：
-1. `config.yml` 里删掉 `provider:` 段（或把 name 改回 `napcat`）；
-2. 停掉 LLBot；
-3. 拉起 NapCat（`napcat\NapCat.Shell\launcher-win10-user.bat`，**窗口要可见**）；
-4. ⚠️ **要扫码** —— 那份快登凭据已被腾讯作废，退回去也回不到"自动登录"了。
+**凭据**：GitHub PAT 存在 **`logs/发布凭据.md`**（用户要求「记下 token，下次就不用我再生成了」）。
+- ⚠️ `logs/` 在 `.gitignore` 里、也在 `make-public.cjs` 的跳过清单里 ⇒ **不进任何仓库**，已验证。
+- ⚠️⚠️ **绝不要把 token 抄进这份 `AGENTS.md`** —— 它会被导出到公开仓库
+  （`qq-ai-bot-public/AGENTS.md` 就是它），写进去等于把凭据公开。这里只写"它在哪"。
 
 **⚠️ 凭据备份模块的现状**：`src/cred-backup.js` + `tools/napcat-cred.mjs` 是**NapCat 专用**的。
 现在协议端是 LLBot → `bot.js` 里那段备份**不会执行**（加了 provider 判断）。
@@ -1163,3 +1317,42 @@ LLBot 是**独立实现、不注入 QQ 客户端**，客户端特征和 NapCat �
   （防止"跑了个不存在的套件名，还以为跑过了"）。定向复跑的典型用法：
   `node test/run-all.js --only safety sensitive-hit knowledge-groups webui memes run-all-cli`。
 
+---
+
+**PAT 要求**：fine-grained token，Repository access 选 `<主人>/saki-ai-bot`，
+Repository permissions 里 **`Contents: Read and write`**。
+- ⚠️ 只勾 `Repository advisories` **不够**（2026-09-30 踩过：建 Release 直接
+  `403 Resource not accessible by personal access token`）。Release 和它的附件都算在 `Contents` 底下。
+
+**流程**（这台机器上**没装 `gh` CLI**，所以走 REST API）：
+
+```powershell
+$token = (Get-Content '<项目目录>\qq-ai-bot\logs\发布凭据.md' -Raw).Trim()
+$h  = @{ Authorization = "Bearer $token"; 'User-Agent' = 'dsh-release'; Accept = 'application/vnd.github+json' }
+$px = 'http://127.0.0.1:7890'
+$api = 'https://api.github.com/repos/hzyzhzy/saki-ai-bot'
+
+# ① 建 Release（body 是中文 + markdown ⇒ 必须自己转 UTF8 字节，别直接传字符串）
+$payload = @{ tag_name='v1.0.x'; name='标题'; body=$body; draft=$false; prerelease=$false } | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Post -Uri "$api/releases" -Headers $h -Proxy $px `
+  -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($payload))
+
+# ② 传附件（走 uploads.github.com）
+Invoke-RestMethod -Method Post -Headers $h -Proxy $px -ContentType 'application/octet-stream' -TimeoutSec 1200 `
+  -Uri "https://uploads.github.com/repos/hzyzhzy/saki-ai-bot/releases/<id>/assets?name=saki-setup-1.0.x.exe" `
+  -InFile '<项目目录>\qq-ai-bot\installer\dist\saki-setup-1.0.x.exe'
+```
+
+**三个坑（都踩过，别再踩）**：
+
+| 坑 | 现象 | 规矩 |
+| --- | --- | --- |
+| hosts 把 `github.com` / `api.github.com` 指向 `127.0.0.1` | 命令行连 GitHub 一律 `ECONNREFUSED`；浏览器却可能能进（走代理时域名由代理解析，绕开 hosts） | **每次 API 调用都显式带 `-Proxy http://127.0.0.1:7890`**；别指望系统代理开关 —— 它经常是 `0`，但 7890 本身是通的（`Test-NetConnection 127.0.0.1 -Port 7890` 一测就知道） |
+| `git push` 能成、API 却 401 | GCM 那份凭据**只给 git 用**，`git credential fill` 取不出来（返回空） | Release 资产**必须**用 PAT —— 跟 push 是两套认证 |
+| 发出去的 exe 里是旧代码 | `build-payload` 的源是**公开副本**，不先重新导出就会打包上一版 | 顺序：改代码 → `make-public.cjs` → `build-payload.cjs`（**别加 `--refresh`**：它自己会再跑一次 make-public，两个前后脚跑会把 README/LICENSE 删掉）→ `ISCC` → 静默装到临时目录验一次 |
+
+**已发布的 tag**：`v1.0.0` → `3695e0e`、`v1.0.1` → `3f9fea3`，各带自己的 `saki-setup-*.exe`。
+
+⚠️ **验证安装包时别留僵尸**：用 `cmd /c node src\index.js` 起的验证进程，
+`Stop-Process` 杀 `cmd.exe` **不会**带走里面的 node —— 必须按 node 的 PID 杀，
+否则它会一直跑着（2026-09-30 就留了两个，还误以为是"端口 3099 被占用"）。

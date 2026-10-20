@@ -36,6 +36,7 @@ const check = (ok, label, extra = '') => {
 writeFileSync(
   join(ROOT, CFG_REL),
   [
+    'ownerQQ: "30004"',
     'llm:',
     '  baseURL: http://127.0.0.1:1/v1',
     '  apiKey: "sk-test"',
@@ -107,12 +108,16 @@ async function startOne(extra = {}) {
 console.log('\n【1】★★ 阶段数：≤10、最佳 3、其余指数下降');
 {
   const ws = quest.stageWeights();
-  check(ws.length === 10, '一共 10 档（1..10 段）');
+  // ⚠️ 2026-10-03 改：用户要求「**不要 1 段的了**」⇒ 分布从 **2 段**起（9 档）。
+  //    1 段那不叫一条线，就是一条日常事件。
+  check(ws.length === 9, '一共 9 档（2..10 段）');
   const byN = Object.fromEntries(ws.map((x) => [x.n, x.w]));
+  check(byN[1] === undefined, '★ 不再有 1 段（用户 2026-10-03：「不要 1 段的了」）');
   check(byN[3] === Math.max(...ws.map((x) => x.w)), '★ 3 段的权重最高');
   let mono = true;
   for (let n = 3; n < 10; n++) if (!(byN[n] > byN[n + 1])) mono = false;
-  for (let n = 3; n > 1; n--) if (!(byN[n] > byN[n - 1])) mono = false;
+  // ⚠️ 往下只到 2 段（1 段已经不存在了）
+  for (let n = 3; n > 2; n--) if (!(byN[n] > byN[n - 1])) mono = false;
   check(mono, '★ 离 3 越远权重越小（指数下降，两边都单调）');
   check(byN[10] < byN[3] / 100, `10 段几乎不可能（权重比 ${(byN[10] / byN[3]).toFixed(4)}）`);
 
@@ -296,6 +301,25 @@ console.log('\n【8】★★ >3 段后"该收了"的压力逐级加重（但不�
   replies = [J({ event: 'e', text: 't', done: false, ending: null })];
   await quest.advance(q, { ask, replies: [] });
   check(/已经 4 段|该收了|收尾/.test(prompts[0].user), '★ 第 4 段的提示词里带上了收尾压力');
+}
+
+console.log('\n【8b】★★ 剧情文本的断句兜底（用户：「这个结局…两句又合到一起了」）');
+{
+  // 用户截图里那条结局的原文：整段 50 字，全是逗号，**一个句末标点都没有**
+  const messy =
+    '那杯水最后倒了，重新接了一杯热的敲了门，她果然没睡我把水放下，说我六点就得走，你现在想说就说，我听着';
+  const fixed = quest.ensureSentenceEnds(messy);
+  check((fixed.match(/。/g) || []).length >= 2, '★ 整段全是逗号 → 补出句末标点（分条才断得开）');
+  check(!/，，|。。|，。/.test(fixed), '不产生连续标点');
+  check(
+    quest.ensureSentenceEnds('她点了点头。然后走了。') === '她点了点头。然后走了。',
+    '本来就有句号的 → 一个字都不改',
+  );
+  check(/。/.test(quest.ensureSentenceEnds('她还在门口站着呢 她先来敲门了')), '汉字+空格+汉字 → 补句号');
+  // 真的能分条才算修好 —— 光有句号不算
+  const { splitChatText } = await import('../src/bot.js');
+  check(splitChatText(messy).length === 1, '（对照）没修过的原文分不出条');
+  check(splitChatText(fixed).length >= 2, '★ 修过之后分条函数真的断成两条以上');
 }
 
 console.log('\n【9】★ 硬上限：到 maxStages 必须收，收不明就当坏结局');
@@ -1112,10 +1136,16 @@ console.log('\n【25】★★ 上一条是坏结局 → 下一条的开场直接
   const r2 = await quest.begin({ ask, groupId: G });
   check(r2.ok === true, '第二条开起来了', r2.reason ?? '');
   const u2 = prompts[0].user;
-  check(/上一条主线是「坏结局」/.test(u2), '★★ 提示词里点明了「上一条是坏结局」');
+  check(/坏结局/.test(u2), '★★ 提示词里点明了「上一条是坏结局」');
   check(/挽回|收拾残局/.test(u2), '★★ 而且要求这一段写「挽回」');
   check(u2.includes(r1.quest.premise), '★★ 把上一条的起因也带上了（"直接参考坏结局剧情"）');
-  check(/别自己就把结局定成圆满/.test(u2), '★ 但能不能挽回交给群友，不预设圆满');
+  check(/你别自己定成圆满/.test(u2), '★ 但能不能挽回交给群友，不预设圆满');
+  // ★★ 2026-10-05 加（用户截图：「如果马上开下一个剧情，她会不记得上次剧情的内容」）：
+  //    原来只有坏结局才给一句"上一次的起因"，**上一条演了什么完全没给** ⇒
+  //    现在任何结局都摆出「上一条主线的经过（起因 + 每段 + 结局）」。
+  check(/上一条主线（刚演完的那条）/.test(u2), '★★ 摆出了「上一条主线」这一段');
+  check(/经过：/.test(u2), '★★ 带上了上一条**每一段发生了什么**');
+  check(/结局：坏结局/.test(u2), '★★ 也写明了上一条的结局');
 
   // —— 对照：好结局不触发 ——
   reset();
@@ -1128,6 +1158,13 @@ console.log('\n【25】★★ 上一条是坏结局 → 下一条的开场直接
   replies = [J({ premise: '新的小事', event: 'e', text: 't' })];
   const g2 = await quest.begin({ ask, groupId: G2 });
   check(g2.ok === true, '好结局之后也能正常开下一条');
+  // ★★ 2026-10-05：**好结局也一样**要把上一条摆出来（原来只有坏结局才有那段）——
+  //    用户要的是"她记得上次剧情的内容"，跟结局好坏无关。
+  check(
+    /上一条主线（刚演完的那条）/.test(prompts[0].user),
+    '★★ 好结局的上一条也照样摆出来（不再只有坏结局才给）',
+  );
+  check(/结局：好结局/.test(prompts[0].user), '★★ 而且写明是「好结局」');
   check(!/上一条主线是「坏结局」/.test(prompts[0].user), '★ 好结局之后**不会**硬套"挽回"');
 }
 
@@ -1281,9 +1318,578 @@ console.log('        （<主人> 2026-09-15 晚：「机器人已经答应了的
   check(quest.noteInterlude(doneQuest, { text: '这句也不该被记下来' }) === false, '★ 已经结束的剧情不再收插曲');
 }
 
+console.log('\n【22】★★ `/清除剧情`：只清最后那一条（连它的故事线一起），更早的一律不动');
+{
+  // ── 场景 A：两条都已结束 → 先清"上一条已结束的" ──────────────────
+  reset();
+  const G = '888000111';
+  // 先放一条一级事件（**不属于任何剧情**）—— purge 必须一个字都不碰它
+  storyline.note({ tier: 1, text: '一级事件：她在便利店被人缠着问路', groupId: G });
+
+  replies = [J({ premise: '第一条的事', event: 'e1', text: '第一段。' })];
+  const r1 = await quest.begin({ ask, groupId: G });
+  quest.finish(r1.quest, 'good', 'llm');
+  replies = [J({ premise: '第二条的事', event: 'e2', text: '第二段。' })];
+  const r2 = await quest.begin({ ask, groupId: G });
+  quest.finish(r2.quest, 'good', 'llm');
+
+  const q1n = storyline.forQuest(r1.quest.id, G).length;
+  const q2n = storyline.forQuest(r2.quest.id, G).length;
+  check(q1n > 0 && q2n > 0, '前置：两条剧情都在故事线里留了条目');
+
+  const p = quest.purge(G);
+  check(p.ok === true && p.running === false, '★ 没有在跑的 → 清掉「上一条已经结束的」');
+  check(storyline.forQuest(r2.quest.id, G).length === 0, '★★ 它的故事线条目删干净了（不然她还会提这件事）');
+  check(p.storyRemoved === q2n, `回执里报的删除条数对得上（${p.storyRemoved} / ${q2n}）`);
+  check(storyline.forQuest(r1.quest.id, G).length === q1n, '★★ 更早那条剧情**一条都没动**');
+  check(
+    storyline.recent(50, G).some((e) => String(e.text).includes('便利店')),
+    '★★ 一级事件（不属于剧情）也**没被误删**',
+  );
+
+  const p2 = quest.purge(G);
+  check(p2.ok === true && p2.running === false, '再清一次 → 轮到第一条');
+  check(storyline.forQuest(r1.quest.id, G).length === 0, '第一条也清掉了');
+  const p3 = quest.purge(G);
+  check(p3.ok === false, '★ 没有剧情可清了 → 明确说"没得清"', p3.reason);
+
+  // ── 场景 B：正在跑 → 中止 + 同样删掉它写过的条目 ────────────────
+  reset();
+  const G2 = '888000222';
+  replies = [J({ premise: '正在跑的那条', event: 'e', text: '开场。' })];
+  const r3 = await quest.begin({ ask, groupId: G2 });
+  check(storyline.forQuest(r3.quest.id, G2).length > 0, '前置：正在跑的这条已经写进故事线');
+  const pb = quest.purge(G2);
+  check(pb.ok === true && pb.running === true, '★ 正在跑的 → 中止它');
+  check(storyline.forQuest(r3.quest.id, G2).length === 0, '★★ 中止也把它写过的条目删掉');
+  check(quest.current(G2) === null, 'current 清空了');
+  check(quest.purge(G2).ok === false, '★ 清完之后这个群没剧情了');
+
+  // ── 场景 C：别的群不受影响 ──────────────────────────────────────
+  reset();
+  replies = [J({ premise: '甲群的事', event: 'e', text: '甲的。' })];
+  const ra = await quest.begin({ ask, groupId: '888000333' });
+  replies = [J({ premise: '乙群的事', event: 'e', text: '乙的。' })];
+  const rb = await quest.begin({ ask, groupId: '888000444' });
+  quest.purge('888000333');
+  check(storyline.forQuest(ra.quest.id, '888000333').length === 0, '清的是点名那个群');
+  check(storyline.forQuest(rb.quest.id, '888000444').length > 0, '★★ 别的群的剧情一点没动');
+}
+
+console.log('\n【24】★★ `/剧情` 在剧情进行中 = 剧情控制（带方向 / 留空直接推进）');
+{
+  // ① 管理员给的方向真的进了提示词，并且写明"当意图、别当台词"
+  reset();
+  const r = await startOne();
+  prompts = [];
+  replies = [J({ event: 'e', text: '她说了句什么。', done: false, ending: null })];
+  await quest.advance(r.quest, { ask, hint: '让初华把话说开' });
+  check(/让初华把话说开/.test(prompts[0].user), '★ 管理员给的方向进了推进提示词');
+  check(
+    /管理员/.test(prompts[0].user) && /原样写成她的台词/.test(prompts[0].user),
+    '★ 而且写明"这是他的意图，不是她要说的话"',
+  );
+
+  // ② 命令分支：剧情在跑 → 交给 questControl，**不再当"开新的一条"**
+  reset();
+  const { Bot } = await import('../src/bot.js');
+  const b = new Bot();
+  b.speakerRole = () => 'owner';
+  const calls = [];
+  b.questControl = (event, gid, hint) => {
+    calls.push({ gid, hint });
+    return true;
+  };
+  const rg = await startOne({ groupId: '200000001' });
+  check(!!rg.quest, '前置：这个群有一条在跑');
+  const seg = (t) => [{ type: 'text', data: { text: t } }];
+  const evt = { message_type: 'group', group_id: '200000001', user_id: '10000001' };
+  check(b.tryQuestStart(evt, seg('/剧情 让她去当面问清楚')) === true, '命令被处理了');
+  check(
+    calls.length === 1 && calls[0].gid === '200000001' && calls[0].hint === '让她去当面问清楚',
+    '★★ 在跑的时候 → 走 questControl，话原样带过去',
+  );
+  check(quest.current('200000001')?.premise === rg.quest.premise, '★ 没有另开一条（原来那条还在）');
+  b.tryQuestStart(evt, seg('/剧情'));
+  check(calls.length === 2 && calls[1].hint === '', '★★ 留空 → 也是控制（直接推进），不是开新的');
+
+  // ③ 没有剧情在跑 + 留空 → 仍然是**用法提示**（不能变成"推进"）
+  reset();
+  const b2 = new Bot();
+  b2.speakerRole = () => 'owner';
+  const sent = [];
+  b2.sendToGroup = async (g, t) => {
+    sent.push(t);
+  };
+  b2.questControl = () => {
+    throw new Error('没有剧情时不该走 questControl');
+  };
+  check(b2.tryQuestStart(evt, seg('/剧情')) === true, '命令被处理了');
+  check(sent.some((t) => /用法/.test(String(t))), '★ 没剧情 + 留空 → 回用法提示');
+}
+
+// ★★ 2026-10-05 加（用户要求）：「加一条剧情命令，/剧情 好/坏结局，
+//    对应 webui 里的**直接收成好/坏结局**的按钮」。
+console.log('\n[结局命令] /剧情 好结局、/剧情 坏结局');
+{
+  // ⚠️ 这个套件顶层没直接 import Bot（前面的段都是各自动态取的）——
+  //    这里一样动态 import（ESM 有模块缓存，不会重复执行）
+  const { Bot } = await import('../src/bot.js');
+  const seg = (t) => [{ type: 'text', data: { text: t } }];
+  const evt = { message_type: 'group', group_id: '200000001', user_id: '10000001' };
+  for (const [word, want] of [
+    ['好结局', 'good'],
+    ['坏结局', 'bad'],
+    ['好', 'good'],
+    ['坏', 'bad'],
+    ['good', 'good'],
+    ['bad', 'bad'],
+    [' 坏结局 ', 'bad'],
+    ['结局', null],
+    ['往好的方向走', null], // ★ 关键反例：这是**方向提示词**，不是收结局的命令
+    ['那先收个坏结局吧', null], // 不是整段相等 → 不认
+    ['', null],
+  ]) {
+    const got = quest.parseEndingWord(word);
+    check(
+      String(got) === String(want),
+      `判据：${JSON.stringify(word)} → ${want ?? 'null'}`,
+      `实际 ${got}`,
+    );
+  }
+
+  // 没有剧情在跑时发 `/剧情 好结局` → **不许**开出一条叫"好结局"的新线
+  reset();
+  const b3 = new Bot();
+  b3.speakerRole = () => 'owner';
+  const got3 = [];
+  b3.sendToGroup = async (g, t) => {
+    got3.push(String(t));
+  };
+  b3.questControl = () => {
+    throw new Error('没有剧情时不该走 questControl');
+  };
+  check(b3.tryQuestStart(evt, seg('/剧情 好结局')) === true, '命令被处理了');
+  check(
+    got3.some((t) => /没有在跑的剧情/.test(t)),
+    '★ 没剧情 + 收结局命令 → 明确说"没有在跑的剧情"',
+  );
+  check(!got3.some((t) => /用法/.test(t)), '★ 而不是掉进用法提示 / 被当成新剧情的背景');
+}
+
+// ★★ 2026-10-05 加（用户要求）：「在按群设定那里加一个开关，控制是否接收 /剧情 的命令，
+//    默认开启接收 —— 主要是等下会有**两个机器人在同一个群**，避免冲突」。
+console.log('\n[开关] 按群关掉「收 /剧情 命令」');
+{
+  const { Bot } = await import('../src/bot.js');
+  const { config } = await import('../src/config.js');
+  const G = '999000777';
+  config.groupParams ??= {};
+  config.groupParams[G] = { quest: { commands: false } };
+
+  const b = new Bot();
+  b.speakerRole = () => 'owner';
+  const got = [];
+  b.sendToGroup = async (g, t) => {
+    got.push(String(t));
+  };
+  b.questControl = () => {
+    throw new Error('关掉了就不该走剧情控制');
+  };
+  const ev = { message_type: 'group', group_id: G, user_id: '10000001' };
+  check(
+    b.tryQuestStart(ev, [{ type: 'text', data: { text: '/剧情 开一条新的' } }]) === false,
+    '★ 关掉后 `/剧情` 被无视（返回 false，交回普通流程）',
+  );
+  check(got.length === 0, '★★ 而且**一个字都不回**（当没看见，不抢话）');
+  check(
+    b.tryQuestReset(ev, [{ type: 'text', data: { text: '/清除剧情' } }]) === false,
+    '★ `/清除剧情` 同样被无视（它也是剧情命令）',
+  );
+
+  delete config.groupParams[G];
+
+  // 对照：**没设过**开关的群照旧收（默认开启）
+  const got2 = [];
+  b.sendToGroup = async (g, t) => {
+    got2.push(String(t));
+  };
+  const ev2 = { message_type: 'group', group_id: '999000778', user_id: '10000001' };
+  check(
+    b.tryQuestStart(ev2, [{ type: 'text', data: { text: '/剧情' } }]) === true,
+    '★★ 没设过开关的群照旧收命令（默认开启，行为跟以前一样）',
+  );
+  check(got2.some((t) => /用法/.test(t)), '★ 而且走的是正常的用法提示（没被开关影响）');
+}
+
 try {
   for (const f of [CFG_REL, QUEST_REL, STORY_REL]) rmSync(join(ROOT, f), { force: true });
 } catch {}
+
+console.log('\n【14】★★ 谁先开口谁主导 —— 同款机器人在演剧情时，后开口的一边让位');
+{
+  const q = await import('../src/quest.js');
+  const G = '999000900';
+
+  // ① 「像不像同类在演剧情」的判据
+  check(
+    q.looksLikePeerPlot('玻璃还在地上，初华蹲着捡，手割了。我把纸递过去，她没接。') === true,
+    '★ 剧情段（长、没 @、不是问句）→ 认',
+  );
+  check(q.looksLikePeerPlot('是睦') === false, '太短 → 不认（那是闲聊）');
+  check(q.looksLikePeerPlot('@客服Saki 你在干嘛呢，帮我看下这个') === false, '带 @ → 不认（那是在对话）');
+  check(
+    q.looksLikePeerPlot('你说的那个东西我这边也遇到了同样的情况，要不要一起看看怎么处理？') === false,
+    '★ 问句 → 不认',
+  );
+
+  // ② 记录与主导权
+  q.__peerPlots().clear();
+  check(q.leadership(G) === 'none', '★ 自己没在跑剧情 → none（轮不到让位）');
+  check(
+    q.notePeerPlot(G, { uid: '10000001', text: '是睦' }) === false,
+    '短句不进记录',
+  );
+  check(
+    q.notePeerPlot(G, { uid: '10000001', text: '玻璃还在地上，初华蹲着捡，手割了。我把纸递过去，她没接。' }) === true,
+    '★ 长剧情句记下了',
+  );
+  check(q.__peerPlots().get(G)?.firstAt > 0, '记下了首次时间（用来比谁先开口）');
+  check(q.__peerPlots().get(G)?.uid === '10000001', '记下了是哪个号在演');
+  q.__peerPlots().clear();
+}
+
+console.log('\n【15】★★ 机器人发的 / 命令一律不执行（用户：「问题是在黑祥接到了 saki 发的 /剧情 指令」）');
+{
+  const { Bot } = await import('../src/bot.js');
+  const { config } = await import('../src/config.js');
+  const G = '999000901';
+  const PEER = '999000901';
+  const OWNER = String(config.ownerQQ ?? '');
+  // 把 PEER 配成这个群的同类
+  config.groupParams = config.groupParams ?? {};
+  config.groupParams[G] = { ...(config.groupParams[G] ?? {}), peers: [PEER] };
+
+  const mk = (uid, text) => ({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: G,
+    user_id: String(uid),
+    self_id: '10000002',
+    message_id: Math.floor(Math.random() * 1e9),
+    message: [{ type: 'text', data: { text } }],
+    sender: { user_id: String(uid), nickname: 'x' },
+  });
+  const b = new Bot();
+  b.selfId = '10000002';
+  b.sendToGroup = async () => {};
+  b.sendText = async () => {};
+
+  // ① 同类说的「/剧情 xxx」不该被当成命令（直接调命令处理函数，确认它会被 onRaw 的闸挡住）
+  check(b.isPeerBot(G, PEER) === true, '★ 池里的号认成同类');
+  // ② 命令闸的判据：同类 / teach.bots 都算"机器人"
+  const isBotSender = (uid) =>
+    b.isPeerBot(G, String(uid)) ||
+    (config.teach?.bots ?? []).map(String).includes(String(uid));
+  check(isBotSender(PEER) === true, '★★ 同类发的命令 → 挡');
+  check(!!OWNER && isBotSender(OWNER) === false, '★ 主人发的命令 → 放行');
+  check(isBotSender('30003') === false, '★ 普通群友发的命令 → 放行');
+  delete config.groupParams[G];
+}
+
+console.log('\n【16】★★ 发了 /清除剧情 ⇒ 强制静默 1 分钟（2026-10-07 用户要求）');
+{
+  // 用户原话：「**发了清除剧情应该强制 bot 停发消息一分钟**，要不然她们会
+  //   接着上文继续聊」。
+  // ⚠️ 为什么光"清剧情"不够：剧情状态是清了，但**上下文里那几句还在**，
+  //    而"对话延续"（直接接、不判）跟剧情状态**无关** ⇒ 清完照接不误。
+  // ⚠️ 所以静默要**拦全**：`decide()`（@ 她 / 关键词 / 同类 / 追补的总入口）、
+  //    `shouldJoinChat()`（主动接话）、以及 `peer-chat.js` 的**定时主动搭话**
+  //    （它走 `sendToGroup` 直发，**不经过 `decide()`** —— 漏了它就不是"停发消息"）。
+  const { Bot } = await import('../src/bot.js');
+  const b = new Bot();
+  b.selfId = '10000002';
+  const G16 = '999000186';
+
+  check(typeof b.muteGroup === 'function' && typeof b.isMuted === 'function', '★ 有"群级静默"这套接口');
+  check(b.isMuted(G16) === false, '没设过 → 不静默');
+  b.muteGroup(G16, 60000, '自检');
+  check(b.isMuted(G16) === true, '★★ 设了之后 → 这个群静默中');
+  check(b.isMuted('999000187') === false, '★ **只静默这一个群**（别的群一点不受影响）');
+  b.muteGroup(G16, 0, '自检');
+  check(b.isMuted(G16) === false, '★ 传 0 秒 = **解除静默**（调用方要取消就靠它）');
+
+  // 静默期内 **@ 她也不回**（用户要的是"强制停发"，不是"少说两句"）
+  b.muteGroup(G16, 60000, '自检');
+  const evAt16 = {
+    message_type: 'group',
+    group_id: G16,
+    user_id: '30003',
+    self_id: '10000002',
+    message: [
+      { type: 'at', data: { qq: '10000002' } },
+      { type: 'text', data: { text: '在吗' } },
+    ],
+    sender: { card: '路人甲', nickname: '路人甲' },
+  };
+  check(b.decide(evAt16) === null, '★★ 静默期内**连 @ 她都不回**（"强制"就是这个意思）');
+  check(b.shouldJoinChat(evAt16) === null, '★★ 主动接话那条路也直接不接');
+
+  // 接线（光有函数不算数）
+  const bsrc16 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /const r = quest\.purge\(gid\);[\s\S]{0,2200}?muteGroup\(gid, 60000/.test(bsrc16),
+    '★★ `/清除剧情` 那条路真的调了「静默 60 秒」',
+  );
+  check(
+    /decide\(event, voluntary = null\) \{[\s\S]{0,1200}?isMuted\(/.test(bsrc16),
+    '★★ `decide()` **最前面**就拦（所有回复路径的总入口）',
+  );
+  check(
+    /shouldJoinChat\(event, \{ stickerIsNew = false[\s\S]{0,600}?isMuted\(/.test(bsrc16),
+    '★ 主动接话那条路也各拦了一道',
+  );
+  const psrc16 = readFileSync(join(ROOT, 'src', 'peer-chat.js'), 'utf8');
+  check(
+    /isMuted\?\.\(gid\)/.test(psrc16),
+    '★★ 定时主动搭话也拦（它直发，不走 decide —— 这条最容易漏）',
+  );
+
+  // ⚠️⚠️ 2026-10-07 凌晨补（用户报「**/暂停指令没生效**」，日志查出真因）：
+  //    群友把她那条 `/暂停` 回执连着复读了 3 遍 → 触发"复读梗" →
+  //    她**在静默期里跟着复读**了 ✗（`01:16:22 [复读] 群 … 刷到第 3 句 → 她也复读…`）
+  //    根因：**复读是全项目唯一一处裸调 `send_group_msg` 的地方**，
+  //    绕过了 `sendChatLike()` 这个"她所有发言的唯一出口"。
+  check(
+    /async sendChatLike\(groupId, text, opts = \{\}\) \{[\s\S]{0,1200}?if \(!opts\.force && this\.isMuted\(groupId\)\)/.test(
+      bsrc16,
+    ),
+    '★★ 她发言的**唯一出口**（`sendChatLike`）也拦静默 —— 一处就管住主聊天 / 剧情 / 日常事件',
+  );
+  check(
+    /!this\.isMuted\(payload\.group_id\)/.test(bsrc16) &&
+      /if\s*\(\s*v\.join &&[\s\S]{0,300}?v\.say &&[\s\S]{0,300}?Math\.random\(\) < v\.chance &&[\s\S]{0,300}?!this\.isMuted\(payload\.group_id\)\s*\)/.test(
+        bsrc16,
+      ),
+    '★★ 而**复读**那条路单独堵了（它裸调 `send_group_msg`，绕过所有出口 —— 实测就是它）',
+  );
+  check(
+    // ⚠️ 2026-10-07 修：这里原来返回 `{ skipped: 'muted' }`，可剧情那条路的调用方是
+    //    `const sent = await sendChatLike(...)` 然后 `for (const x of sent)`
+    //    ⇒ 报 `sent is not iterable`（日志实证）⇒ 改成**返回空数组**。
+    /isMuted\(groupId\)\) \{[\s\S]{0,700}?return \[\];/.test(bsrc16),
+    '★★ 静默期直接返回、不真发 —— ⚠️ 而且**返回数组**（剧情那条路要 `for...of` 它）',
+  );
+}
+
+console.log('\n【17】★★ /暂停：**打断正在生成的** + **静默 2 分钟**（2026-10-07 用户要求）');
+{
+  // 用户原话：「再加一个 /暂停 指令，**直接打断所有正在生成的消息**，
+  //   并**停止发送消息 2 分钟**」。
+  // ⚠️ 两个动作缺一不可：只静默不打断 → 那条生成到一半的还会继续往外发；
+  //    只打断不静默 → 下一句话进来她又开始生成。
+  const { Bot } = await import('../src/bot.js');
+  const b = new Bot();
+  b.selfId = '10000002';
+  const G17 = '999000187';
+  const key17 = `group:${G17}`; // ⚠️ 和 `history.sessionKey` 同一口径
+  const seg = (t) => [{ type: 'text', data: { text: t } }];
+  const ev17 = (uid) => ({
+    message_type: 'group',
+    group_id: G17,
+    user_id: uid,
+    self_id: '10000002',
+    sender: { card: '服主', nickname: '服主' },
+  });
+
+  const aborted = [];
+  const muted = [];
+  let said = [];
+  b.running = new Map([[key17, { abort: (e) => aborted.push(String(e?.message ?? '')) }]]);
+  b.sendToGroup = async (g, t) => {
+    said.push(String(t));
+  };
+  b.speakerRole = () => 'owner';
+  // ⚠️ 把静默拦下来单独看（不然只能靠 `isMuted()` 间接推）
+  b.muteGroup = (gid, ms, why) => {
+    muted.push([String(gid), Number(ms), String(why ?? '')]);
+    return 0;
+  };
+
+  check(
+    b.tryPauseCommand(ev17('10000001'), seg('/暂停')) === true,
+    '★ `/暂停` 被认出来（返回 true ⇒ 不再当聊天处理）',
+  );
+  check(aborted.length === 1, '★★ **正在生成的那条被真的打断了**（`abort()` 调到了）', JSON.stringify(aborted));
+  check(
+    muted.some(([g, ms]) => g === G17 && ms === 120000),
+    '★★ 而且**这个群静默 2 分钟**（120000ms）',
+    JSON.stringify(muted),
+  );
+  check(said.length === 1 && /不说话/.test(said[0]), '★ 回执发了（否则分不清"生效了"还是"没认出来"）', JSON.stringify(said));
+
+  // ⚠️ 权限：普通群友不许用（这是"强制全体闭嘴"级别的操作）
+  b.speakerRole = () => 'member';
+  aborted.length = 0;
+  said = [];
+  b.running = new Map([[key17, { abort: () => aborted.push('不该发生') }]]);
+  check(
+    b.tryPauseCommand(ev17('30003'), seg('/暂停')) === true,
+    '★ 普通群友发 → 仍然被"认出来"（不再当聊天内容）',
+  );
+  check(aborted.length === 0, '★★ 但**一点都没打断**（权限挡住了）');
+  check(said.some((t) => /服主和管理员/.test(t)), '★ 回了权限提示');
+
+  // ⚠️ 不误伤：只有**整条就是** `/暂停` 才算
+  b.speakerRole = () => 'owner';
+  for (const t of ['/暂停一下', '暂停', '/暂停 2 分钟', '/清除剧情', '/停止', '/paused']) {
+    check(b.tryPauseCommand(ev17('10000001'), seg(t)) === false, `★ 不误认：「${t}」`);
+  }
+  check(
+    b.tryPauseCommand({ message_type: 'private', user_id: '10000001' }, seg('/暂停')) === false,
+    '★ 私聊里 `/暂停` 不算（它只管群）',
+  );
+
+  const bsrc17 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /this\.tryPauseCommand\(payload/.test(bsrc17),
+    '★★ 指令真的**接在 `onRaw` 里**了（不然群里发了没反应）',
+  );
+  check(
+    /tryPauseCommand\(event, segs\) \{[\s\S]{0,1400}?ctl\.abort\(/.test(bsrc17),
+    '★★ 它走的是**已有的**中止机制（`this.running` 里的 AbortController），不是新造一个',
+  );
+}
+
+console.log('\n【18】★★ 剧情的「用词红线」——人设里那条硬线在剧情里被收窄（2026-10-07 用户拍板）');
+{
+  // ## 用户原话
+  //   「**不是不写细节，是不写违禁词就行了，没细节剧情会很苍白**」
+  // ## 为什么这条重要
+  //   人设里写着「唯一的硬线：不写性内容（性行为描写 / 性器官 / 露骨的身体描写 / 违禁词）…
+  //   这个 QQ 号的账号安全」，而它**整份都拼进了剧情的 system**（`buildSystem()`）⇒
+  //   起因里写死的条件（"必须做到 X 才出得去"）和它**直接打架** ⇒
+  //   实测结果：模型**既不写那件事、也不敢写放弃，于是无限找别的出口** ✗
+  //   （用户报的原话：「她们还是不按房子的来，又在找其他路」。）
+  // ## 所以盯的是
+  //   ① 剧情这边那条硬线**被换成了"不写违禁词 + 细节照写"**；
+  //   ② 聊天那边**一个字都没动**（账号安全那条照旧守）；
+  //   ③ `buildSystem` 真的用的是剧情版人设（不是白写一个函数没人调）。
+  const knowledge = await import('../src/knowledge.js');
+  const questSide = String(quest.questPersonaText() ?? '');
+  const chatSide = String(knowledge.personaText() ?? '');
+  check(
+    questSide.length > 5000 && questSide.length !== chatSide.length,
+    '★ 剧情这边**还是完整人设**（不是换了一份精简的）',
+    `${questSide.length} 字 / 聊天那份 ${chatSide.length} 字`,
+  );
+  check(
+    !/不写性内容/.test(questSide),
+    '★★ 剧情里**不再出现**「不写性内容」那条硬线声明（它就是"绕开情节"的推手）',
+  );
+  check(!/账号安全/.test(questSide), '★ 连带那句「账号安全」也不在剧情提示词里了');
+  check(/用词红线/.test(questSide), '★★ 换成了剧情版用词红线');
+  check(/不出现违禁词/.test(questSide), '★★ 红线的内容 = 不写违禁词');
+  check(
+    /细节照写/.test(questSide),
+    '★★ 而且明确**允许写细节**（用户说"没细节剧情会很苍白" —— 这条别被谁删掉）',
+  );
+  check(/不写性内容/.test(chatSide), '★★ 聊天的**人设原文一点没动**（那条硬线只对剧情收窄）');
+  check(/账号安全/.test(chatSide), '★ 聊天那边「账号安全」那句还在');
+  const src18 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(
+    /persona = questPersonaText\(\)/.test(src18),
+    '★★ `buildSystem` 用的**真的是**剧情版人设（不是写了函数却没人调）',
+  );
+  check(
+    /6c-3\./.test(src18) && /反例清单/.test(src18),
+    '★ 提示词里有"另找出路"的**反例清单**（敲墙 / 门缝的风 / 通风口 / 手机求救）',
+  );
+  const bsrc18 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /questTurnYield\(gid, \{ since, where: '推进' \}\)/.test(bsrc18),
+    '★ 顺带钉住：情节推进那条路还在（上一轮那套序位让位）',
+  );
+}
+
+console.log(
+  '\n【19】★★★ 别人在跑剧情时，我收到的 `/剧情` 推进**不许另开一条**' +
+    '（2026-10-10 用户：「saki 开始剧情之后发了一个 /剧情 推进剧情，' +
+    '但是爱音那边读取成了开始新剧情」）',
+);
+{
+  // ⚠️ 根因：命令的"推进 or 开新"判据原来只看**本地** `quest.current()`，
+  //    而**让位的那个号从来不 begin** ⇒ 它本地永远是空的 ⇒ 把"推进"当"开新" ✗
+  //    实测（14:48:37 同一条命令）：主号 `手动推进` ✓ / 爱音 `手动开始`+`手动开了一条` ✗
+  const bsrc19 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /quest\.lineSeen\(gid\)[\s\S]{0,500}?让位/.test(bsrc19),
+    '★★★ 别人那条线**真的在演**（`lineSeen` = 我看过它的台词）⇒ **让位**、不开新线',
+  );
+  check(
+    /lineSeen\(gid\)[\s\S]{0,600}?return true/.test(bsrc19),
+    '★★ 而且返回 `true`（当"受理了"）—— 返回 false 会掉进"开新剧情"那条路（正是要修的 bug）',
+  );
+  check(
+    !/if \(this\.questLive\(gid\)\) \{[\s\S]{0,300}?让位/.test(bsrc19),
+    '★★★ 让位**不许**用 `questLive()` —— 它含"只记过命令"的 `lineAlive`，' +
+      '那会让两个号**都**让位 ⇒ **没人开场**（用户报的"哪个 bot 都没主动接上"）✗',
+  );
+  check(
+    /if \(hint && !quest\.lineSeen\(gid\)\)/.test(bsrc19),
+    '★★★ **"推进"命令不许覆盖线的身份**：已经在演时不再记新线（`!lineSeen` 守卫）—— ' +
+      '不然推进命令会算出新 id、把 `seen` 归零 ⇒ 让位闸失效 ⇒ 让位方又开一条 ✗',
+  );
+  // 行为：只有共享起因、本地 current 为空 —— 这正是让位方真实的处境
+  // ⚠️ 会写共享文件 ⇒ **必须走 `run-all` 跑**（它注入了 `QQBOT_QUEST_SHARED_FILE` 隔离路径）。
+  //    直接 `node test/quest.js` 会污染真实 `state/quest-shared.json`（项目里已有的坑）。
+  const q19 = await import('../src/quest.js');
+  const G19 = '999000903';
+  q19.noteSharedPremise(G19, { premise: '别人开的剧情（测试用）', by: '10000002' });
+  const { Bot: Bot19 } = await import('../src/bot.js');
+  const b19 = new Bot19();
+  b19.selfId = '10000002';
+  check(
+    !q19.current(G19),
+    '★ 先确认本地确实**没有**剧情（让位方的真实状态）',
+  );
+  check(
+    b19.questLive(G19) === true,
+    '★★★ 只有共享起因 ⇒ `questLive()` 仍为真（让位方**唯一**能看到"别人在演"的信号）',
+  );
+  q19.clearSharedPremise(G19);
+}
+
+console.log(
+  '\n【20】★★★ 跨机器对齐：确定性"线 id"' +
+    '（2026-10-10 用户：「跨机器不能用一个固定公式算出一个随机值、' +
+    '但是算出的值是一样的来判断吗」）',
+);
+{
+  const q20 = await import('../src/quest.js');
+  const G20 = '999000904';
+  const A = q20.lineIdOf(G20, '10000001', '门把手上有电，不能碰');
+  check(
+    !!A && A === q20.lineIdOf(G20, '10000001', '门把手上有电，不能碰'),
+    '★★★ 同样的输入 ⇒ 同样的 id（"两台机器算出来一样"的前提就在这里）',
+  );
+  check(A !== q20.lineIdOf(G20, '10000002', '门把手上有电，不能碰'), '★ 换发起人 ⇒ 不是同一条线');
+  check(A !== q20.lineIdOf('999000905', '10000001', '门把手上有电，不能碰'), '★ 换群 ⇒ 不是同一条线');
+  check(A !== q20.lineIdOf(G20, '10000001', '另一段背景'), '★ 换背景 ⇒ 不是同一条线');
+  check(q20.lineIdOf(G20, '10000001', '   ') === '', '★ 空背景 ⇒ 空 id（不记线）');
+
+  // 关键一步：**只有本地记的那条线**、没有共享文件 —— 让位方就靠这个认出"在演"
+  const { Bot: Bot20 } = await import('../src/bot.js');
+  const b20 = new Bot20();
+  b20.selfId = '10000012'; // 假装我是让位方
+  check(!b20.questLive(G20), '★ 一开始：本地没剧情、也没记线 ⇒ 不在演');
+  check(!q20.current(G20), '★ 而且 `quest.current` 确实是空的（让位方真实的处境）');
+  q20.rememberLine(G20, { id: A, by: '10000001', premise: '门把手上有电，不能碰' });
+  check(q20.__lines()[G20]?.id === A, '★★ 落盘了（重启之后还认得出这条线）');
+  check(b20.questLive(G20) === true, '★★★ 只凭"本地记的线"（**没有共享文件**）⇒ questLive 也为真 ✓');
+  q20.forgetLine(G20);
+  check(!b20.questLive(G20), '★★ `/清除剧情` 撤掉本地那条线 ⇒ questLive 立刻变假 ✓');
+}
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

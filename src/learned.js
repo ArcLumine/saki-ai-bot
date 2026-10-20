@@ -32,14 +32,20 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
-import { ROOT, KNOWLEDGE_DIR } from './config.js';
+import { ROOT, KNOWLEDGE_DIR, knowledgePrivateDir } from './config.js';
 import { log } from './log.js';
 // ⚠️ 2026-09-28：新建骨架的标题要用「主人」的真称呼（从 identity 填），不再写死旧叫法
 import { callOwner } from './persona.js';
 import { backupKnowledge } from './backup.js';
+import { phrase } from './llm.js';
+// ⚠️ 2026-10-06：教学也要能撤回（用户：「把撤回扩展到教学」）——
+//    写成功之后记一份「写之前长什么样」，`/撤回` 或「@她 忘记刚才那个」就能退回来。
+//    ⚠️ 是**单向**依赖（observe 不 import learned），不会成环。
+import { pushTeachUndo } from './observe.js';
 
 /** 全局层（owner 教的，所有群和私聊都读） */
-const GLOBAL = join(KNOWLEDGE_DIR, 'global.md');
+const KDIR = knowledgePrivateDir();
+const GLOBAL = join(KDIR, 'global.md');
 const BEGIN = '<!-- LEARNED:BEGIN -->';
 const END = '<!-- LEARNED:END -->';
 /** 单条知识最大长度，防止有人灌长文 */
@@ -53,10 +59,10 @@ export function fileForScope(scope = 'global') {
   const s = String(scope ?? 'global').trim() || 'global';
   if (s.startsWith('group:')) {
     const gid = s.slice(6).trim();
-    if (gid) return join(KNOWLEDGE_DIR, 'groups', `${gid}.md`);
+    if (gid) return join(KDIR, 'groups', `${gid}.md`);
   } else if (s.startsWith('dm:')) {
     const uid = s.slice(3).trim();
-    if (uid) return join(KNOWLEDGE_DIR, 'dm', `${uid}.md`);
+    if (uid) return join(KDIR, 'dm', `${uid}.md`);
   }
   return GLOBAL;
 }
@@ -264,6 +270,90 @@ export function learnedText(text = '', scope = 'global') {
 }
 
 /**
+ * 教学该进哪一份知识库 —— **让模型分**。
+ *
+ * ⚠️ 2026-09-30 用户要求：「**以后学习到的知识也直接通过模型自动分到不同资料库**」。
+ *
+ * ⚠️ 为什么用模型而不是关键词表：教学进来的是**自然语言**
+ *    （「东心乡盖楼要谁批」「开了 voxy 会怎么样」），关键词分不准；
+ *    而且每加一条新教学就要维护一次规则表，久了没人维护。
+ *
+ * ⚠️⚠️ **失败一律回落 `other`**（= 写进 `learned.md`）——
+ *    宁可位置不理想，也**绝不能因为分类失败把这条知识丢掉**。
+ */
+const TARGETS = {
+  'server-basic': 'server-basic.md',
+  'server-rules': 'server-rules.md',
+  'server-world': 'server-world.md',
+  'server-people': 'server-people.md',
+  other: 'learned.md',
+};
+const CLASSIFY_SYS = `你在给一个 Minecraft 服务器 QQ 机器人的知识库分类。
+把这条知识分到唯一一类，只输出 JSON：{"cat":"..."}
+
+- "server-basic"：服务器本身的事（怎么进服、整合包、启动器、模组、版本、配置要求、报错与排障、群内指令、链接、机器人自己能做什么）
+- "server-rules"：规则与权限（玩法规则、建设申请与审批、OP、白名单、存档、踢人封禁）
+- "server-world"：世界设定（铁路/地铁/高铁线路、车站、行政区划、地名与别名、集团与公司、建设归属、工程改造）
+- "server-people"：人的信息（谁是管理员、谁是谁、身份、别名、QQ 名与游戏 ID 的对应）
+- "other"：不属于上面任何一类（机器人自己的行为规则、功能设计、临时通知、说不清的）`;
+
+async function classify(topic, fact) {
+  try {
+    const raw = await phrase({
+      system: CLASSIFY_SYS,
+      user: `主题：${topic}\n内容：${fact}`,
+      maxTokens: 80,
+    });
+    const m = /server-basic|server-rules|server-world|server-people|other/.exec(String(raw));
+    return m ? m[0] : 'other';
+  } catch (e) {
+    log.warn(`教学分类失败（回落 learned.md）：${e.message}`);
+    return 'other';
+  }
+}
+
+/**
+ * 往**任意一份知识库**里写一条（文件里已有同名 `## 主题` 就覆盖它）。
+ *
+ * ⚠️ 那几份是**散文式知识库**（不像 `learned.md` 有 BEGIN/END 条目结构），
+ *    所以这里按 `## ` 切条、按标题替换；找不到同名标题就追加到文件末尾。
+ * ⚠️ 覆盖时只替换"这一条到下一个 `## ` 之前"，其余内容一个字不动。
+ */
+function upsertIntoFile(fileName, title, body) {
+  // ⚠️ 2026-10-07：`server-*.md` 是**共用**的（同一台服务器），
+  //    只有 `learned.md` 落到"这个号私有"的目录里。别把两者搅在一起。
+  const file = join(fileName === 'learned.md' ? KDIR : KNOWLEDGE_DIR, fileName);
+  // ⚠️ 2026-10-06：`existed` 要记 —— 撤回时"还原成一份本来不存在的文件"
+  //    和"删除这个文件"是两件事（见 `observe.pushTeachUndo` 的 `before: null`）。
+  const existed = existsSync(file);
+  let text = '';
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    text = `# ${fileName}\n`;
+  }
+  const block = `## ${title}\n\n${body}`;
+  const esc = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^##\\s*${esc}\\s*$`, 'm');
+  const m = re.exec(text);
+  if (!m) {
+    backupKnowledge(file);
+    const next = text.replace(/\s*$/, '') + '\n\n' + block + '\n';
+    writeFileSync(file, next, 'utf8');
+    // ⚠️ 返回值里带上 before/after 全文 —— 调用方 `learn()` 靠它记撤回快照。
+    return { replaced: false, before: existed ? text : null, after: next };
+  }
+  const start = m.index;
+  const rest = text.slice(start + m[0].length);
+  const nextRel = rest.search(/^##\s/m);
+  const end = nextRel === -1 ? text.length : start + m[0].length + nextRel;
+  backupKnowledge(file);
+  const next = text.slice(0, start) + block + '\n\n' + text.slice(end).replace(/^\s+/, '');
+  writeFileSync(file, next, 'utf8');
+  return { replaced: true, before: existed ? text : null, after: next };
+}
+
+/**
  * 新增或覆盖一个主题。
  * @param {string} topic 主题名（同名的会被覆盖）
  * @param {string} fact 内容
@@ -273,7 +363,7 @@ export function learnedText(text = '', scope = 'global') {
  *   群聊→group:<群号>、私聊→dm:<QQ号>。
  * @returns {{ok:boolean, replaced:boolean, error?:string, topic:string}}
  */
-export function learn(topic, fact, meta = {}) {
+export async function learn(topic, fact, meta = {}) {
   const t = String(topic ?? '').trim();
   const f = String(fact ?? '').trim();
   const scope = String(meta.scope ?? 'global').trim() || 'global';
@@ -295,15 +385,53 @@ export function learn(topic, fact, meta = {}) {
 
   // 同名主题覆盖；否则追加
   const idx = entries.findIndex((e) => e.title === t);
-  const replaced = idx !== -1;
-  const oldBody = replaced ? entries[idx].body : '';
+  const replacedOld = idx !== -1;
+  const oldBody = replacedOld ? entries[idx].body : '';
 
   const stamped = `${f}\n\n> 由 ${meta.byName ?? meta.by ?? '未知'} 于 ${now()} 通过 ${
     meta.where ?? '群聊'
   } 教学录入。`;
-  const entry = { title: t, body: stamped };
 
-  if (replaced) entries[idx] = entry;
+  // ⚠️⚠️ 2026-09-30：**先让模型判断这条该进哪一份**（用户要求
+  //    「以后学习到的知识也直接通过模型自动分到不同资料库」）。
+  //    分到专题库就直接写那边；说不清 / 分类失败 → 走老路径写进 learned.md。
+  const cat = await classify(t, f);
+  const target = TARGETS[cat] ?? TARGETS.other;
+  const logLine = `- ${now()} **${replacedOld ? '覆盖' : '新增'}**「${t}」 by ${
+    meta.byName ?? meta.by ?? '?'
+  } → ${target}${oldBody ? `\n  - 被覆盖的旧内容：${oldBody.split('\n')[0].slice(0, 120)}` : ''}`;
+
+  if (target !== 'learned.md') {
+    try {
+      const r = upsertIntoFile(target, t, stamped);
+      insertChangeLog(logLine);
+      log.info(
+        `教学「${t}」→ ${target}（${r.replaced ? '覆盖' : '新增'}，${f.length} 字，分类 ${cat}）`,
+      );
+      // ⚠️ 2026-10-06：**写成功之后**才记撤回快照（写失败就不该能撤）。
+      //    ⚠️ `gid` 传教学发生的那次会话 —— 撤回是按群聊算的，
+      //      不然 A 群一句"撤回"会把 B 群刚教的东西抹掉。
+      try {
+        pushTeachUndo({
+          file: join(KNOWLEDGE_DIR, target),
+          gid: String(meta.groupId ?? meta.gid ?? ''),
+          before: r.before,
+          after: r.after,
+          title: t,
+          added: !r.replaced,
+        });
+      } catch (e) {
+        log.warn(`教学撤回快照没记上（不影响教学本身）：${e.message}`);
+      }
+      return { ok: true, replaced: r.replaced, topic: t, file: target, cat };
+    } catch (e) {
+      // ⚠️ 写专题库失败**不能把知识丢了** —— 往下走老路径，写进 learned.md
+      log.error(`写入 ${target} 失败: ${e.message}（回落 learned.md）`);
+    }
+  }
+
+  const entry = { title: t, body: stamped };
+  if (replacedOld) entries[idx] = entry;
   else entries.push(entry);
 
   // 重建文件
@@ -311,28 +439,66 @@ export function learn(topic, fact, meta = {}) {
   out += renderEntries(entries);
   out += text.slice(text.indexOf(END));
 
-  // 记一笔修改记录（插在「修改记录」标题后面，最新的在最上面）
-  const logLine = `- ${now()} **${replaced ? '覆盖' : '新增'}**「${t}」 by ${
-    meta.byName ?? meta.by ?? '?'
-  }${oldBody ? `\n  - 被覆盖的旧内容：${oldBody.split('\n')[0].slice(0, 120)}` : ''}`;
-  out = insertChangeLog(out, logLine);
+  insertChangeLog(logLine);
 
   try {
+// ⚠️ 2026-10-04：本地写 `scope` 那一份（分层：global / groups/<群号> / dm/<QQ号>），
+    //    **加上**上游 2026-10-06 的撤回快照（分类失败 / 归到 other 的这条走的正是这里）。
+    //    ⚠️ 上游那边写的是 `file: FILE` —— 它还是**单文件** `learned.md` 时代；
+    //      现在按 scope 分层了 ⇒ 快照必须记**这一份真实路径**（`fileForScope(scope)`），
+    //      否则撤回会去还原错的文件。
     write(out, scope);
-    log.info(`${scopeLabel(scope)} ${replaced ? '覆盖' : '新增'}主题「${t}」（${f.length} 字）`);
-    return { ok: true, replaced, topic: t };
+    log.info(`${scopeLabel(scope)} ${replacedOld ? '覆盖' : '新增'}主题「${t}」（${f.length} 字，分类 ${cat}）`);
+    // ⚠️ `before` 是**这次写之前的那一份正文**（`text` 就是函数开头 `read(scope)` 读来的）。
+    try {
+      pushTeachUndo({
+        file: fileForScope(scope),
+        gid: String(meta.groupId ?? meta.gid ?? ''),
+        before: text,
+        after: out,
+        title: t,
+        added: !replacedOld,
+      });
+    } catch (e) {
+      log.warn(`教学撤回快照没记上（不影响教学本身）：${e.message}`);
+    }
+    return { ok: true, replaced: replacedOld, topic: t, file: scopeLabel(scope), cat };
   } catch (e) {
     log.error(`写入 ${scopeLabel(scope)} 失败: ${e.message}`);
     return { ok: false, error: e.message, topic: t };
   }
 }
 
-function insertChangeLog(text, line) {
-  const marker = '## 修改记录';
-  const i = text.indexOf(marker);
-  if (i === -1) return text + '\n' + line + '\n';
-  const after = i + marker.length;
-  return text.slice(0, after) + '\n\n' + line + text.slice(after);
+/**
+ * 记一笔变更日志。
+ *
+ * ⚠️⚠️ 2026-09-30 改（用户说「学到的资料库太混乱，而且占字数也多」）：
+ *    这段日志原来**写在 `learned.md` 里**（一个 `## 修改记录` 条目，最新在最上面）——
+ *    而 `learned.md` 是**要进聊天提示词**的 ⇒ 一条流水账天天涨
+ *    （实测已经 **6310 字，占整份的一半**），可它对回答**一点用都没有**
+ *    （里面只有"谁在什么时候教了哪条"）。
+ *    ⇒ 改成写 `logs/learned-changelog.md`（logs 不进知识库、也不进版本库）。
+ *    ⚠️ 回滚能力不受影响：被覆盖的旧内容仍然存在 `knowledge/_backup/`。
+ */
+const LOG_FILE = 'logs/learned-changelog.md';
+function insertChangeLog(line) {
+  try {
+    const f = join(ROOT, LOG_FILE);
+    const old = existsSync(f)
+      ? readFileSync(f, 'utf8')
+      : '# learned.md 变更日志\n\n> 机器自动维护，**不进聊天提示词**。最新的在最上面。\n';
+    const marker = '> 机器自动维护，**不进聊天提示词**。最新的在最上面。';
+    const i = old.indexOf(marker);
+    const out =
+      i === -1
+        ? old + '\n' + line + '\n'
+        : old.slice(0, i + marker.length) + '\n\n' + line + old.slice(i + marker.length);
+    mkdirSync(join(ROOT, 'logs'), { recursive: true });
+    writeFileSync(f, out, 'utf8');
+  } catch (e) {
+    // ⚠️ 日志写失败**绝不能影响教学本身**
+    log.warn(`写变更日志失败（不影响这次教学）：${e.message}`);
+  }
 }
 
 function now() {
@@ -392,10 +558,19 @@ export function validateFile(text) {
 
 /**
  * 删掉某个主题（群主可以用「忘记：xxx」）。
+ *
+ * ⚠️ 2026-10-04 签名改动：第二参从 `scope`(string) 变成 `meta`(object) ——
+ *    现在**同时**需要两样东西，缺一个就出错：
+ *      · `scope`    = 从**哪一份**删（`global` / `group:<群号>` / `dm:<QQ号>`）
+ *      · `groupId`  = 撤回快照按**哪个会话**归档（少了它，A 群的"撤回"
+ *                     会把 B 群刚删的东西还原掉）
+ *    调用方（`bot.js` 的 `forgetKnowledge`）已同步改成传 `{ scope, groupId }`。
+ *
  * @param {string} topic 主题名
- * @param {string} [scope] 从哪一份里删（默认 `global`）
+ * @param {{scope?:string, groupId?:string, gid?:string}} [meta]
  */
-export function forget(topic, scope = 'global') {
+export function forget(topic, meta = {}) {
+  const scope = String(meta.scope ?? 'global').trim() || 'global';
   const t = String(topic ?? '').trim();
   const text = ensureBlock(read(scope), scope);
   const entries = parseEntries(extractBlock(text));
@@ -406,9 +581,30 @@ export function forget(topic, scope = 'global') {
   let out = text.slice(0, text.indexOf(BEGIN) + BEGIN.length);
   out += renderEntries(entries);
   out += text.slice(text.indexOf(END));
-  out = insertChangeLog(out, `- ${now()} **删除**「${t}」`);
+// ⚠️⚠️ 2026-10-04 修：本地原来写的是 `insertChangeLog(out, …)`（**两层参数**）——
+  //    那是分层改造**之前**的签名（把日志塞进学习档案正文里）。现在 `insertChangeLog(line)`
+  //    只收一行、写**独立的日志文件**、原地改、**不返回任何东西** ⇒
+  //    继续按老写法传两个参数的话，`out` 会被赋成 `undefined`，
+  //    后面 `write(out, scope)` 就把文件写成了空 ✗（这个 bug 一直接在，只是没人跑「忘记」）。
+  insertChangeLog(`- ${now()} **删除**「${t}」（${scopeLabel(scope)}）`);
   write(out, scope);
   log.info(`${scopeLabel(scope)} 删除主题「${t}」`);
+  // ⚠️ 2026-10-06（用户：「把撤回扩展到教学」）：**删除也算教学写入** ——
+  //    删错了（同名主题挑错、或者只是想改一下）能原样退回来。
+  //    ⚠️ 快照记的是 `fileForScope(scope)`，不是上游那个单文件 `FILE` ——
+  //      分层之后必须记**这一份**的真实路径，否则撤回会去还原错的文件。
+  try {
+    pushTeachUndo({
+      file: fileForScope(scope),
+      gid: String(meta.groupId ?? meta.gid ?? ''),
+      before: text,
+      after: out,
+      title: t,
+      added: false,
+    });
+  } catch (e) {
+    log.warn(`删除撤回快照没记上（不影响删除本身）：${e.message}`);
+  }
   return { ok: true, topic: t, removed: removed.body };
 }
 

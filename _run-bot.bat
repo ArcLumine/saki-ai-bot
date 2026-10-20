@@ -1,7 +1,25 @@
 @echo off
-rem 启动机器人并把日志写进 logs\bot.log。
+rem ⚠️ 2026-10-04：**必须放在第 2 行、所有中文注释之前**。
+rem    这个文件是 UTF-8 无 BOM，而 cmd.exe 默认按系统代码页（中文区 = GBK/936）读 .bat
+rem    ⇒ 下面满屏的 `⚠️`（E2 9A A0 EF B8 8F，带变体选择符 U+FE0F）被按字节切开后，
+rem    某个多字节序列正好落在新行处，cmd 把那一行**当成命令执行** ⇒
+rem    报「'次' 不是内部或外部命令」「'?' 不是内部或外部命令」（实际会打乱码）。
+rem    `chcp 65001` 把代码页切到 UTF-8，注释才只被当注释。
+rem    ⚠️ 仓库里另外 8 个 .bat 都有这一行，**只有这个漏了**（本地版注释才大量用 ⚠️）。
+chcp 65001 >nul
+rem 启动机器人。⚠️ 2026-10-04：日志**不再**写进 logs\bot.log ——
+rem   · 按天日志由 src/log.js 自己写（logs\bot-YYYY-MM-DD.log）；
+rem   · 这里的重定向是"起不来时的原始输出"，写在 %TEMP%\saki-bot-console.log
+rem     （不能放 OneDrive —— 同步写会拖慢回复，见下面那段）。
 rem 单独做成一个文件是为了避开 cmd /c start 的多层引号转义问题。
+rem
+rem ⚠️ 2026-10-07 多 QQ 号：**带一个参数 = 跑那一个号**（`_run-bot.bat 10000002`）。
+rem    不带参数 = 老行为（那个号由 config.yml 的 mainAccount 决定）。
+rem    ⚠️ 不带参数这条路**必须一直留着**：老用户升级上来时账号目录还是空的，
+rem      启动脚本也还是老的，行为不能变。
 cd /d "%~dp0"
+set "SAKI_ACCT=%~1"
+if not "%SAKI_ACCT%"=="" set "QQBOT_ACCOUNT=%SAKI_ACCT%"
 if not exist "logs" mkdir "logs"
 set "NODE_EXE=%~dp0node\node.exe"
 if not exist "%NODE_EXE%" set "NODE_EXE=node"
@@ -39,6 +57,10 @@ rem       照 AGENTS 里的老办法：**写临时文件再读**。
 set "PCHK=%TEMP%\_qqbot_proxy_check.txt"
 rem ⚠️ 用 **node** 探（它一定在，而且没有 cmd→powershell 的嵌套引号问题；
 rem    第一版用 powershell -Command "…TcpClient…" 实测写出来是空的）。
+rem ⚠️ 2026-10-04：两边合并 —— 用本地的 `%NODE_EXE%`（第 6~7 行优先用自带的
+rem    `node\node.exe`，找不到才回落 PATH 里的 `node`；上游写的是裸 `node`，
+rem    万一 PATH 里没有就"不是内部或外部命令"，而这脚本正是要保证"能起来"的），
+rem    后面的重定向取上游的 `%TEMP%\saki-bot-console.log`（配套那段性能修复，见上面注释）。
 "%NODE_EXE%" -e "const n=require('net');const s=n.connect(7890,'127.0.0.1');s.setTimeout(400);s.on('connect',()=>{console.log(1);s.destroy()});s.on('timeout',()=>{console.log(0);s.destroy()});s.on('error',()=>{console.log(0)})" > "%PCHK%" 2>nul
 set "PROXYUP=0"
 if exist "%PCHK%" set /p PROXYUP=<"%PCHK%"
@@ -60,29 +82,34 @@ rem ⚠️ 这两行**留着**：走代理时必须用它排除本机（不然�
 set "NO_PROXY=127.0.0.1,localhost,::1"
 set "no_proxy=127.0.0.1,localhost,::1"
 
-rem ── ⚠️⚠️ 2026-09-20 加：**保留历史日志** ──────────────────────────
-rem    为什么：用户报「这句 @ 没回复」时，那段对话发生在**上一次重启之前**，
-rem    而原来第 61 行是 `> logs\bot.log` = **直接覆盖** → 证据被清掉，只能靠猜 ✗
-rem    （真实踩到，所以这条必须补上。）
-rem    做法：启动前把旧的 bot.log 改名成 `bot-<时分秒>.log`，**只留最近 10 份**。
-rem    ⚠️ 时间戳只取 %TIME% 并去掉冒号和点（纯数字，免得不合法的文件名/编码问题）；
-rem       `%DATE%` 带中文（"周日"），在 bat 里容易踩编码坑，所以不用它。
-rem    ⚠️ 同一秒内重启才会撞名，而重启间隔至少几分钟 → 实际不会撞。
-set "STAMP=%TIME::=%"
-set "STAMP=%STAMP:.=%"
-if exist "logs\bot.log" move /y "logs\bot.log" "logs\bot-%STAMP%.log" >nul 2>&1
-rem 只留最近 10 份：`dir /o-d` 按修改时间倒序，skip=10 跳过最新的十个，剩下的删掉
-rem ⚠️⚠️ 2026-09-20 修：原来这里写的是
-rem      `for /f "skip=10 delims=" %%f in ('dir /b /o-d "logs\bot-*.log" 2^>nul') do …`
-rem    实测**每次启动都在窗口里报错**（用户截图）：
-rem      `'dir /b /o-d "logs\bot-*.log" 2>nul' is not recognized as an internal or external command`
-rem    —— `for /f` 的单引号子命令里 `2^>nul` 的脱字符会被吃掉一层，
-rem       cmd 于是把整串当成了「一条命令的名字」。
-rem    改成 AGENTS 里那个老办法：**先写临时文件再读**
-rem    （⚠️ 不准再改回 `for /f` 包重定向 —— 这个坑在 .bat 里踩过不止一次）。
-set "OLDLOG=%TEMP%\_qqbot_oldlogs.txt"
-dir /b /o-d "logs\bot-*.log" > "%OLDLOG%" 2>nul
-for /f "skip=10 delims=" %%f in (%OLDLOG%) do del "logs\%%f" >nul 2>&1
-del "%OLDLOG%" >nul 2>&1
+rem ── ⚠️⚠️ 2026-10-03 定稿：**按天日志由 Node 自己写**（`src/log.js`）──────────
+rem    这一处前后试过两版，都失败，别再走回头路：
+rem    ① 2026-09-20：启动前把 bot.log 改名成 bot-<时分秒>.log、留 10 份 ——
+rem       但**看门狗启动时会先 `Remove-Item logs\bot.log`**（见 watchdog.ps1）⇒
+rem       等这里想改名，文件早没了 ⇒ 看门狗拉起来的重启**日志全丢** ✗
+rem    ② 2026-10-02：bat 里用 PowerShell 取日期 + `>> logs\bot-<日期>.log` ——
+rem       实测**在隐藏窗口/非交互启动下取不到日期**（写进了 `bot-unknown.log`）✗
+rem       而机器人平时几乎都是看门狗这样拉起来的 ⇒ 等于没改。
+rem    ⇒ 结论：**日期交给 Node**（`new Date()` 永远可靠），日志由 `src/log.js`
+rem      按天追加写 `logs\bot-YYYY-MM-DD.log`。
+rem    ⚠️ 那这里为什么还要重定向？—— 保留一条**最原始的通道**：
+rem      Node 还没跑起来就失败（语法错、缺依赖、端口占用…）时，只有这条能留下证据。
+rem    ⚠️⚠️ 2026-10-03：**这条通道要写到 OneDrive 外面**（`%TEMP%`）。
+rem      原来写 `logs\bot-console.log`（在 OneDrive 里）⇒ 每次 console.log 都是一次
+rem      **同步写 + 云同步**，而 `buildSystemPrompt` 里有 14 处日志
+rem      ⇒ 实测「拼提示词 5565 ms」（纯字符串拼接不该几秒）。
+rem      排障时想看它：`%TEMP%\saki-bot-console.log`（本地盘，快）。
+rem    ⚠️ 2026-10-07：多个号时**每个号一份**（不加后缀的话几个进程会抢同一个文件）。
+if not exist "logs" mkdir "logs"
+forfiles /p "logs" /m "bot-????-??-??.log" /d -7 /c "cmd /c del @path" >nul 2>&1
 
-"%NODE_EXE%" src\index.js > "logs\bot.log" 2>&1
+rem ⚠️ 2026-10-04：重定向取上游的 `%TEMP%\saki-bot-console.log` ——
+rem    本地原来写 `logs\bot.log`，那在 OneDrive 里 ⇒ 每条 console.log 一次同步写+云同步，
+rem    而 `buildSystemPrompt` 里有 14 处日志 ⇒ 实测「拼提示词 5565 ms」（纯字符串拼接）。
+rem    按天日志已经由 `src/log.js` 自己写了（见上面那段），这里只留"起不来时的原始输出"。
+rem    ⚠️ 这条通道**必须留着**：Node 还没跑起来就失败时（语法错/缺依赖/端口占用），
+rem    按天日志压根没有，只有它能留下证据。
+set "SAKI_LOG=%TEMP%\saki-bot-console.log"
+if not "%SAKI_ACCT%"=="" set "SAKI_LOG=%TEMP%\saki-bot-console-%SAKI_ACCT%.log"
+
+"%NODE_EXE%" src\index.js > "%SAKI_LOG%" 2>&1

@@ -9,17 +9,24 @@
  */
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { rmSync, writeFileSync } from 'node:fs';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import yaml from 'js-yaml';
+import { configWithOnebot } from './_config-base.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const CFG_REL = 'logs/__test-behavior.yml';
+const RECENT_REL = `logs/__test-behavior-${process.pid}-recent.json`;
+const LOCK_REL = `logs/__test-behavior-${process.pid}-lock.json`;
 const LLM_PORT = 40002;
 const WS_PORT = 40001;
 const TOKEN = 'bhv-token';
 const BOT_QQ = '10000002';
 const GROUP = '200000001';
 const MEMBER = '30003';
+let FACE_TAG = '';
 
 let failures = 0;
 const check = (ok, label) => {
@@ -30,9 +37,46 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── A. 纯逻辑部分 ─────────────────────────────────
 async function logicTests() {
-  process.env.QQBOT_CONFIG = 'config.behavior-test.yml';
+  const cfg = yaml.load(configWithOnebot()) ?? {};
+  cfg.mainAccount = '10000000';
+  cfg.onebot = { ...(cfg.onebot ?? {}), mode: 'forward', url: `ws://127.0.0.1:${WS_PORT}`, accessToken: TOKEN };
+  cfg.llm = { ...(cfg.llm ?? {}), baseURL: `http://127.0.0.1:${LLM_PORT}/v1`, apiKey: 'behavior-test-key' };
+  cfg.botQQ = BOT_QQ;
+  cfg.trigger = {
+    ...(cfg.trigger ?? {}),
+    groupChat: true,
+    allowGroups: [GROUP],
+    respondTo: 2,
+    groupRespondTo: {},
+    requireAtInGroup: false,
+    cooldownMs: 0,
+  };
+  cfg.chat = {
+    ...(cfg.chat ?? {}),
+    enable: true,
+    question: { ...(cfg.chat?.question ?? {}), enable: true, probability: 1, cooldownMs: 0 },
+    mention: { ...(cfg.chat?.mention ?? {}), enable: true, names: ['小祥'], probability: 1, cooldownMs: 0 },
+    followUp: { ...(cfg.chat?.followUp ?? {}), enable: true, idleMs: 180000, sameUserMs: 240000 },
+    sticker: { ...(cfg.chat?.sticker ?? {}), enable: true, probability: 1, cooldownMs: 0 },
+  };
+  const testGroup = cfg.groupParams?.[GROUP] ?? {};
+  cfg.groupParams = {
+    ...(cfg.groupParams ?? {}),
+    [GROUP]: {
+      ...testGroup,
+      chat: { ...(testGroup.chat ?? {}), answerServer: true },
+    },
+  };
+  cfg.webui = { ...(cfg.webui ?? {}), enable: false };
+  writeFileSync(join(ROOT, CFG_REL), yaml.dump(cfg, { lineWidth: 120, noRefs: true }), 'utf8');
+  process.env.QQBOT_CONFIG = CFG_REL;
+  process.env.QQBOT_RECENT_FILE = RECENT_REL;
+  process.env.QQBOT_LOCK_FILE = LOCK_REL;
   const { config } = await import('../src/config.js');
   const { Bot } = await import('../src/bot.js');
+  const { facePath, faceTags } = await import('../src/faces.js');
+  FACE_TAG = faceTags().find((tag) => facePath(tag)) ?? '';
+  if (!FACE_TAG) throw new Error('行为回归需要一个存在的表情素材');
   const bot = new Bot();
   bot.selfId = BOT_QQ;
 
@@ -101,10 +145,13 @@ async function logicTests() {
     const r = bot.shouldJoinChat(ev('小祥今天在吗'));
     if (r) { mentioned++; if (r.mode !== 'mention') check(false, `模式应为 mention，实际 ${r.mode}`); }
   }
-  // 概率 0.4，40 次期望 16 次，标准差 ≈ 3.1。
-  // ⚠️ 原来写 `> 10` —— 而「正好 10 次」的概率约 9%，会随机挂（实测 1/4 次失败）。
-  //    放宽到 ±2σ（约 10~22 之外才算异常），别让概率测试变成随机器。
-  check(mentioned > 6 && mentioned < 28, `提到小祥大概四成会接（实测 ${mentioned}/40，期望约 16）`);
+  // ⚠️⚠️ 2026-10-03 改（用户要求：「**尽量减少抽签式的回消息**，
+  //    **所有接与不接都应该有理由**」）：
+  //    掷骰子已经**全部去掉** —— 「提到小祥」不再按 40% 概率决定，
+  //    而是**一律放行、交给说话判断**（`shouldJoinChatAsync()` 的 judge）决定接不接。
+  //    ⇒ 这里要断言的是"每次都放行到判断那一步"，不再是"四成会接"。
+  //    （旧断言是 10~22 的 ±2σ 区间，那是给概率留的余量。）
+  check(mentioned === 40, `★★ 提到小祥一律放行给判断（实测 ${mentioned}/40，不掷骰）`);
 
   console.log('\n[A3] 冷却生效');
   // ⚠️⚠️ 2026-09-16 修正（这条以前是**靠碰运气过的**）：
@@ -141,7 +188,7 @@ async function logicTests() {
   console.log('\n[A4.5] @ 的是别人 → 不接（shouldJoinChat 和 decide 都要守住）');
   const atOther = (extra = []) => ({
     ...ev(' 现在怎么样'),
-    message: [{ type: 'at', data: { qq: '3878812039' } }, ...extra],
+    message: [{ type: 'at', data: { qq: '10000013' } }, ...extra],
   });
   const T = (t) => ({ type: 'text', data: { text: t } });
 
@@ -154,7 +201,7 @@ async function logicTests() {
   );
   check(
     bot.decide({ ...ev(' 你俩看'), message: [
-      { type: 'at', data: { qq: '3878812039' } },
+      { type: 'at', data: { qq: '10000013' } },
       { type: 'at', data: { qq: '123456' } },
       T(' 你俩看'),
     ] }, null) === null,
@@ -165,7 +212,7 @@ async function logicTests() {
   check(
     !!bot.decide({ ...ev(' 大家看下'), message: [
       { type: 'at', data: { qq: BOT_QQ } },
-      { type: 'at', data: { qq: '3878812039' } },
+      { type: 'at', data: { qq: '10000013' } },
       T(' 大家看下'),
     ] }, null),
     'decide：@我 + @别人（群发）仍然要接',
@@ -199,8 +246,14 @@ async function logicTests() {
 
   console.log('\n[A7] 禁止照抄原文的规则在人设里');
   const persona = bot.buildSystemPrompt('', ev('test'), null);
-  check(persona.includes('绝对不要照抄资料原文'), '人设里有禁止照抄的章节');
-  check(persona.includes('判断标准'), '给了「像说明书就是抄的」的判断标准');
+  // ⚠️ 2026-10-09：原来查的是**节标题**「绝对不要照抄资料原文」——
+  //    而人设合并时那一节被并进「不许编」了（内容还在，标题没了）✗
+  //    ⇒ 改成查**内容特征**，不再绑标题 ✓
+  check(
+    persona.includes('照抄资料原文') || persona.includes('照抄原文'),
+    '人设里有禁止照抄原文的规则',
+  );
+  check(persona.includes('判断标准') || persona.includes('就是抄的'), '给了「像说明书就是抄的」的判断标准');
   check(persona.includes('你是真的小祥') || persona.includes('你就是小祥'), '人设强调身份');
 
   console.log('\n[A11] 情绪识别：该切温柔小祥的时候要切');
@@ -341,7 +394,9 @@ async function logicTests() {
     const r = bot.shouldJoinChat(evSegs(STICKER), { stickerIsNew: true });
     if (r) stickerHits++;
   }
-  check(stickerHits >= 10 && stickerHits <= 30, `新表情会接梗（实测 ${stickerHits}/40，概率 0.5）`);
+  // ⚠️⚠️ 2026-10-03 改（同上：掷骰全部去掉）——「没见过的新表情」也是一律放行给判断，
+  //    不再按 50% 概率决定。（"见过的表情不单独回"那条**照旧**，见下一段。）
+  check(stickerHits === 40, `★★ 新表情一律放行给判断（实测 ${stickerHits}/40，不掷骰）`);
 
   // 见过的表情（stickerIsNew=false）→ 一条都不该回
   let seenHits = 0;
@@ -388,6 +443,14 @@ async function logicTests() {
   check(bot.shouldJoinChat(ev('嗯嗯是这样的')) === null, '没聊过时，普通闲聊不接');
 
   // 模拟「它刚回过话」
+  // ⚠️⚠️ 2026-10-13 修（这条在**并行跑回归**时偶发红：实测 0/20，单跑全过）：
+  //   `shouldJoinChat` 里有一道闸 —— 她上次说话之后中间夹着**别人的 > 1 条**就不算延续
+  //   （用户原话：「这哪是对话延续，就是突然接的」）。而这一节之前的 A 段
+  //   （A4.5 / A9 那些假消息）往**同一个 recent 缓冲**里塞过消息，机器一忙
+  //   （并行跑、时间戳更集中）那些消息还留在窗口里 ⇒ 闸一开，下面 20 次全被拒 ✗
+  //   ⇒ 断言前把这个群的缓冲清干净，让这一节不受前一节影响（测试要可复现）✓
+  const recentMod = await import('../src/recent.js');
+  recentMod.clearAll();
   bot.touchConversation(ev('刚才那句'));
   let joined2 = 0;
   for (let i = 0; i < 20; i++) {
@@ -518,9 +581,14 @@ async function logicTests() {
 // ── B. 端到端部分 ─────────────────────────────────
 const probes = [];
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     const parsed = JSON.parse(body || '{}');
     const sys = parsed.messages?.find((m) => m.role === 'system')?.content ?? '';
     const user = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '';
@@ -559,7 +627,7 @@ const llmServer = createServer((req, res) => {
       return;
     }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    const reply = '收到。[表情:憨笑]';
+    const reply = `收到。[表情:${FACE_TAG}]`;
     for (const p of reply.match(/.{1,3}/gs) ?? [reply]) {
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: p } }] })}\n\n`);
     }
@@ -639,7 +707,7 @@ async function e2eTests() {
     cwd: ROOT,
     env: {
       ...process.env,
-      QQBOT_CONFIG: 'config.behavior-test.yml',
+      QQBOT_CONFIG: CFG_REL,
       // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
       NO_PROXY: '127.0.0.1,localhost,::1',
@@ -687,7 +755,7 @@ async function e2eTests() {
     cwd: ROOT,
     env: {
       ...process.env,
-      QQBOT_CONFIG: 'config.behavior-test.yml',
+      QQBOT_CONFIG: CFG_REL,
       // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
       NO_PROXY: '127.0.0.1,localhost,::1',
@@ -712,7 +780,7 @@ async function e2eTests() {
   probes.length = 0;
   // 先造一个它必须回答的问题，让它进入对话状态
   for (let i = 0; i < 8 && sent.length === 0; i++) {
-    say('服务器怎么进啊？', 5200 + i);
+    say('服务器怎么加入呀？', 5200 + i);
     await waitFor(() => sent.length > 0, 6000);
   }
   check(sent.length > 0, '先答了一句（进入对话状态）');
@@ -737,6 +805,11 @@ async function cleanup() {
   } catch {}
   try {
     sock?.close();
+  } catch {}
+  try {
+    rmSync(join(ROOT, CFG_REL), { force: true });
+    if (process.env.QQBOT_RECENT_FILE === RECENT_REL) rmSync(join(ROOT, RECENT_REL), { force: true });
+    if (process.env.QQBOT_LOCK_FILE === LOCK_REL) rmSync(join(ROOT, LOCK_REL), { force: true });
   } catch {}
   await new Promise((r) => wss.close(r));
   await new Promise((r) => llmServer.close(r));

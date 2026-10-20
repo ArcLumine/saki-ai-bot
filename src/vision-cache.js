@@ -75,12 +75,34 @@ export async function loadImageBytes(p) {
 async function fetchImage(call, file) {
   try {
     const r = await call('get_image', { file });
-    const p = r?.data?.file ?? r?.file ?? r?.data?.url ?? r?.url;
-    if (!p) {
+    const d = r?.data ?? r ?? {};
+    // ⚠️⚠️ 2026-10-20 修（用户报「取图失败」，日志：`ENOENT ... D:\app\.config\QQ\...\nt_data\Pic\...`）——
+    //
+    //   **协议端可以挂在另一台机器上**（用户现在就是 `ws://203.0.113.5:3001`）。
+    //   这时 `get_image` 返回的 `file` 是**那台机器**的绝对路径（`D:\app\.config\QQ\…`），
+    //   本机读它当然 ENOENT——而老代码**优先取 `file`**，于是永远走不到 `url` ✗。
+    //
+    //   同一个返回里还有 `url`（QQ 图片 CDN 的 http 地址）——**只有它跨机器可用**。
+    //   ⇒ 候选按「跨机器能用」排序：`url` → `file`（同机部署时 file 是本机路径，一样能跑）。
+    //   ⚠️ 别把顺序改回去：`file` 优先只在"协议端和机器人同一台机"时成立。
+    const cands = [...new Set([d.url, r?.url, d.file, r?.file].filter(Boolean).map(String))];
+    if (!cands.length) {
       log.warn(`取图：协议端没给 file/url（${file}）`);
       return null;
     }
-    return await loadImageBytes(p);
+    let lastErr = '';
+    for (const p of cands) {
+      // 逐个试，第一个拿到非空字节的就算成功；失败把**是哪个候选、什么错**记下来，
+      // 下次再报「取图失败」时一眼能看出是 url 过期还是本地路径不存在。
+      try {
+        const buf = await loadImageBytes(p);
+        if (buf?.length) return buf;
+        lastErr = '拿到的是空内容';
+      } catch (e) {
+        lastErr = `${p.slice(0, 80)}：${e.message}`;
+      }
+    }
+    throw new Error(lastErr || '拿不到内容');
   } catch (e) {
     // ⚠️ 提到 warn：这条曾经是 debug，`logLevel: info` 下完全看不到，
     //    "她为什么看不到图"就查不出来（2026-09-23 实测）。
@@ -106,23 +128,25 @@ export async function describeImagesByFile(items, call) {
   if (!list.length) return [];
   cleanCache();
 
-  const out = [];
-  for (const it of list) {
-    const file = String(it.file);
-    const kind = it.kind === 'sticker' ? 'sticker' : 'image';
-    if (kind === 'sticker' && config.vision?.describeStickers !== true) continue;
-    if (cache.has(file)) {
-      out.push({ file, kind, desc: cache.get(file).text });
-      continue;
-    }
-    const buf = await fetchImage(call, file);
-    if (!buf) continue;
-    const desc = await describeImage(buf);
-    if (desc) {
-      cache.set(file, { text: desc, at: Date.now() });
-      out.push({ file, kind, desc });
-    }
-  }
+  // ⚠️ 2026-10-02：和 `describeImagesIn()` 一样改成**并发**（原来串行等两遍）。
+  //    这里更要紧：走这条路的往往是"当前这条没带图、在说前面那几张"，
+  //    常常一次补两张（实测日志：`补识图 2 张`，串行多等 2~5 秒）。
+  const out = (
+    await Promise.all(
+      list.map(async (it) => {
+        const file = String(it.file);
+        const kind = it.kind === 'sticker' ? 'sticker' : 'image';
+        if (kind === 'sticker' && config.vision?.describeStickers !== true) return null;
+        if (cache.has(file)) return { file, kind, desc: cache.get(file).text };
+        const buf = await fetchImage(call, file);
+        if (!buf) return null;
+        const desc = await describeImage(buf);
+        if (!desc) return null;
+        cache.set(file, { text: desc, at: Date.now() });
+        return { file, kind, desc };
+      }),
+    )
+  ).filter(Boolean);
   return out;
 }
 
@@ -141,10 +165,18 @@ export async function describeImagesIn(event, call) {
 
   cleanCache();
 
-  const out = [];
+  // ⚠️⚠️ 2026-10-02：**并发识别**（原来是 `for` + `await` 串行）。
+  //    一条消息带两张图时，串行要等两遍（每张 2~5 秒）—— 而它们之间**没有任何依赖**，
+  //    同时发出去就能省掉一整轮。实测日志：`识图完成 110KB` → 2 秒后又 `识图完成 172KB`。
+  //    ⚠️ 顺序必须保住：`Promise.all` 按**入参顺序**返回 ✓ 提示词里"第 1 张/第 2 张"
+  //      和发送者对应关系不能乱（那正是"她分不清哪张是题"的原因之一）。
+  //    ⚠️ 同一条消息里**同一张图出现两次**要先去掉，否则会重复识别两次（白烧一份钱）。
+  const jobs = [];
+  const seenFiles = new Set();
   for (const seg of imgs.slice(0, MAX_IMAGES)) {
     const file = String(seg.data?.file ?? '');
-    if (!file) continue;
+    if (!file || seenFiles.has(file)) continue;
+    seenFiles.add(file);
 
     // QQ 的图片段带 sub_type：1 = 动画表情（表情包），0 = 普通图片（截图/照片）。
     // ⚠️ 这个区别要**一路带到提示词里** —— 表情包是「在玩梗」，只要理解情绪；
@@ -153,24 +185,27 @@ export async function describeImagesIn(event, call) {
     const kind = Number(seg.data?.sub_type ?? 0) === 1 ? 'sticker' : 'image';
 
     // 表情包不识别（那是玩梗，不需要描述，而且省 token）
-    if (kind === 'sticker' && config.vision?.describeStickers !== true) {
-      continue;
-    }
+    if (kind === 'sticker' && config.vision?.describeStickers !== true) continue;
 
     if (cache.has(file)) {
-      out.push({ file, kind, desc: cache.get(file).text });
+      jobs.push({ file, kind, desc: cache.get(file).text, cached: true });
       continue;
     }
-
-    const buf = await fetchImage(call, file);
-    if (!buf) continue;
-
-    const desc = await describeImage(buf);
-    if (desc) {
-      cache.set(file, { text: desc, at: Date.now() });
-      out.push({ file, kind, desc });
-    }
+    jobs.push({ file, kind });
   }
+  const out = (
+    await Promise.all(
+      jobs.map(async (j) => {
+        if (j.cached) return { file: j.file, kind: j.kind, desc: j.desc };
+        const buf = await fetchImage(call, j.file);
+        if (!buf) return null;
+        const desc = await describeImage(buf);
+        if (!desc) return null;
+        cache.set(j.file, { text: desc, at: Date.now() });
+        return { file: j.file, kind: j.kind, desc };
+      }),
+    )
+  ).filter(Boolean);
 
   if (imgs.length > MAX_IMAGES) {
     log.debug(`一条消息里有 ${imgs.length} 张图，只识别了前 ${MAX_IMAGES} 张`);
@@ -201,6 +236,31 @@ export function cachedDescriptions(files) {
     }
   }
   return out;
+}
+
+/**
+ * **只取"图里真实识别出来的内容"**（不含下面那套"该怎么说这张图"的指导语）。
+ *
+ * ⚠️⚠️ 2026-10-02 加，修一个**一直在生效**的 bug（用户问「看看这次做题为什么没做出来」）：
+ *
+ *    解题判据 `looksLikeProblem()` 开头有一条"先排除服务器/群内事务"的正则，
+ *    而 `visionBlock()` 的**指导语**里有一句示例
+ *      「**截图中显示在线人数为 1 人**」 ← 里面就有「在线人数」。
+ *    ⇒ 判据拿到的是**带指导语的整块**，于是**凡是当前消息带真图，判据一律被这句示例毙掉**
+ *      （命中理由永远是"问的是服务器的事"）⇒ **解题模式一次都没进去过**：
+ *      现场 `logs/bot.log` 01:27:18
+ *        `[解题模式] **未命中**（问的是服务器的事）｜判据输入 "解题。[图片]…"`
+ *      紧接着 01:28:00 `LLM 输出被 max_tokens(8000) 截断了（思考链吃了 8000）`
+ *      → 正文一个字没写（因为没进解题模式，上限还是 8000）→ 群里看她"没反应"。
+ *
+ *    ⇒ 判据只该看**图的内容**，不该看我们写给模型的话。
+ *      （顺带也免掉指导语里的「理解/解释」「Java 版本」这类词把判据带偏。）
+ */
+export function visionDescriptions(list) {
+  return (list ?? [])
+    .map((x) => String(x?.desc ?? '').trim())
+    .filter(Boolean)
+    .join('\n');
 }
 
 /** 拼成给主模型看的文本 */
@@ -356,6 +416,26 @@ export function visionBlock(list) {
       '6. **不要把所有户外画面都叫「景色」**：只有自然景观才这样称呼；看到建筑、室内、道路、车辆、人物或界面时，直接说实际对象。',
       '',
       '**自检**：念一遍你的回复。**像在看图说话、像交作业 → 重写。**',
+      '',
+      // ⚠️⚠️ 2026-10-02 加（用户报「我补充了这是昨晚的照片，但机器人还是说我堵在路上」）：
+      //    她答「那你还**堵在**昭山那儿啊，免费也没用」—— 那是**昨晚**的位置，
+      //    他早就不在那儿了 ✗。
+      //    ⚠️⚠️ 真正的毛病**不是"默认时态"**（照片当然默认是刚拍的），
+      //      而是**他没管对方明确补充的时间** —— 他正文里写着「这是**昨天晚上**的照片」，
+      //      她既没用在措辞上（说成现在），也没用在推理上。
+      //      （这块开头那句"文字是主角、图是配角"就是为这类事写的，还是被图压过去了。）
+      //    ⇒ 所以这条的口径是「**听他说**」：他给了时间就按他的时间说，
+      //      没给才默认"刚拍的"。
+      '### ⚠️ 图是什么时候的：**以他说的为准**',
+      '',
+      '- 默认是**刚拍的 / 现在**（群里发图基本都是现拍现发）。',
+      '- ⚠️⚠️ **但他要是说了时间，就按他说的算** —— 这是真实踩过的那次：',
+      '  他说「这是**昨天晚上**的照片，当时高速正好免费了」，她答',
+      '  「那你还**堵在**昭山那儿啊，免费也没用」✗ —— 昨晚的位置，他早就不在那儿了。',
+      '- ✅ 他给了过去的时间（「昨晚的」「前几天的」「上次那张」）⇒ 全篇用**过去**说：',
+      '  「昨晚堵在昭山啊」「那会儿正堵着呢」。',
+      '- 🚫 别把过去说成现在（「你**还**堵在…」）—— **他明确给的时间是硬事实，',
+      '  优先级高于你评论这张图的冲动。**',
     );
   }
 

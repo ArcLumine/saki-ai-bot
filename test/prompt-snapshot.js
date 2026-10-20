@@ -38,11 +38,33 @@ const ISOLATED = {
   QQBOT_STORYLINE_FILE: 'logs/__snap-story.json',
   QQBOT_LIFE_FILE: 'logs/__snap-life.json',
   QQBOT_QUEST_FILE: 'logs/__snap-quest.json',
+  QQBOT_QUEST_SHARED_FILE: 'logs/__snap-quest-shared.json',
+  QQBOT_QUEST_LINES_FILE: 'logs/__snap-quest-lines.json',
+  QQBOT_SERVER_WATCH_FILE: 'logs/__snap-server-watch.json',
+  QQBOT_BIRTHDAY_LIFE_FILE: 'logs/__snap-birthday-life.json',
+  QQBOT_LIFE_SENT_FILE: 'logs/__snap-life-sent.json',
+  QQBOT_MEMBER_BD_FILE: 'logs/__snap-member-bd.json',
+  QQBOT_BATTERY_LIFE_FILE: 'logs/__snap-battery-life.json',
+  QQBOT_BATTERY_SHARED_FILE: 'logs/__snap-battery-shared.json',
+  QQBOT_SESSIONS_FILE: 'logs/__snapshot-sessions.json',
   QQBOT_FRIEND_FILE: 'logs/__snap-friend.json',
   QQBOT_OUTBOX_FILE: 'logs/__snap-outbox.json',
   QQBOT_TIC_FILE: 'logs/__snap-tic.json',
   QQBOT_MEAL_FILE: 'logs/__snap-meal.json',
   QQBOT_WHERE_FILE: 'logs/__snap-where.json',
+  // ⚠️⚠️ 2026-10-14 加（踩到了）：**agent 的任务台账也要隔离** ——
+  //    提示词末尾那两段（「你最近做完的活」「你以前做过的活」）是**运行态**，
+  //    直接读 `state/agent-tasks.json` ⇒ 她一做活，快照就变 ✗
+  //    （实测：刚跑完那个婚礼 PPT，复跑快照立刻 1 项失败 ✗）
+  //    ⇒ 隔离成一个不存在的文件 ⇒ 那两段为空、快照只盯"人设本身" ✓
+  //    （那两段的行为由 `test/agent-bridge.js` 的【28】管着 ✓）
+  QQBOT_AGENT_TASKS_FILE: 'logs/__snap-agent-tasks.json',
+  QQBOT_AGENT_FILE: 'logs/__snap-agent.json',
+  // ⚠️⚠️ 2026-10-14 又踩：`run-all.js` 会给**所有**套件注入 `QQBOT_AGENT=off`
+  //    （免得不小心真起 agent）⇒ 而这个套件里我手动跑时是 on、run-all 跑时是 off
+  //    ⇒ 提示词里「🖥️ 你自己有一台电脑」那一段时有时无 ⇒ **手动存完基线、进回归就红** ✗
+  //    ⇒ 这里显式钉成 on（本套件只拼提示词，不会真起 agent ✓ 和 test/agent-bridge.js 同一手法）
+  QQBOT_AGENT: 'on',
   QQBOT_REMIND_FILE: 'logs/__snap-remind.json',
   QQBOT_MAMA_FILE: 'logs/__snap-mama.json',
   QQBOT_SPEND_FILE: 'logs/__snap-spend.json',
@@ -50,6 +72,7 @@ const ISOLATED = {
   QQBOT_MONTHLY_FILE: 'logs/__snap-monthly.json',
   QQBOT_NAPCAT_REQ_FILE: 'logs/__snap-napcatreq',
   QQBOT_LOCK_FILE: 'logs/__snap.lock',
+  QQBOT_ACCOUNTS_DIR: 'logs/__snap-accounts',
 };
 for (const [k, v] of Object.entries(ISOLATED)) process.env[k] = v;
 
@@ -58,6 +81,11 @@ const { join, dirname } = await import('node:path');
 const { fileURLToPath } = await import('node:url');
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+for (const [k, v] of Object.entries(ISOLATED)) {
+  if (k === 'QQBOT_ACCOUNTS_DIR' || !v.startsWith('logs/__snap')) continue;
+  rmSync(join(ROOT, v), { force: true });
+}
+rmSync(join(ROOT, ISOLATED.QQBOT_ACCOUNTS_DIR), { recursive: true, force: true });
 // ⚠️ 放 state/（gitignore）—— 提示词里有真实号，绝不能进公开副本
 const SNAP_FILE = process.env.QQBOT_PROMPT_SNAPSHOT || join(ROOT, 'state', '__prompt-snapshot.json');
 const saveMode = process.argv.includes('--save');
@@ -76,6 +104,7 @@ function normalize(s) {
   // ⚠️ 用"按行状态机"处理**会整段变**的东西（见下面那两条注释）
   let inLive = false;
   let inTime = false;
+  let inFaces = false;
   const lines = String(s)
     // ⚠️⚠️ 按 `\r?\n` 切，**不是**按 `\n` 切：同一段提示词在 JS 源码里是 CRLF、
     //    搬到 md 之后可能是 LF（或反过来），而 `\n` 切法会把 `\r` 留在行尾 ⇒
@@ -141,6 +170,27 @@ function normalize(s) {
         //     报出来是"上百行不同、还少一行"，看着像大改，其实只是错位（2026-09-21 实测踩过）。
         return null;
       }
+
+      // ⚠️⚠️ 2026-10-06 加：**表情库整段吃掉**（她一直在自己收表情：64 → 66 → …）。
+      //    起因：我改了黑祥人设，跑这个套件却红了 8 个场景、报"两百行不同" ——
+      //    真相是**表情库涨了 2 张**（运行期数据），跟人设一个字都不沾。
+      //    只归一化「你手上有 N 张」那句**不够**：多一张表情就多一行，
+      //    行数一变后面全都错位 ⇒ 又变成"看着像大改"。
+      //    ⇒ 从「你手上有 N 张表情包」那句开始，吃到下一个标题为止，整段折成一行
+      //      （和上面 `inLive` 同一个写法、同一个理由）。
+      //    ⚠️ 表情能不能发、发哪张、标记剥没剥干净，有 `test/face.js` 专门盯 ——
+      //       人设回归本来就不该拿表情库当哨兵。
+      if (/你手上有 \d+ 张表情包/.test(line)) {
+        inFaces = true;
+        return '[表情库] <FACES>';
+      }
+      if (inFaces) {
+        if (/^#{1,3} /.test(line)) {
+          inFaces = false;
+          return line;
+        }
+        return null;
+      }
       return line;
     })
     .filter((x) => x !== null)
@@ -154,6 +204,14 @@ function normalize(s) {
       .replace(/\d{1,2}月\d{1,2}日/g, '<DATE>')
       .replace(/\b\d{1,2}:\d{2}(:\d{2})?\b/g, '<TIME>')
       .replace(/周[日一二三四五六]/g, '<WEEKDAY>')
+      // ⚠️⚠️ 2026-10-06 加：**表情库是运行期数据**（她会自己收表情、审核新表情，
+      //    64 → 66 张是常态）—— 不归一化的话，**每收一次新表情就把这个套件弄红**，
+      //    而红的样子是"提示词变了、两百行不同"，看起来像**人设被改坏了**
+      //    （今晚就是这么白查了一轮：我明明改的是黑祥人设，红的却是表情数量）。
+      //    ⇒ 数量归一成占位符 + 清单行整行归一（表情的"用途说明"不属于人设回归）。
+      //    ⚠️ 两条缺一不可：只归一数量的话，新增表情多出来的行照样让行数对不上。
+      .replace(/你手上有 \d+ 张表情包/g, '你手上有 N 张表情包')
+      .replace(/^\[[^\]\n]+\][^\n]*用于：[^\n]*$/gm, '[表情] 用于：…')
   );
 }
 
@@ -177,6 +235,11 @@ const G = '200000001';
 const { config: cfgSnap } = await import('../src/config.js');
 const OWNER = String(cfgSnap.ownerQQ || '10000001');
 const MEMBER = '30001';
+// ⚠️ 2026-10-07 加：**同类机器人**那条路要用**单独的群号** ——
+//    同类池是**按群配**的（`groupParams.<群>.peers`），借用 `G` 会把上面
+//    那些场景的提示词也一起改掉（每个都多出"同类"那一节），基线跟着乱。
+const GPA = '200000002';
+const PEER = '10000009';
 const seg = (t) => [{ type: 'text', data: { text: t } }];
 
 const SCENES = {
@@ -187,6 +250,20 @@ const SCENES = {
   'group-at-chat': {
     ev: { message_type: 'group', group_id: G, user_id: MEMBER, message: seg('今天好累啊') },
     text: '今天好累啊',
+  },
+  // ⚠️ 2026-09-26 加：**「问某个人是谁」那条路**（`whoIsBrief()` 的"就近摘要"）。
+  //
+  //    为什么：用户报「机器人不认得几个管理员了，在群里问的时候会直接说不认识」。
+  //    查下来信息**确实在提示词里**，但落在 60%~70% 的**中段**，问句在末尾 ⇒ 模型翻不到
+  //    （中段迷失）。修法是让 `whoIsBrief()` 也扫服务器库里的人员名录，
+  //    把被问到的那一行**单独拎到提示词末尾**。
+  //
+  //    ⚠️ 这条路径原来**一个场景都没覆盖** —— 我加完 `whoIsBrief` 的改动后，
+  //       那 10 个场景**全部逐字节一致**（因为它们的文本都没提到人名）。
+  //       「全绿」在这里等于"没测到"，所以必须补这一个场景当哨兵。
+  'group-at-who': {
+    ev: { message_type: 'group', group_id: G, user_id: MEMBER, message: seg('Luminiflux是谁') },
+    text: 'Luminiflux是谁',
   },
   'private-owner': {
     ev: { message_type: 'private', user_id: OWNER, message: seg('在吗') },
@@ -220,6 +297,20 @@ const SCENES = {
     voluntary: 'mention',
     text: '小祥最近怎么样',
   },
+  // ⚠️⚠️ 2026-10-07 加：**同类机器人发来的消息**（`isPeerBot()` 为真）那条路。
+  //
+  //    为什么必须补这一个：用户截图报「bot 之间的对话很容易陷进吵嘴死循环」，
+  //    我为此在那条路上加了一整节「把事往前推，别原地顶嘴」。
+  //    加完跑 `--save` —— 结果 **13 个场景逐字节一致** ⇒ 说明**那段提示词
+  //    一个场景都没覆盖** ✗（"全绿"在这里恰恰等于"没测到"，和上面
+  //    `group-at-who` 那次一模一样）。
+  //
+  //    ⚠️ 用 `GPA`（单独的群）+ 一个不在任何池里的号当发送者，
+  //      这样只影响这一个场景。
+  'group-peer-bot': {
+    ev: { message_type: 'group', group_id: GPA, user_id: PEER, message: seg('嫌我软就别站风里呗') },
+    text: '嫌我软就别站风里呗',
+  },
 };
 
 // ── 生成 ────────────────────────────────────────────────
@@ -236,8 +327,35 @@ const SCENES = {
 //
 //    ⚠️ 钉住它**不会**削弱"检测人设改动"的能力：这段是**环境数据**，
 //       本来就不该当人设的哨兵（和上面归一化 `# 【在线情况】` 整段是同一个理由）。
-const SESS_FILE = 'logs/__snapshot-sessions.json';
+const SESS_FILE = ISOLATED.QQBOT_SESSIONS_FILE;
 process.env.QQBOT_SESSIONS_FILE = SESS_FILE;
+
+// ⚠️⚠️ 2026-09-23 加、**2026-09-30 修**：把知识库也钉住。
+//
+//    为什么需要：这个套件读的是**真实的 `knowledge/`** —— `run-all.js` 的隔离只管
+//    `state/*.json`（它自己那句注释就写着「knowledge/ 一直是共用的真实目录」）。
+//    于是**群主在群里教一句、或更正一条**，提示词就变 ⇒ 快照无缘无故变红。
+//    实测（00:0x）：只有 `group-voluntary` 一个场景变了，多出一段
+//    「# 【最高优先级】群主后来补充/更正的知识」—— 它恰好选中了那段。
+//
+//    ⇒ 首次运行时把**当前的知识库复制一份固定的**（放 `logs/`，不进版本库），
+//      之后一直用它 —— 和上面【玩家在线记录】是同一个道理：
+//      **哨兵不能取决于会变的东西**。
+//
+//    ⚠️⚠️ **2026-09-30 的位置修正（这段原来放晚了，等于没生效）**：
+//       `src/config.js` 里 `KNOWLEDGE_DIR` 是 `export const`（**import 那一刻**就求值），
+//       而这段原来排在 `await import('../src/config.js')` **之后** ⇒
+//       env 设晚了一步、常量早就固化成真实 `knowledge/` 了 ⇒ 隔离形同虚设。
+//       实测：<主人> 16:10 在群里教学录入一条「服务器新增屏幕广告」，
+//       16:18 回归里 `group-at-server` 立刻红（多出那 6 行）。
+//       ⇒ 必须排在**任何 `config.js` 的 import 之前**（`ROOT`/`join` 上面已经准备好了）。
+const KDIR = 'logs/__snapshot-knowledge';
+const kAbs = join(ROOT, KDIR);
+if (!existsSync(kAbs)) {
+  mkdirSync(kAbs, { recursive: true });
+  cpSync(join(ROOT, 'knowledge'), kAbs, { recursive: true });
+}
+process.env.QQBOT_KNOWLEDGE_DIR = KDIR;
 mkdirSync(join(ROOT, 'logs'), { recursive: true });
 writeFileSync(
   join(ROOT, SESS_FILE),
@@ -263,26 +381,15 @@ writeFileSync(
 const { config: cfg } = await import('../src/config.js');
 cfg.imagegen = { ...(cfg.imagegen ?? {}), enable: true, apiKey: 'sk-snapshot-fake' };
 
-// ⚠️⚠️ 2026-09-23 加：**把知识库也钉住**（第三次遇到同一类问题了）。
-//
-//    为什么：这个套件读的是**真实的 `knowledge/`** —— `run-all.js` 的隔离只管
-//    `state/*.json`（它自己那句注释就写着「knowledge/ 一直是共用的真实目录」）。
-//    于是**群主在群里教一句、或更正一条**，提示词就变 ⇒ 快照无缘无故变红。
-//    实测（00:0x）：只有 `group-voluntary` 一个场景变了，多出一段
-//    「# 【最高优先级】群主后来补充/更正的知识」—— 它恰好选中了那段。
-//
-//    ⇒ 首次运行时把**当前的知识库复制一份固定的**（放 `logs/`，不进版本库），
-//      之后一直用它 —— 和上面【玩家在线记录】是同一个道理：
-//      **哨兵不能取决于会变的东西**。
-const KDIR = 'logs/__snapshot-knowledge';
-const kAbs = join(ROOT, KDIR);
-if (!existsSync(kAbs)) {
-  mkdirSync(kAbs, { recursive: true });
-  cpSync(join(ROOT, 'knowledge'), kAbs, { recursive: true });
-}
-process.env.QQBOT_KNOWLEDGE_DIR = KDIR;
+// ⚠️ 2026-09-30：**知识库钉住那段搬到前面去了**（`QQBOT_SESSIONS_FILE` 那行下面）——
+//    它必须在**第一次 `import('../src/config.js')` 之前**执行，原因见那儿的注释。
 
 const { Bot } = await import('../src/bot.js');
+
+// ⚠️ 2026-10-07 加：给 `group-peer-bot` 那个场景配一个**同类池** ——
+//    没有它 `isPeerBot()` 为假，"同类"那一节提示词就不会注入，场景等于白加。
+cfg.groupParams ??= {};
+cfg.groupParams[GPA] = { ...(cfg.groupParams[GPA] ?? {}), peers: [PEER] };
 
 const bot = new Bot();
 bot.selfId = '10002';
@@ -331,22 +438,137 @@ for (const [name, s] of Object.entries(SCENES)) {
   }
 }
 
+// ⚠️ 2026-09-26 加：**「账上紧」那一段**（`balance.balanceNote()`）原来**不在任何场景里**。
+//
+//    用户为这条路报过**两次**问题（先"话术雷同" → 再"每回一句话都夹一句催充钱"），
+//    而它**每一轮都注入**（`buildSystemPrompt` 无条件调）、影响面比 `remindSystem` 还大
+//    ⇒ 必须有哨兵盯着，不然下次改坏了还是"全绿"。
+//
+//    ⚠️ 放在**最后**：`setLastForPreview()` 改的是 `balance.js` 的**内部状态**，
+//       放中间会污染后面那些场景生成的提示词。
+{
+  const bal = await import('../src/balance.js');
+  try {
+    // ⚠️ 两个都要覆盖：**0 元和"快见底"是两句不同的话**（用户 2026-09-26 纠正：
+    //    「这个不是快没钱，是完全没钱的状态」）。原来只 mock 了 1.2，测不到 0 那条分支。
+    bal.setLastForPreview(0); // 完全没钱
+    now['balance-note-empty'] = normalize(bal.balanceNote());
+    bal.setLastForPreview(1.2); // 快见底
+    now['balance-note-critical'] = normalize(bal.balanceNote());
+  } catch (e) {
+    // ⚠️ 失败要大声报 —— 少一个场景看起来像全绿
+    console.log(`  ❌ 额外场景 balance-note-* 生成失败：${e.message}`);
+    failures++;
+  }
+}
+
 const sceneCount = Object.keys(now).length;
 console.log(`\n提示词快照（${sceneCount} 个场景）`);
 
 // ── 收尾：清掉隔离文件，别在 logs/ 留一堆垃圾 ──
-for (const v of Object.values(ISOLATED)) {
+for (const [k, v] of Object.entries(ISOLATED)) {
+  if (k === 'QQBOT_ACCOUNTS_DIR' || !v.startsWith('logs/__snap')) continue;
   try {
     rmSync(join(ROOT, v), { force: true });
   } catch {}
 }
+try {
+  rmSync(join(ROOT, ISOLATED.QQBOT_ACCOUNTS_DIR), { recursive: true, force: true });
+} catch {}
+
+/**
+ * 存基线前先打印「跟现有基线比，到底变了什么」（2026-10-06 加，用户拍板）。
+ *
+ * ⚠️ 为什么加：基线**陈旧了两轮没人发现** —— 旧基线连更早加的「黑祥」那一节都没有，
+ *    直到下一次回归才报「提示词变了，1837 行不同」，看着像我刚把人设改坏了，
+ *    其实只是"该存基线了"这件事被攒了两轮 ⇒ 白查一阵。
+ *    ⇒ 让 `--save` 这个动作**自带对照**，别让"存基线"变成一次盲操作。
+ *
+ * ⚠️ 这里只给**粗块**（首个不同行 → 最后一个不同行），不追求精确 diff：
+ *    目的是"一眼看出是不是我这次改的那一节"，够用就行（精确 diff 在回归分支里）。
+ */
+function printSnapshotDelta(now, oldText) {
+  let base;
+  try {
+    base = JSON.parse(oldText);
+  } catch (e) {
+    console.log(`  ⚠️ 旧基线读不了（当作没有，直接存新的）：${e.message}`);
+    return;
+  }
+  const names = [...new Set([...Object.keys(base), ...Object.keys(now)])].sort();
+  let changed = 0;
+  const addedAll = new Map();
+  for (const n of names) {
+    const a = base[n];
+    const b = now[n];
+    if (a === undefined) {
+      console.log(`  · ${n}：**新增的场景**`);
+      changed += 1;
+      continue;
+    }
+    if (b === undefined) {
+      console.log(`  · ${n}：**这次没生成出来**（要查，别顺手存了）`);
+      changed += 1;
+      continue;
+    }
+    if (a === b) continue;
+    changed += 1;
+    const la = a.split('\n');
+    const lb = b.split('\n');
+    let p = 0;
+    while (p < la.length && p < lb.length && la[p] === lb[p]) p += 1;
+    let s = 0;
+    while (s < la.length - p && s < lb.length - p && la[la.length - 1 - s] === lb[lb.length - 1 - s]) s += 1;
+    const del = la.slice(p, la.length - s);
+    const add = lb.slice(p, lb.length - s);
+    console.log(`  · ${n}：${la.length} → ${lb.length} 行（这一段里：删 ${del.length} / 增 ${add.length}）`);
+    for (const l of add) addedAll.set(l, (addedAll.get(l) ?? 0) + 1);
+  }
+  if (!changed) {
+    console.log('  ✅ 与现有基线**逐字节一致** —— 这次人设其实没变过，存不存都一样');
+    return;
+  }
+  console.log(`\n  共 ${changed} 个场景变了。新增的行（去重后前 12 条，×N = 在几个场景里都出现）：`);
+  [...addedAll.entries()]
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, 12)
+    .forEach(([l, n]) => console.log(`    ×${n}  ${l.length > 90 ? `${l.slice(0, 90)}…` : l}`));
+  console.log('  ⚠️ 扫一眼上面这些 —— **确认都是你这次有意改的**（不是路径、密钥、测试残留）。');
+}
+
+/**
+ * 存基线前的敏感内容自检（同一次加的）。
+ *
+ * ⚠️ **只警告不拦**：余额那几个场景的提示词里本来就可能出现 key 字样，
+ *    拦下来会让合法流程卡死。但"存的时候顺手看一眼"成本为零。
+ */
+function scanSnapshotLeaks(text) {
+  const pats = [
+    ['绝对路径（C:\\Users…）', /[A-Za-z]:\\Users\\/],
+    ['OneDrive 路径', /OneDrive/],
+    ['真实 sk- key', /sk-(?!snapshot-fake)[A-Za-z0-9_-]{16,}/],
+    ['ark- key', /ark-[a-z0-9-]{16,}/],
+    ['OneBot accessToken', /accessToken["'\s:]+[A-Za-z0-9]{16,}/],
+  ];
+  const hit = pats.filter(([, re]) => re.test(text)).map(([n]) => n);
+  if (hit.length) console.log(`  ⚠️ 自检：基线里出现 ${hit.join('、')} —— 确认不是真凭据再往下走`);
+  else console.log('  ✅ 自检：没有绝对路径 / 真实 key');
+}
 
 // ── 存 或 比 ────────────────────────────────────────────
 if (saveMode || !existsSync(SNAP_FILE)) {
-  writeFileSync(SNAP_FILE, JSON.stringify(now, null, 1), 'utf8');
+  // ⚠️ 2026-10-06：**存之前先对照**（顺序不能反 —— 写完就读不到旧的了）
+  if (existsSync(SNAP_FILE)) {
+    console.log('\n  ── 跟现有基线比，这次到底变了什么 ──');
+    printSnapshotDelta(now, readFileSync(SNAP_FILE, 'utf8'));
+    console.log('');
+  }
+  const text = JSON.stringify(now, null, 1);
+  scanSnapshotLeaks(text);
+  writeFileSync(SNAP_FILE, text, 'utf8');
   const why = saveMode ? '（--save）' : '（原来没有基线）';
   console.log(`  📝 已存基线 ${why}：${SNAP_FILE}`);
-  console.log(`     改完人设相关代码后，跑不带 --save 的这次，必须**零差异**。`);
+  console.log(`     存完再跑一次**不带 --save** 的，必须零差异。`);
   check(true, `基线已写入（${sceneCount} 个场景）`);
 } else {
   let base;

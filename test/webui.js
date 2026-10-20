@@ -12,6 +12,7 @@
  * 用法: node test/webui.js
  */
 import { spawn } from 'node:child_process';
+import { configWithOnebot } from './_config-base.mjs';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, copyFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -119,7 +120,7 @@ function inspectWebuiMarkup(html) {
 }
 
 // 临时配置：深拷贝真实配置，改端口，避免动到用户文件
-const realCfg = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+const realCfg = configWithOnebot();
 writeFileSync(
   CFG,
   realCfg
@@ -510,6 +511,31 @@ async function main() {
       '★ 合法 JSON 不被当成坏请求挡掉',
       good ? `实得 ${good.status}` : '(无响应)',
     );
+
+    // ⚠️⚠️ 2026-10-06 加：**GET 也必须能用**（这个盲区害了用户一次）。
+    //
+    //  起因：界面里 `renderDiceMode()` / `renderSealdiceRelay()` 是**读**配置，
+    //  用的是裸 `api('/api/config')` = **GET**；而路由表**只有 POST**
+    //  ⇒ GET 404、响应体是纯文本 `Not found` ⇒ 前端 `r.json()` 抛
+    //  `Unexpected token 'N', "Not found" is not valid JSON`，被 catch 吞掉后
+    //  表现成「整张卡填不上」（骰娘触发词框不出现、海豹下拉框停在第一项）。
+    //
+    //  ⚠️ **为什么之前没测出来**：这个文件里所有 /api/config 的调用**全是 POST**，
+    //    所以「少个 GET 路由」这件事一个断言都碰不到。
+    //  ⇒ 这条必须真的发 GET 出去，纯查路由表字符串证明不了运行时行为。
+    const getRes = await fetch(`${BASE}/api/config`).catch(() => null);
+    check(!!getRes && getRes.status === 200, '★ GET /api/config 不该是 404', getRes ? `实得 ${getRes.status}` : '(无响应)');
+    const getText = getRes ? await getRes.text() : '';
+    check(
+      getText.trim().startsWith('{'),
+      '★ GET 的响应体是 JSON（不是 `Not found` 那种纯文本，否则前端 r.json() 必炸）',
+      getText.slice(0, 40),
+    );
+    const getJson = getText.trim().startsWith('{') ? JSON.parse(getText) : {};
+    check(getJson.ok === true, '★ GET 返回 ok:true');
+    check(!!getJson.config, '★ GET 返回 config 段');
+    // ⚠️ GET 是**只读**的：不带 body、不碰 config.yml，也绝不能吐出 token
+    check(!/CqjoX1z4|"token"/.test(getText), '★★ GET 不泄露 sealdice token（只读、密钥不进 JSON）');
   }
 
   console.log('\n[3] 改模型配置 → 热重载生效');
@@ -1081,15 +1107,74 @@ async function main() {
     check(Number(sp2.params?.chat?.strictness) === 12, '★ 设成 12 也生效');
     const sp3 = await post('/api/group-params', { groupId: G699, patch: { chat: { strictness: null } } });
     check(
+      // ⚠️ 删除分群覆盖后回到本地默认 50，不继承旧全局配置。
       sp3.ok === true && Number(sp3.params?.chat?.strictness) === 50,
       '★★ 传 `null` = 删掉覆盖 → **回到默认 50**（现在没有「全局」那一份了）',
       `现在是 ${sp3.params?.chat?.strictness}`,
     );
     check(/strict-group/.test(html) && /fillStrictForGroup/.test(html), '★★ 界面上有「哪个群 + 收紧度」的下拉框');
+    // ⚠️⚠️ 2026-10-15 加：**每个 tab 都要出现在"切页那个数组"里**（自动对账）——
+    //    那个数组漏一个，对应的标签点过去就是**一片空白**（它的 section 一直挂着 `hidden`）✗
+    //    这个坑**踩过两次**：qzone 一次（注释里写着）、2026-10-15 加「B站分享」又一次 ✗
+    //    ⇒ 别再靠人记了，让断言来对 ✓
+    {
+      const tabs = [...html.matchAll(/data-tab="([a-z]+)"/g)].map((m) => m[1]);
+      const arrM = /\['model'[^\]]*\]/.exec(html);
+      const list = arrM ? [...arrM[0].matchAll(/'([a-z]+)'/g)].map((m) => m[1]) : [];
+      const missing = [...new Set(tabs)].filter((t) => !list.includes(t));
+      check(
+        tabs.length > 5 && missing.length === 0,
+        '★★ nav 里每个 tab 都在"切页数组"里（漏一个 ⇒ 那个标签永远是空白页）',
+        missing.length ? `漏了：${missing.join('、')}` : `${new Set(tabs).size} 个都对上了`,
+      );
+    }
     // ⚠️ 2026-09-16 改成「下拉选群 + 一整张表单」之后，收紧度的 id 也换成 `gp-chat-strict`
     check(
       /gp-chat-strict/.test(html) && /id="gp-group"/.test(html),
       '★ 「按群设定」那张表里也能按群设收紧度（下拉选群 + 表单）',
+    );
+    const shareSave = await post('/api/group-params', {
+      groupId: G699,
+      patch: {
+        biliShare: {
+          enable: true,
+          keywords: ['MyGO!!!!!', 'BanG Dream!'],
+          minPerDay: 2,
+          maxPerDay: 4,
+          startHour: 8,
+          endHour: 22,
+          cooldownMinutes: 1,
+          maxResults: 99,
+          chancePercent: 120,
+        },
+      },
+    });
+    check(
+      shareSave.ok === true &&
+        shareSave.params?.biliShare?.enable === true &&
+        shareSave.params?.biliShare?.cooldownMinutes === 10 &&
+        shareSave.params?.biliShare?.maxResults === 20 &&
+        shareSave.params?.biliShare?.chancePercent === 100,
+      '★★ B站分享群设置可保存，冷却、搜索条数和短评概率会规范化',
+    );
+    const shareRead = await api(`/api/group-params?groupId=${G699}`);
+    check(
+      shareRead.overrides?.biliShare?.keywords?.length === 2 &&
+        shareRead.params?.biliShare?.keywords?.[0] === 'MyGO!!!!!',
+      '★ GET 群参数会读回 B 站分享关键词与配置',
+    );
+    const clearShare = await post('/api/group-params', { groupId: G699, patch: { biliShare: null } });
+    check(
+      clearShare.ok === true && clearShare.params?.biliShare?.enable === false,
+      '★ 清除 B 站群覆盖后恢复默认关闭',
+    );
+    const manualBad = await post('/api/bili-share/send-now', { groupId: '200000005' });
+    check(manualBad.ok === false && /不是 1 档群/.test(String(manualBad.error)), '★★ 手动发送接口拒绝非 1 档群');
+    const manualOffline = await post('/api/bili-share/send-now', { groupId: G699 });
+    check(manualOffline.ok === false && /QQ 没在线/.test(String(manualOffline.error)), '★ 1 档群通过权限闸，但离线时不会尝试发送');
+    check(
+      /gp-bili-enable/.test(html) && /gp-bili-keywords/.test(html) && /biliShareNow/.test(html),
+      '★ 按群设置页包含 B 站自动分享开关、关键词和立即发送按钮',
     );
   }
 }

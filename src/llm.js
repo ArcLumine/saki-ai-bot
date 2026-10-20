@@ -4,7 +4,15 @@ import * as spend from './spend.js';
 // ⚠️ 2026-09-21：人设文案从 `personas/<id>/identity.json` 来（见 src/persona.js）。
 //    这里原来写死「Saki（丰川祥子）」—— 换人设时它不会跟着变，等于换了个名字还在演小祥。
 import * as persona from './persona.js';
-import { Agent, ProxyAgent, setGlobalDispatcher } from 'undici';
+// ⚠️⚠️ 2026-10-09 加 `fetch as undiciFetch`（用户报：「**刚才又拉取失败了**」，时通时不通）：
+//    这里是**独立的 `undici` 包**（package.json 里 ^8.10.2），而发请求用的却是
+//    **Node 内置的全局 `fetch`** —— 两者的 `dispatcher` **不是同一套** ✗
+//    ⇒ 把外部 undici 造的 `ProxyAgent` 塞给内置 fetch ⇒ `UND_ERR_INVALID_ARG`
+//      ⇒ **"走代理"这一路从来没真正生效过**，只有直连偶尔成功 ⇒ 表现就是时通时不通 ✗
+//    ⇒ 而且 `setGlobalDispatcher()`（applyEgress 的出口切换）改的也是 **undici 的**全局，
+//      内置 fetch 根本不看它 ⇒ 那个"自动切换出口"一直是个假动作 ✗
+//    ⇒ 统一成 undici 自己的 fetch（agent / dispatcher / 全局设置全都同源 ✓）
+import { Agent, ProxyAgent, setGlobalDispatcher, fetch as undiciFetch } from 'undici';
 import net from 'node:net';
 
 // ⚠️⚠️ 2026-09-16 深夜：**运行中自动切换网络出口**（用户要求：
@@ -61,9 +69,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function rawFetch(url, opts, mode) {
   if (mode === 'proxy') {
     proxyAgent ??= new ProxyAgent(PROXY_URL);
-    return fetch(url, { ...opts, dispatcher: proxyAgent });
+    return undiciFetch(url, { ...opts, dispatcher: proxyAgent });
   }
-  return fetch(url, opts);
+  // ⚠️ 2026-10-09：直连也走 undici 的 fetch —— 理由见文件顶部那个 import 的注释
+  //    （内置 fetch 不认 undici 的 dispatcher，也不看 setGlobalDispatcher ✗）
+  return undiciFetch(url, opts);
 }
 
 /**
@@ -127,9 +137,58 @@ egressWatch.unref?.();
  * 带**自动切换出口**的 fetch（llm.js 里所有模型请求都走它）。
  * ⚠️ 换出口重试**只做一次**（两次都挂就是真挂，交给上层按故障处理）。
  */
+/**
+ * 清掉 JSON 文本里**孤立的代理项**（半个 emoji）。
+ *
+ * ⚠️⚠️ 2026-09-23 加（实测踩到，**持续复现**）：
+ *    `JSON.stringify` 只在两种情况下输出 `\uXXXX` —— 控制字符，和**孤立代理项**。
+ *    字符串里如果有一个**被切断的 emoji**（高代理后面没跟低代理，或反之），
+ *    stringify 会老老实实输出 `"\ud83d"`。这在 JSON 规范里技术上合法、**语义无效**，
+ *    而严格的解析器（DeepSeek 那边是 Rust 的 `serde_json`）会**直接拒绝**，报：
+ *    ```
+ *    Failed to parse the request body as JSON: messages[0].content:
+ *    unexpected end of hex escape at line 1
+ *    ```
+ *    ⇒ 于是**她的回复整个生成失败**（那条消息直接哑掉）。
+ *
+ *    **来源**：识图返回 405 字描述，而它被 `slice()` 截断 ⇒ 正好切在 emoji 中间。
+ *    但**任何**字符串都可能带（模型输出、群友消息、知识库），所以修在**这里**。
+ *
+ * ⚠️ 为什么在最内层 `requestWithEgress` 里做、而不是每个调用点：
+ *    `llm.js` 里有 4 处 `JSON.stringify`，在这里过一道闸就不用改 4 个地方
+ *    （改 4 处必漏一处）；而且放最内层 ⇒**每条出口都覆盖**，新增出口也不会漏。
+ * ⚠️ 输入是**已经 stringify 过的文本**，所以要匹配的是**转义后的** `\uXXXX` 形式。
+ */
+function stripLoneSurrogates(body) {
+  // ① 高代理（D800-DBFF）后面没紧跟低代理 ⇒ 孤立 ⇒ 去掉
+  let s = String(body).replace(/\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2})/g, '');
+  // ② 低代理（DC00-DFFF）前面没紧跟着高代理 ⇒ 孤立 ⇒ 去掉
+  s = s.replace(/(?<!\\u[dD][89abAB][0-9a-fA-F]{2})\\u[dD][c-fC-F][0-9a-fA-F]{2}/g, '');
+  return s;
+}
+
 async function requestWithEgress(url, opts = {}) {
+  // ⚠️⚠️ 所有 llm 请求都在这里过一道「孤立代理项」闸 —— 理由见上面那个函数。
+  if (opts && typeof opts.body === 'string') {
+    opts = { ...opts, body: stripLoneSurrogates(opts.body) };
+  }
+  // ⚠️⚠️ 2026-10-09 加（用户：「有没有**不用充钱直接用免费额度**的？」）：
+  //    要白嫖 **Gemini 官方免费额度**，就**必须走代理**（国内直连不到 Google ✗）；
+  //    可整个进程只有一个全局出口，而主模型（DeepSeek）在国内**直连更合适** ✗
+  //    ⇒ 这里按**目标域名**决定优先级：国外域名（Google / OpenAI / Anthropic）**优先代理**，
+  //      其余按全局出口走 ✓
+  //    ⚠️ 只改"先试哪个"，**失败重试那条路一个字没动**（仍然会试另一个出口 ✓）
+  //      ⇒ 代理真挂了也不会卡死，只是多一次失败重试 ✓
+  const host = (() => {
+    try {
+      return new URL(String(url)).hostname.toLowerCase();
+    } catch {
+      return '';
+    }
+  })();
+  const needProxy = /(^|\.)(googleapis\.com|google\.com|openai\.com|anthropic\.com)$/.test(host);
   if (egress === 'unknown') applyEgress((await proxyAlive()) ? 'proxy' : 'direct');
-  const first = egress;
+  const first = needProxy && (await proxyAlive()) ? 'proxy' : egress;
   try {
     return await rawFetch(url, opts, first);
   } catch (e) {
@@ -226,9 +285,15 @@ const llmCfg = () => config.llm;
  * 调用 OpenAI 兼容接口，流式产出文本增量。
  * @param {{role:string, content:string}[]} messages
  * @param {AbortSignal} [outerSignal]
- * @param {{maxTokens?:number, timeoutMs?:number,}} [opts]
- *        按次覆盖参数：解题模式要更大的上限；
+* @param {{maxTokens?:number, timeoutMs?:number, thinking?:object, report?:object}} [opts]
+ *        按次覆盖参数：解题模式要更大的上限；`thinking:{type:'disabled'}`
  *        用来**关掉思考链**（压缩故事线就靠它 —— 见 2026-09-18 那条注释）
+ *        ⚠️ `report`：**调用方传一个空对象进来**，这次生成要是被截断，
+ *        这里会往里写 `report.truncated`（`'length'` = 被 max_tokens 截断；
+ *        `'reasoning-only'` = 思考链把上限吃光、正文一个字都没出）。
+ *        用它判断"要不要关掉思考重试一次"（解题模式那段，2026-10-02 加）。
+ *        ⚠️ 为什么按调用传对象、而不是用模块级全局：预搜索 / 说话判断 / 归属核对
+ *        会**并发**调这个函数，全局变量会被别的那次冲掉。
  * @returns {AsyncGenerator<string>}
  */
 /**
@@ -285,23 +350,80 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   //    `finally` 里要拿它报警（2026-09-18 那次"日志里什么都没有"的故障就靠这个说清）
   let finishReason = '';
 
+  // ⚠️⚠️ 2026-10-09 加（用户原话：「可以把这两个接入 **gemini** 吗，然后和关思考链一样
+  //    也加个按钮**选择是否使用 gemini**，即**备选模型**」）：
+  //    按**这一次调用**覆盖「模型 / 地址 / 密钥」——
+  //    让「机器人之间的日常聊天 + 剧情里和同类对戏」这两类走**备选模型**，其余照旧 ✓
+  //    ⚠️ 记账也要用**实际用的那个模型名**（不然月度账单里两个模型混成一个、对不上账 ✗）
+  //    ⚠️ 只有传了才覆盖；不传就完全是原来的行为（默认这条路一个字都没变 ✓）
+  const useModel = String(opts.model || llm.model);
+  const useBase = String(opts.baseURL || llm.baseURL);
+  const useKey = String(opts.apiKey || llm.apiKey);
+  // ⚠️⚠️ 2026-10-10：**这次用的是不是主模型那个地址**？
+  //    不是 ⇒ 是备选模型（Gemini）⇒ 下面那个 `thinking` 字段**一个都不能带**（见那段注释）。
+  const usingMainBase =
+    useBase.replace(/\/+$/, '') === String(llm.baseURL ?? '').replace(/\/+$/, '');
+
   try {
-    const res = await llmFetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
+    const res = await llmFetch(`${useBase.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${llm.apiKey}`,
+        Authorization: `Bearer ${useKey}`,
       },
       body: JSON.stringify({
-        model: llm.model,
+        model: useModel,
         messages,
         temperature: llm.temperature,
         max_tokens: maxTokens,
-        ...thinkingField(),
-        ...reasoningField(),
+        ...(usingMainBase ? reasoningField() : {}),
         // ⚠️ 关掉思考链（2026-09-18）：flash 的**思考链计入 completion_tokens**，
         //    压缩故事线时它烧掉 7479/8000，正文只写了 819 字就被截断 → 整次作废。
+// ⚠️ 2026-10-04 合并上游：这里**只**接住"按次显式指定思考档位"的能力，
+        //    **不采纳**上游那段默认 `thinking:{type:'enabled', budget_tokens:3000}`。
+        //
+        //    理由（本机实测，见 `bot.js` 2026-10-02 那两段）：
+        //      · `thinkingField()` 默认返回 `{thinking:{type:'disabled'}}`
+        //        （`'disabled'` 不在它那个 `off/none/false/no` 白名单里 ⇒ 走"关掉"分支）
+        //      · 上游那段写在 `...thinkingField()` **之后**，一旦采纳就会把它覆盖回 `enabled`
+        //        ⇒ 等于把本地"默认关思考链"整个翻掉 ✗
+        //      · 而且本机早就验过：**`thinkingBudget` 约束不住思考链**
+        //        （一次把 8000 token 烧光、一次把 72 秒烧光，正文一个字都没出）
+        //        ⇒ 指望 budget 兜底是不成立的，本地的做法是解题模式**直接关掉**。
+        //
+        //    ⇒ 只有调用方**显式传了** `opts.thinking` 才覆盖，否则一律听全局的。
+        //      （解题模式就是传 `{type:'disabled'}` 的那个，见 `solveOpts`。）
+        // The primary provider keeps the local thinking policy; alternate providers
+        // must not receive DeepSeek-specific fields.
+        // llm.thinking: off 时一律不带 thinking 字段（Groq 等不认，会 400）
+        ...(!usingMainBase || !Object.keys(thinkingField()).length ? {} : opts.thinking ? { thinking: opts.thinking } : thinkingField()),
+        // ⚠️⚠️ 2026-09-23 加（用户实测：她说「行，给你看一眼」却**没发图**）：
+        //    日志：`LLM 输出被 max_tokens(8000) 截断了（其中**思考链吃了 7999 token**）`
+        //    ⇒ 思考链把输出预算吃光 ⇒ **`[拍照]` 标记正好被截掉** ⇒ 她嘴上答应、实际没标记 ⇒ 没有图 ✗
+        //    ⇒ 主聊天**默认给思考链设上限**（`config.llm.thinkingBudget`，默认 3000），把剩下的留给输出。
+        //      辅助请求（说话判断/润色/识图）本来就显式传 `thinking:{type:'disabled'}`，不受影响 ✓
+        //    ⚠️ 实测过这个字段被接受（带 `budget_tokens` 打 API 返回 200，不报 400）。
+        //    ⚠️ 设 0 或负数 = 不限制（退回旧行为）。
+        // ⚠️⚠️⚠️ 2026-10-10 修（**这才是"备选模型 400"的真正根因**）：
+        //    `thinking` 是 **DeepSeek 专用**字段，而它会从**两个地方**被带上：
+        //      ① 调用方显式传 `thinking:{type:'disabled'}`（"关思考链"那条路）；
+        //      ② **没传时下面补的这个默认值**（`config.llm.thinkingBudget`）。
+        //    ⇒ 只在调用方那一处删掉**没用** —— 默认值照样把请求打到 Gemini，然后被 400 拒：
+        //      `Invalid JSON payload received. Unknown name "thinking": Cannot find field.`
+        //    实测后果（14:27 日志）：机对机**每句都失败** ⇒ 走"生成失败"的兜底话术 ⇒
+        //      两个号反复说同一句「……我这边有点小状况，等下再说」**并互相引用**，
+        //      在群里看着像复读机 ✗
         stream: true,
+        // ⚠️⚠️ 2026-10-15 加（用户：黑祥那台用的是**中转站**的同款模型）——
+        //    **中转站不认 DeepSeek 的 `thinking:{type:`disabled`}`** ⇒ 它照样思考，
+        //    而有些中转的适配层会把思考**拼进 content** ⇒ 推理混进正文 ✗
+        //    客户端没法把"已经混进 content 的推理"再分离（那已经是正文了），
+        //    但可以**换一种关法**：给配置开个口子，把"那家中转认的参数"原样塞进请求体 ——
+        //      `llm.extraBody: { enable_thinking: false }` /
+        //      `chat_template_kwargs: { thinking: false }` / `reasoning_effort: none`
+        //    ⚠️ 具体认哪个**得看那家中转的文档**，但改配置就能试，不用改代码 ✓
+        //    ⚠️ 放在最后 ⇒ 它**覆盖**前面算出来的同名字段（想手工压过默认行为就靠这个）✓
+        ...(llmCfg().extraBody && typeof llmCfg().extraBody === "object" ? llmCfg().extraBody : {}),
         // ⚠️ 加了这行，流式响应才会在**最后一块**带 `usage`
         //    （记账要用它，见 spend.js；不加的话只能估算）
         stream_options: { include_usage: true },
@@ -382,6 +504,9 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
       //    真实踩过三次（vision / extract / 教学回执），都是同一个原因：
       //    **推理模型的思考链把 max_tokens 吃光了**，正文一个字都写不出来。
       if (sawReasoning) {
+        // ⚠️⚠️ 2026-10-02：**这个分支也是一种"被截断"** ——
+        //    正文一个字都没有，全被思考链吃了。解题模式要靠这个信号决定重试。
+        if (opts.report) opts.report.truncated = opts.report.truncated || 'reasoning-only';
         log.warn(
           `LLM 只产出了思考链、没有正文 —— 很可能是 max_tokens(${llmCfg().maxTokens}) 被思考吃光了。` +
             `可以把 max_tokens 调大，或者对这类任务设 thinking:{type:'disabled'}`,
@@ -402,6 +527,7 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
     //    而真正的线索（`finish_reason=length`）**一个字都没记**，白查半天。
     //    注意：下面 `sawAny` 那条只在"正文**完全为空**"时报警，救不了这种情况。
     if (finishReason === 'length') {
+      if (opts.report) opts.report.truncated = 'length';
       const rt = usage?.completion_tokens_details?.reasoning_tokens;
       log.warn(
         `LLM 输出被 max_tokens(${maxTokens}) 截断了` +
@@ -412,7 +538,7 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
 
     if (usage) {
       try {
-        spend.record({ model: llm.model, usage });
+        spend.record({ model: useModel, usage });
       } catch (e) {
         // ⚠️ 这里**必须用 warn 而不是 debug** —— 我第一次就是把
         //    `spend` 的 import 漏了，`ReferenceError` 被 debug 吞掉，
@@ -798,6 +924,26 @@ export async function phraseMoney(p = {}) {
  * @param {number} num
  * @returns {string}
  */
+/**
+ * 剥掉**带标记的**思考块（2026-10-15 加）。
+ *
+ * 起由：用户报「黑祥把推理混进正文了」，而那台用的是**中转站**的同款模型 ——
+ *   中转站不认 `thinking:{type:`disabled`}`，有的还会把思考拼进 content ✗
+ *   混进 content 的那部分客户端**没法**再分离（它已经是正文了），
+ *   但**带标签**的那种能剥（`<thinking>…</thinking>`、`<reasoning>…</reasoning>`）。
+ *
+ * ⚠️ 只认 HTML 式标签 —— 她平时聊天**不可能**写出这种东西 ⇒ 零误伤 ✓
+ * ⚠️ 只有开标签、没有闭标签（被 max_tokens 截断）⇒ 从开头剥到结尾（宁可少说一句）✓
+ */
+export function stripThinking(text) {
+  let s = String(text ?? "");
+  s = s.replace(/<think(?:ing)?\s*>[\s\S]*?<\/think(?:ing)?\s*>/gi, "");
+  s = s.replace(/<reasoning\s*>[\s\S]*?<\/reasoning\s*>/gi, "");
+  s = s.replace(/^\s*<think(?:ing)?\s*>[\s\S]*$/i, "");
+  s = s.replace(/^\s*<reasoning\s*>[\s\S]*$/i, "");
+  return s.trim();
+}
+
 export function cjkNum(num) {
   const v = Math.round(Number(num) || 0);
   if (!Number.isFinite(v) || v < 0 || v > 99999999) return String(v);

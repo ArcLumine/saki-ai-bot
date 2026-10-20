@@ -37,7 +37,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, config } from './config.js';
+import { ROOT, config, stateDir } from './config.js';
 import { log } from './log.js';
 // ⚠️ 2026-09-28：为了 `promptLine()` 里那句「它管不到 <主人>」能填成真称呼。
 //    那一段以前是字面量占位符，**原样发给了模型**（尖括号对模型就是"占位符"信号）。
@@ -47,7 +47,7 @@ import { callOwner } from './persona.js';
 // ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)`
 import { whoTag } from './who.js';
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 // ⚠️ 给测试留出口（和 QQBOT_TIC_FILE / QQBOT_QZONE_FILE 一个套路）
 const FILE = process.env.QQBOT_AFFINITY_FILE
   ? join(ROOT, process.env.QQBOT_AFFINITY_FILE)
@@ -117,7 +117,7 @@ function migrateLegacy() {
     // 延迟 import，别在模块顶层制造循环依赖
     const gidsOf = (uid) => {
       try {
-        const raw = readFileSync(join(ROOT, 'state', 'names.json'), 'utf8');
+        const raw = readFileSync(join(stateDir(), 'names.json'), 'utf8');
         const j = JSON.parse(raw);
         const out = [];
         // ⚠️ `names.json` 的 `card` 是**两层**的：`{ "<群号>": { "<uid>": "群名片" } }`

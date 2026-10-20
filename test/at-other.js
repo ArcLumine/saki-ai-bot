@@ -154,7 +154,12 @@ console.log('\n【3】不许误伤：这几种必须放行');
     wouldJoin([textSeg('我的邮箱是 abc@163.com，你记一下')]) === true,
     '@ 不在开头（邮箱）→ 放行',
   );
-  check(wouldJoin([textSeg('你们看 @<主人> 说的那个')]) === true, '@ 在句子中间 → 不拦');
+  // ⚠️⚠️ 2026-10-09 改（用户报：「**@别人时不接话的闸失效了**，为了避免影响别人交流」）：
+  //    下面两条原来要求"@ 在中间**不拦**"、"@ 不在开头算空" —— 那正是他说的失效点 ✗
+  //    群里最常见的写法就是「你们看 @<主人> 说的那个」（@ 在中间）⇒ 一律漏过 ⇒ 等于没这道闸。
+  //    方向改成**宁可少接一句、也不插嘴** ✓
+  //    （邮箱那种仍然不算 —— `@` 前面是字母/数字就跳过，见下面【4】那条 ✓）
+  check(wouldJoin([textSeg('你们看 @<主人> 说的那个')]) === false, '@ 在句子中间 → 也要拦（不再漏）');
 }
 
 console.log('\n【4】`textAtOf()` 本身的判据');
@@ -170,7 +175,8 @@ console.log('\n【4】`textAtOf()` 本身的判据');
   check(t('@Saki 在吗') === '', '@Saki → 空');
   check(t('abc@163.com') === '', '邮箱 → 空');
   check(t('给个服世界地图。') === '', '没 @ → 空');
-  check(t('[图片] @<主人> 看看') === '', '@ 不在开头 → 空');
+  // ⚠️ 2026-10-09 改：@ 不在开头**也要认出来**（原来算空 ⇒ 那种消息一条都拦不住）
+  check(t('[图片] @<主人> 看看') === '<主人>', '@ 不在开头也要认出来（图片后面跟的那个 @）');
   check(
     t('@<主人> 看看', [atSeg(OWNER)]) === '',
     '已经有 at 段时 → 空（那条路由 at 段负责，别重复判）',
@@ -253,6 +259,47 @@ console.log('        「只有 @她 或者明确叫她名字时，才能把自�
   check(/别辩解、别自证/.test(p), '★★ 明确要求「别辩解、别自证」（真实踩过：「消息多又不是我发的（」）');
   check(/别把话题往自己身上拉/.test(p), '★ 要求「别把话题往自己身上拉」');
   check(/接不上就\*\*别开口\*\*/.test(p) || /接不上就别开口/.test(p), '★ 而且给了她"接不上就不说"的出口');
+}
+
+console.log('\n【★】2026-10-13：@主号问话，**黑祥不该也被叫起来**（用户截图）');
+{
+  // 现场：<主人> 在群里「@saki酱saki酱saki酱 你和爱音什么关系」——
+  //   主号正常回了，**黑祥也回了一条**「问过的事别再问我一遍」✗
+  // 根因：`atCalledInText()` 是"@ 被协议端退化成纯文本"的兜底，可它**从来没检查过
+  //   "到底有没有 at 段"** ⇒ at 段明明指着主号，它还是拿正文里的 `@saki…` 去比名字，
+  //   而 `@saki酱saki酱saki酱` **含 "saki"**、黑祥的名字表里也有 `saki` ⇒ 它以为自己被叫 ✗
+  // ⇒ 有 at 段就说明协议端没退化：@ 的是谁以 at 段为准，正文不再参与判断。
+  const { config } = await import('../src/config.js');
+  const keep = config.trigger.callNames;
+  config.trigger.callNames = ['saki']; // 黑祥的名字表里也有 saki（真实情况）
+  const DARK = '10000011';
+  const textSaki = '@saki酱saki酱saki酱 你和爱音什么关系';
+
+  // ① 有 at 段（@ 的是主号）→ **不算在叫我**
+  const bDark = new Bot();
+  bDark.selfId = DARK;
+  check(
+    bDark.atCalledInText(textSaki, [atSeg(BOT), textSeg(textSaki)], GROUP) === '',
+    '★★ 有 at 段（@ 的是主号）+ 正文里 @saki… → 黑祥**不认**（不当成在叫它）',
+  );
+
+  // ② 真正的退化形态（**没有 at 段**）→ 照旧认（老兜底别废掉）
+  const bMain = new Bot();
+  bMain.selfId = BOT;
+  check(
+    !!bMain.atCalledInText('@saki酱saki酱saki酱 你说呢', [textSeg('@saki酱saki酱saki酱 你说呢')], GROUP),
+    '★ 没有 at 段（协议端真的退化了）→ 照旧当成 @ 我（这条兜底不能废）',
+  );
+
+  // ③ @ 我的 QQ 号那种写法 + 有 at 段指着我 → 仍然认（别改坏）
+  const bQq = new Bot();
+  bQq.selfId = BOT;
+  check(
+    !!bQq.atCalledInText(`@${BOT} 你在吗`, [textSeg(`@${BOT} 你在吗`)], GROUP),
+    '★ 正文写的是 @QQ号、且没有 at 段 → 照旧认',
+  );
+
+  config.trigger.callNames = keep;
 }
 
 try {

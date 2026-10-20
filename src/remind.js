@@ -25,10 +25,10 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { ROOT, config, CONFIG_FILE } from './config.js';
+import { ROOT, config, CONFIG_FILE, stateDir } from './config.js';
 import { log } from './log.js';
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 
 function stateFile() {
   const explicit = process.env.QQBOT_REMIND_FILE;
@@ -197,6 +197,21 @@ function to24(h, period) {
  * @returns {number} 时间戳；算不出来返回 0
  */
 export function resolveWhen(spec = {}, now = Date.now()) {
+  // ⚠️⚠️ 2026-09-29 加（用户实测：一语未尽说「10分钟之后叫 起床」，她应了
+  //    「行，十分钟后叫你」，但那条提醒**压根没记上** ✗）。
+  //
+  //    根因：这套只认"**几点**"（`hour` 0-23），而「10分钟之后」是**相对时间** ——
+  //    `hour` 留空 ⇒ 下面那个 `hourRaw` 检查直接 `return 0` ⇒ `add()` 拿不到 `at`
+  //    ⇒ 不记。可她嘴上已经答应了，于是变成"答应了却没办" ✗。
+  //
+  //    ⇒ 相对时间单独走这一条：`afterMin` 就是"从现在起多少分钟"，直接算出来。
+  //    ⚠️ 圆到整分钟 —— 他说"10分钟之后"不该变成"10 分 37 秒之后"。
+  const afterMin = Number(spec.afterMin);
+  if (Number.isFinite(afterMin) && afterMin > 0) {
+    const d = new Date(now + Math.round(afterMin) * 60000);
+    d.setSeconds(0, 0);
+    return d.getTime();
+  }
   const hourRaw = Number(spec.hour);
   if (!Number.isFinite(hourRaw) || hourRaw < 0 || hourRaw > 23) return 0;
   const minute = Math.min(59, Math.max(0, Number(spec.minute) || 0));
@@ -219,6 +234,29 @@ export function resolveWhen(spec = {}, now = Date.now()) {
     const d =
       day === 'today' ? onDay(0) : day === 'tomorrow' ? onDay(1) : new Date(`${day}T00:00:00`);
     if (Number.isNaN(d.getTime())) return 0;
+    // ⚠️⚠️ 2026-09-29 修（用户报：「今天3点提醒起床」被设成了**下午** 15:00，
+    //    实际他指的是**13 分钟后**的凌晨 3 点）。
+    //
+    //    `to24()` 对"只说钟点"（没说上午/下午）一律按**晚上**口径 +12 ——
+    //    这在**白天**说话时是对的（用户 2026-09-18 明确要的：「只说8点 = 今天晚上20点」），
+    //    但**凌晨**说话时就荒唐了：凌晨 2:47 说「今天3点」，绝不可能是"今天下午3点" ✗。
+    //
+    //    ⇒ 只说钟点、且钟点落在有歧义的 1~11 点时：取「今天这个点」和「今天+12」里
+    //      **第一个还没到的**。两个都过了（比如下午 4 点说"今天3点"）就退回原来的 +12，
+    //      让上层如实说"那个点已经过了"。
+    //    ⚠️ 白天 9 点说"今天8点" ⇒ 8:00 已过、20:00 没到 ⇒ 取 20:00 ✓（和原来一致）
+    //       白天 9 点说"今天10点" ⇒ 10:00 没到 ⇒ 取 10:00 ✓（本来就该是上午十点）
+    //    ⚠️⚠️ 但**只在凌晨**才这么判 —— 白天说"8点"仍然按用户明确要的口径算成今晚 20:00
+    //       （实测：早上 7 点说"8点"，如果也套这条就会算成 1 小时后 ✗，
+    //        `test/remind.js` 的「早上只说8点 → 今晚20:00」那条抓到了）。
+    const hh0 = new Date(now).getHours();
+    if (period === '' && hourRaw >= 1 && hourRaw <= 11 && hh0 < 5 && hh0 < hourRaw) {
+      const early = at(d, hourRaw, minute);
+      const late = at(d, hourRaw + 12, minute);
+      if (early > now) return early;
+      if (late > now) return late;
+      return late;
+    }
     return at(d, to24(hourRaw, period), minute);
   }
 
@@ -247,12 +285,44 @@ export function resolveWhen(spec = {}, now = Date.now()) {
     push(0, hourRaw + 12);
     push(1, hourRaw + 12);
   } else {
-    // ⚠️ 只说「8点」这条路 —— 用户拍板的默认口径，三个候选的**顺序**就是答案：
+    // ⚠️ 只说「8点」这条路 —— 用户拍板的默认口径，候选的**顺序**就是答案：
+    //
+    // ⚠️⚠️ 2026-09-29 加了第一个候选（用户报的那个 bug：凌晨说「3点」被算成下午）。
+    //    ⚠️ 但**只在凌晨**加 —— 白天/早上说"8点"必须仍然是今晚 20:00（用户明确要的），
+    //       否则早上 7 点说"8点"会被算成 1 小时后 ✗（`test/remind.js` 抓到过）。
+    //    ⚠️ 它也不会破坏那条规矩：凌晨说"3点"时 `3:00 > now` ⇒ 被收进来 ✓；
+    //       白天说"8点"时这一行**根本不执行** ⇒ 最近仍是今天 20:00 ✓。
+    const hh = new Date(now).getHours();
+    if (hh < 5 && hh < hourRaw) push(0, hourRaw); // ⓪ 今天 08:00（只在凌晨才有意义）
     push(0, hourRaw + 12); // ① 今天 20:00（默认）
     push(1, hourRaw); //      ② 明天 08:00（过了今晚8点就是它）
     push(1, hourRaw + 12); // ③ 明天 20:00
   }
   return cands.sort((a, b) => a - b)[0] ?? 0;
+}
+
+/**
+ * 他在**这个会话**里最近一条**已经发出去**的提醒（2026-09-29 加）。
+ *
+ * ⚠️ 为什么需要（用户截图：他连着三次说「把**下次**提醒的被提醒人改成XXX」，
+ *    她三次都应「行，改好了」—— 实际一次都没改 ✗）：
+ *    `latest()` 只找**还没发**的那条，而他要改的**已经发过了**（03:00 那两条）
+ *    ⇒ 判成"没定过"，可她明明刚定过 ⇒ 提示词那句「你没让我提醒过什么呀」
+ *    **自相矛盾**，她不信就自己编了个"改好了"。
+ *    ⇒ 这个函数用来区分「真没定过」和「定过但已经发掉了」，
+ *      好让她如实说出**准确**的那一种。
+ *
+ * @param {{by?:string, groupId?:string}} q `groupId` 空串 = 私聊
+ * @returns {object|null}
+ */
+export function latestSent({ by = '', groupId = '' } = {}) {
+  const u = String(by ?? '').trim();
+  const g = String(groupId ?? '');
+  const sent = st.items.filter((x) => x.sentAt);
+  for (let i = sent.length - 1; i >= 0; i--) {
+    if (String(sent[i].by) === u && String(sent[i].groupId) === g) return sent[i];
+  }
+  return null;
 }
 
 /**
@@ -361,6 +431,30 @@ export function hint(groupId = '', now = Date.now()) {
 /** 到点、还没发过的（按时间正序） */
 export function due(now = Date.now()) {
   return st.items.filter((x) => !x.sentAt && x.at <= now).sort((a, b) => a.at - b.at);
+}
+
+/**
+ * **早就过了、还一直没发出去的**（该直接丢掉，别再重试）。
+ *
+ * ⚠️⚠️⚠️ 2026-10-08 加（用户看着那 12 条 9 月的提醒问：
+ *    「**真人的都是已经过去的事情，为什么不会自动删除**」）。
+ *
+ * 根因在 `index.js` 那个 tick 里：它靠一个**内存** Map 记"试了多久"
+ * （`fails: id → {n, since}`）+ `giveUpMs`（默认 2 小时）决定什么时候放弃。
+ * 可内存态**一重启就归零** —— 机器人本来就每天都要重启几次
+ * （2026-10-07 那晚我自己就重启了十几次）⇒ 那 2 小时**永远等不到**
+ * ⇒ 发不出去的提醒**永远挂在那儿** ✗✗（9 月定的一直躺到 10 月）
+ *
+ * ⇒ 换一条**跟重启无关**的判据：**看提醒自己到点多久了**。
+ *    到点超过 `staleMs`（默认 24 小时）还没发出去 ⇒ 直接当"已经没意义了"丢掉 ✓
+ *    —— 提醒的价值全在"到点说出来"，隔了一天的提醒发出去反而是打扰。
+ *
+ * @param {number} before 到点早于这个时刻的就算过期
+ */
+export function stale(before = Date.now()) {
+  return st.items
+    .filter((x) => !x.sentAt && Number(x.at) > 0 && Number(x.at) <= before)
+    .sort((a, b) => a.at - b.at);
 }
 
 /** 标成"发过了" */

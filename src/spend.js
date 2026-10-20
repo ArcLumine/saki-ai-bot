@@ -21,7 +21,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 // ⚠️ 2026-09-28：为了账本那段里「余额不够是提醒 <主人> 去充值」能填成真称呼。
 //    那一行以前是**字面量占位符、原样发给了模型**（尖括号对模型就是"占位符"信号）。
@@ -34,7 +34,7 @@ import { callOwner } from './persona.js';
 //    又不能污染真账本，所以要能让它指向临时文件。
 const FILE = process.env.QQBOT_SPEND_FILE
   ? join(ROOT, process.env.QQBOT_SPEND_FILE)
-  : join(ROOT, 'state', 'spend.json');
+  : join(stateDir(), 'spend.json');
 
 /** 价格表：元 / 百万 token。peak = 高峰价，off = 空闲价（高峰的一半） */
 const PRICES = {
@@ -113,7 +113,7 @@ try {
   };
   consider(join(ROOT, 'package.json'));
   consider(join(ROOT, 'src'));
-  const dir = join(ROOT, 'state');
+  const dir = join(stateDir());
   if (existsSync(dir)) for (const f of readdirSync(dir)) consider(join(dir, f));
   if (earliest) autoEpochDay = dayKey(new Date(earliest));
 } catch (e) {
@@ -183,7 +183,7 @@ function applyLedgerEpoch() {
  */
 const BASE_FILE = process.env.QQBOT_SPEND_BASE
   ? join(ROOT, process.env.QQBOT_SPEND_BASE)
-  : join(ROOT, 'state', 'spend-baseline.json');
+  : join(stateDir(), 'spend-baseline.json');
 let baseline = {};
 try {
   if (existsSync(BASE_FILE)) baseline = JSON.parse(readFileSync(BASE_FILE, 'utf8')) ?? {};
@@ -996,10 +996,31 @@ export function looksLikeSpendQuestion(text) {
   // 「赚/工资/收入」类
   const earn = /(赚|挣|工资|薪水|收入|进账|入账|利润|净赚|到手|薪资)/.test(t);
   // 「花/成本/用量」类
-  const spend = /(花|成本|开销|开支|用掉|消耗|用量|token|余额)/i.test(t);
+  //
+  // ⚠️⚠️ 2026-10-07 修（用户截图：「**为什么这个会触发查账**」）：
+  //    那句话是「给你看看我进服务器**花多少时间**」——
+  //    裸的 `花` 命中 + `ask` 里的 `多少` 命中 ⇒ 被当成"问花了多少钱" ⇒
+  //    两个号当场各报了一遍账（「爱音这个月花掉 42.37 元…」「101元，这月花的…」）✗✗
+  //
+  //    ⇒ 「花时间 / 花功夫 / 花心思 / 花精力」这种**跟钱没关系**的用法要排掉。
+  //    ⚠️ 只排"花 + 时间类词"这一种形态：「花多少钱」「花了多少」「花销」照旧命中 ✓
+  // ⚠️⚠️ 2026-10-15 修（用户截图：他在群里说「**能看见天花板**」，她当场报了一遍这个月的账：
+  //    「本月花了 196 元，调用 20159 次、331828334 token。上个月花 128 元，工资 12804 元」）：
+  //    **真因是两个都很宽的判据叠在一起**，跟"钱"一个字关系都没有：
+  //      · 裸 `花` 命中了「天**花**板」
+  //      · `ask` 里的裸 `看` 命中了「能**看**见」
+  //    ⇒ 于是被判成"在问这个月花了多少"，**整条聊天回复被顶掉**、直接甩出一段账单 ✗
+  //    ⇒ 现在：① 「花」后面**必须是钱的语境**（钱/费/销/掉/了/在/过/的/得/多少/几）——
+  //              「天花板」「烟花」「花里胡哨」都不再命中 ✓
+  //            ② `ask` 里**去掉裸 `看`** —— 真问账那句里必然还有
+  //              「多少 / 花了 / 余额 / 今天 / 这个月」其中一个 ✓
+  const spendTimeish = /花\s*(多少|了|点)?\s*(时间|功夫|心思|精力|力气|心血)/.test(t);
+  const spend =
+    !spendTimeish &&
+    /(花(钱|费|销|掉|了|在|过|的|得|多少|几)|成本|开销|开支|用掉|消耗|用量|token|余额)/i.test(t);
   if (!earn && !spend) return null;
 
-  const ask = /(多少|几|查|看|统计|报|说|告诉|今天|昨天|本月|这个月|这周|上周)/.test(t);
+  const ask = /(多少|几|查|统计|报|说|告诉|今天|昨天|本月|这个月|这周|上周)/.test(t);
   if (!ask) return null;
 
   // ⚠️ 默认「这个月」（用户 2026-09-13：「没说范围，默认回答是这个月」）
@@ -1274,7 +1295,44 @@ export function spendStatus() {
     thisMonth: monthStats(),
     todaySalary: salaryOf(dayStats()),
     monthSalary: salaryOf(monthStats()),
+    allTime: allTimeStats(),
     peakNow: isPeak(),
     file: FILE,
   };
+}
+
+/**
+ * **从有记录以来的总计**（2026-10-03 加，给「入职联动」用）。
+ *
+ * 用户要求：「可以和问工资一样被问到时加一点感想，还可以和工资联动」——
+ * 她 2026-09-10 入职，那"这段时间一共花掉多少 = 她挣了多少"就是个有底气的数字。
+ *
+ * ⚠️⚠️ **不能简单累加 `state.days`** —— 起始账（`spend-baseline.json`）那部分
+ *    是由 `monthStats()` 按天摊进去的 ⇒ 这里**逐月调 `monthStats` 再累加**，
+ *    保证和"月度工资单"是同一个口径（口径只允许有一处实现，别在这儿重算）。
+ * ⚠️ 账本是从 **2026-09-13** 开始记的（比入职晚 3 天），所以 `from` 可能是 09-13 ——
+ *    调用方**别把它当"入职日期"**用（入职日是写死在人设里的 09-10）。
+ */
+export function allTimeStats() {
+  const months = new Set([
+    ...Object.keys(state.days ?? {}).map((k) => String(k).slice(0, 7)),
+    ...Object.keys(baseline ?? {}),
+  ]);
+  const acc = { from: '', to: '', days: 0, calls: 0, cost: 0, months: 0, salary: 0 };
+  for (const m of [...months].sort()) {
+    let s;
+    try {
+      s = monthStats(m);
+    } catch {
+      continue;
+    }
+    acc.calls += Number(s.calls) || 0;
+    acc.cost += Number(s.cost) || 0;
+    acc.days += Number(s.days) || 0;
+    acc.months++;
+    if (!acc.from) acc.from = m;
+    acc.to = m;
+  }
+  acc.salary = acc.cost * SALARY_MULTIPLIER;
+  return acc;
 }

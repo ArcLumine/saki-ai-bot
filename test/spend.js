@@ -200,9 +200,14 @@ console.log('\n【★★】直接 fetch 那条路**真的**会记账（端到端
 {
   const { createServer } = await import('node:http');
   const srv = createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
+    const __bodyChunks = [];
+    req.on('data', (c) => __bodyChunks.push(c));
     req.on('end', () => {
+      // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+      //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+      //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+      //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+      const body = Buffer.concat(__bodyChunks).toString('utf8');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -270,6 +275,31 @@ console.log('\n【★★】报账那条路必须「记一笔对话」（<主人>
   const j = botSrc.indexOf('looksLikeVideoQuestion');
   const seg2 = botSrc.slice(j, j + 3000);
   check(/touchConversation\(event\)/.test(seg2), '★★ B站那条提前 return 的路也补了 `touchConversation`');
+}
+
+// ⚠️⚠️ 2026-10-15 加（用户截图：他在群里说「**能看见天花板**」，她当场报了一遍这个月的账：
+//    「本月花了 196 元，调用 20159 次、331828334 token。上个月花 128 元，工资 12804 元」）——
+//    `looksLikeSpendQuestion` 里**两个很宽的判据叠在一起**：
+//      · 裸 `花` 命中了「天**花**板」
+//      · `ask` 里的裸 `看` 命中了「能**看**见」
+//    ⇒ 判成"在问这个月花了多少"，**整条聊天回复被顶掉**、直接甩出一段账单 ✗
+//    修法：`花` 后面必须是钱的语境；`ask` 去掉裸 `看` ✓ 这一节把两头都钉住。
+console.log('\n【★】★★ 「能看见天花板」不许被当成问账（"花"和"看"都别乱认）');
+{
+  for (const q of ['能看见天花板', '今晚看烟花', '你这花里胡哨的', '看看这个']) {
+    check(spend.looksLikeSpendQuestion(q) === null, `「${q}」不算问账`);
+  }
+  // 反过来：**真问账的照旧要认出来**（收紧不能收过头）
+  for (const [q, type] of [
+    ['这个月花了多少钱', 'spend'],
+    ['花了多少了', 'spend'],
+    ['你这月花费多少', 'spend'],
+    ['看一下这个月花了多少', 'spend'],
+    ['余额还有多少', 'spend'],
+    ['你工资多少', 'earn'],
+  ]) {
+    check(spend.looksLikeSpendQuestion(q)?.type === type, `「${q}」照旧认出来（${type}）`);
+  }
 }
 
 cleanup();

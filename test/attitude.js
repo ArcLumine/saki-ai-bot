@@ -6,30 +6,28 @@
  */
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import yaml from 'js-yaml';
+import { configWithOnebot } from './_config-base.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const CFG_REL = 'logs/__test-attitude.yml';
 const LLM_PORT = 39802;
 const WS_PORT = 39801;
 const TOKEN = 'att-token';
 const BOT_QQ = '10000002';
 const GROUP = '200000001';
 const OWNER = '10000001';
-// ⚠️ 2026-09-28：主人在提示词里**叫什么**是从 `identity.address.owner` 填进来的，
-//    所以断言也不能写死名字 —— 用户改称呼，这里跟着变（`test/owner-term.js` 盯另一头：
-//    占位符绝不残留）。`OWNER` 仍然只是 QQ 号。
-const { callOwner } = await import('../src/persona.js');
-const OWNER_NAME = callOwner() || '主人';
 const ADMIN = '10000005';
 const MEMBER = '30003';
-// ⚠️ 2026-10-04：`say()` 里非主人一律给 nickname='路人'，断言身份块格式时要用它。
 const MEMBER_NAME = '路人';
 
 let failures = 0;
-const check = (ok, label, extra = '') => {
-  console.log(`  ${ok ? '✅' : '❌'} ${label}${ok || !extra ? '' : `\n      ${extra}`}`);
+const check = (ok, label) => {
+  console.log(`  ${ok ? '✅' : '❌'} ${label}`);
   if (!ok) failures++;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -37,9 +35,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const probes = [];
 
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     const parsed = JSON.parse(body || '{}');
     const sys = parsed.messages?.find((m) => m.role === 'system')?.content ?? '';
     const user = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '';
@@ -128,7 +131,7 @@ function say(userId, role, text, id) {
       user_id: userId,
       self_id: BOT_QQ,
       time: Math.floor(Date.now() / 1000),
-      sender: { user_id: userId, nickname: role === 'owner' ? OWNER_NAME : role === 'admin' ? '管理' : '路人', role },
+      sender: { user_id: userId, nickname: role === 'owner' ? '<主人>' : role === 'admin' ? '管理' : '路人', role },
       message: [
         { type: 'at', data: { qq: BOT_QQ } },
         { type: 'text', data: { text: ` ${text}` } },
@@ -151,11 +154,71 @@ async function waitFor(fn, timeout = 20000) {
 //    取最后一个的话断言「标明对方是管理员」就会失败（真实踩过）。
 
 const isPresearch = (p) => /这句话要不要上网查|该搜什么/.test(p.sys);
-const probeOf = (kw) => [...probes].reverse().find((p) => !isPresearch(p) && p.user.includes(kw));
+// ⚠️⚠️ 2026-10-02 修（用户让查「标明对方是管理员」为什么一直挂）：
+//    **必须只认"主聊天请求"**。原来只要 `user` 里含关键词就收进来，于是会取到
+//    **归属核对**（`checkAttribution`）那一条 —— 它的 user 里带着**整段群聊记录**
+//    （当然含那个关键词），而 sys 是核对提示词、**没有身份段** ⇒ 断言必挂 ✗
+//    实测：撤掉当天所有代码改动后它照样挂，就是这条一直红。
+//    ✅ 判据用主聊天**独有**的那句身份段：`attitudeFor()` 是**无条件**注入的
+//      （`bot.js` 里 `if (event) parts.push('\n' + this.attitudeFor(...))`），
+//      而预搜索 / 说话判断 / 归属核对三条都没有它。
+//    ⚠️ 这就是本项目 AGENTS 里那条教训：「`waitFor` 的条件必须指向**我要的那一条请求**」
+//      —— 用绝对阈值或模糊包含都会取到上一步迟到的请求。
+const probeOf = (kw) =>
+  [...probes].reverse().find(
+    (p) => !isPresearch(p) && p.sys.includes('现在跟你说话的是') && p.user.includes(kw),
+  );
 
 let bot = null;
 
 async function main() {
+  const cfg = yaml.load(configWithOnebot()) ?? {};
+  cfg.onebot = { ...(cfg.onebot ?? {}), mode: 'forward', url: `ws://127.0.0.1:${WS_PORT}`, accessToken: TOKEN };
+  cfg.llm = { ...(cfg.llm ?? {}), baseURL: `http://127.0.0.1:${LLM_PORT}/v1`, apiKey: 'test-attitude-key' };
+  cfg.botQQ = BOT_QQ;
+  cfg.ownerQQ = OWNER;
+  cfg.trigger = {
+    ...(cfg.trigger ?? {}),
+    privateChat: true,
+    groupChat: true,
+    allowGroups: [GROUP],
+    allowPrivateUsers: [OWNER, ADMIN, MEMBER],
+    requireAtInGroup: true,
+    respondTo: 3,
+    groupRespondTo: {},
+    cooldownMs: 0,
+  };
+  cfg.webui = { ...(cfg.webui ?? {}), enable: false };
+  cfg.chat = { ...(cfg.chat ?? {}), enable: false };
+  cfg.groupParams ??= {};
+  delete cfg.groupParams[GROUP];
+  mkdirSync(join(ROOT, 'logs'), { recursive: true });
+  writeFileSync(join(ROOT, CFG_REL), yaml.dump(cfg, { lineWidth: 120, noRefs: true }), 'utf8');
+
+  // ⚠️⚠️ 2026-10-06 加：**开跑前清掉本套件的隔离状态**（查了很久才定位到这一层）。
+  //
+  //    症状：【5】「私聊非服主 → 按群友处理」约 **1/5** 的概率挂，
+  //    而且一挂就是 **46 秒**（= 等满 40 秒），报的是"没等到那条探针"。
+  //    ⚠️ 但 bot 自己的日志里明明有 `[私聊30003] 拼提示词 … 已回复 3 字`
+  //      —— **她回复了、请求发出去了**，假模型的 `probes` 里却没有那一条。
+  //
+  //    根因：`run-all.js` 给套件注入的隔离文件名是**固定的**
+  //    （`logs/__run-attitude-recent.json`，实测已经攒到 24 KB），
+  //    ⇒ **`recent` 的历史跨运行累积**，上一次跑留下的上下文会改变下一次
+  //      聊天请求的构造，行为就飘。
+  //    实测：**清掉之后连跑 10 次全过**（7.1~8.8 秒）；不清的时候 6 次里挂 2 次。
+  //
+  //    ⚠️ 只在 run-all 跑的时候才删（那几个 env 由它注入）——
+  //      **单跑 `node test/attitude.js` 时 env 是空的，这里什么都不会删**，
+  //      所以绝不会碰到真实的 `state/*.json`。
+  for (const k of ['QQBOT_RECENT_FILE', 'QQBOT_NAMES_FILE', 'QQBOT_LIFE_FILE']) {
+    const f = process.env[k];
+    if (!f) continue;
+    try {
+      rmSync(join(ROOT, f), { force: true });
+    } catch {}
+  }
+
   await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
@@ -163,7 +226,7 @@ async function main() {
     cwd: ROOT,
     env: {
       ...process.env,
-      QQBOT_CONFIG: 'config.attitude-test.yml',
+      QQBOT_CONFIG: CFG_REL,
       // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
       NO_PROXY: '127.0.0.1,localhost,::1',
@@ -181,7 +244,7 @@ async function main() {
   await waitFor(() => !!probeOf('把群的回复关掉'), 20000);
   const pOwner = probeOf('把群的回复关掉');
   check(!!pOwner, '收到服主的消息');
-  check(!!pOwner?.sys.includes(`${OWNER_NAME} 本人`), '系统提示词标明了对方是主人本人');
+  check(!!pOwner?.sys.includes('## 当前对话者：**') && pOwner.sys.includes('本人**'), '系统提示词标明了对方是服主本人');
   check(!!pOwner?.sys.includes('同级口吻'), '要求用同级口吻');
   check(!!pOwner?.sys.includes('不用敬语'), '明确说了不用敬语');
   check(!!pOwner?.sys.includes('不是他的客服'), '明确说明对服主不是客服身份');
@@ -193,20 +256,28 @@ async function main() {
   };
   const ownerInjected = injected(pOwner);
   check(!!ownerInjected, '身份段落存在');
-  check(ownerInjected.includes(`${OWNER_NAME} 本人`), '身份段落明确了对方就是主人本人');
-  // ⚠️ 2026-09-28：称呼规则从「平时叫 X、服务器事务才叫服主」**统一成只有一种**。
-  //    下面两条盯的是"只有一种叫法 + 不再出现旧叫法"，别再写死具体措辞。
-  check(
-    ownerInjected.includes('任何场合都叫') && ownerInjected.includes(`叫「${OWNER_NAME}」`),
-    '身份段落交代了称呼规则（任何场合都叫同一个名字）',
-  );
-  check(!ownerInjected.includes('服主'), '身份段落不再出现旧叫法「服主」');
-  check(!ownerInjected.includes('<主人>'), '身份段落没有占位符残留（会被模型照着吐出来）');
+  check(/当前对话者：\*\*.+ 本人\*\*/.test(ownerInjected), '身份段落明确了对方就是服主本人');
+  check(/任何场合都叫「.+」/.test(ownerInjected), '身份段落交代了统一称呼规则');
+  check(ownerInjected.includes('服务器事务'), '身份段落限定了「服主」这个称呼的使用场合');
   check(!ownerInjected.includes('可以端着一点'), '身份段落没有套用「允许端着」那套');
   check(ownerInjected.includes('不要端着'), '身份段落明确说了不要端着');
+  check(ownerInjected.includes('不要对他说「你找或者'), '身份段落禁止让服主去找自己');
+  // ⚠️⚠️ 2026-10-13 加（用户截图：他当面问「你和我什么关系」，
+  //    她答「……老板跟员工呗，你还想是什么呀」）——
+  //    材料是给了的（`relationship.md` 明写"你不是他的客服，是他的助手"），
+  //    但她按"客服 + 领工资 + 服主雇我"算成了**雇佣关系**。
+  //    ⇒ 现在提示词最末尾钉一条**正面硬口径**（负面规则压不住那股惯性）✓
   check(
-    ownerInjected.includes('不要对他说') && ownerInjected.includes(OWNER_NAME),
-    '身份段落禁止让主人去找自己',
+    !!pOwner?.sys.includes('他不是你老板，你也不是他雇来的员工'),
+    '★★ 有"他不是你老板 / 你不是他雇来的"这条硬口径',
+  );
+  check(
+    !!pOwner?.sys.includes('「老板跟员工」「上下级」「同事关系」「给你打工的」这类话'),
+    '★★ 明确点名了「老板跟员工 / 给你打工的」这些错说法',
+  );
+  check(
+    !!pOwner?.sys.includes('不承认亲近'),
+    '★ 保留了人设（可以嘴硬，但不能把关系说低）',
   );
 
   console.log('\n[2] 普通群友说话 → 应该允许端着、可以怼');
@@ -223,6 +294,9 @@ async function main() {
   check(!pMember?.sys.includes('他自己就是'), '对群友没有套用服主那套');
   check(!pMember?.sys.includes('你不是他的客服，是他的助手'), '对群友没有套用「你是他助手」那套');
   check(!pMember?.sys.includes('比朋友近，但没到那一步'), '对群友没有套用「恋人未满」那套');
+  // ⚠️ 2026-10-13：那条"不许说成老板跟员工"的口径**只能对服主生效** ——
+  //    对群友注入的话，她会对谁都摆出"自己人"的姿态（这条隔离一直是本套件盯的）
+  check(!pMember?.sys.includes('他不是你老板'), '★ 对群友不注入"关系口径"那段（只对服主）');
 
   console.log('\n[3] 管理员 → 中间档');
   say(ADMIN, 'admin', '外地铁站那边有个问题', 4003);
@@ -264,21 +338,50 @@ async function main() {
   //    ✅ 条件必须**指向我要的那一条**：等关键词出现。
   //    ⚠️ 而且不能只看"数量变多" —— 上一步迟到的探针（说话判断/归属核对）
   //       也会让数量变多，同样会提前放开。
-  await waitFor(() => !!probeOf('在吗，问个事'), 20000);
-  const pPrivate = probeOf('在吗，问个事');
-  // ⚠️⚠️ 2026-10-04 这几条断言**跟着 `attitudeFor()` 的改动一起改的**。
+  // ⚠️⚠️ 2026-10-06 重写这一段的判据（它一直偶发假失败，根因就在判据本身）：
   //
-  //  原来这里断言「私聊里的陌生人按**群友**对待」—— 那是把私聊说成群聊的根源：
-  //  `speakerRole()` 私聊恒返回 `'member'` ⇒ 私聊拿到的是「普通群友」那段。
-  //  真实事故：她在私聊里脑补「这是你自己另一个号发的」，还拿人设怼他。
+  //    原来等的是 `probeOf('在吗，问个事')`，而 `probeOf` 的筛选条件是
+  //    「非预搜索 **且 sys 含身份段「现在跟你说话的是」** 且 user 含关键词」。
+  //    问题是 —— **「没等到探针」和「探针来了但身份段没注入」都返回 undefined**，
+  //    于是两种情况**报的是同一句话**（「私聊里的陌生人按群友对待」✗），
+  //    把排查方向死死带偏（我照着"态度错了"查了半天，翻 bot 日志才发现
+  //    `[私聊30003] 拼提示词 … 已回复 3 字` —— 她明明回复了、请求明明发出去了）。
+  //    ⇒ **把"含身份段"从筛选条件降级成断言**：
+  //      · 先只按「非预搜索 + user 含关键词」找 → 找不到 = 时序问题，报第一条
+  //       · 找到了再分别断言「按群友对待」「身份段注入了」→ 那才是真的态度/注入 bug
+  //    ⚠️ 这正是 AGENTS 里那条教训的又一例：「没等到」和「没这个特征」
+  //      必须能用断言区分开，否则排查方向是错的。
+  const findPrivate = () =>
+    [...probes].reverse().find((p) => !isPresearch(p) && p.user.includes('问个事'));
+  await waitFor(() => !!findPrivate(), 40000);
+  const pPrivate = findPrivate();
+  check(!!pPrivate, '★ 等到了私聊那条主聊天探针（没等到 = 时序/没触发，不是态度错了）');
+  if (!pPrivate) {
+    // ⚠️⚠️ 2026-10-06 加**失败时把探针摊开**（成功时一个字都不打印，别当噪音删掉）。
+    //    这条偶发（约 1/5）挂的时候，bot 自己的日志里明明有
+    //      `[私聊30003] 拼提示词 6 ms（53071 字）` → `已回复 3 字`
+    //    —— **她回复了、请求发出去了**，可假模型的 `probes` 里就是找不到那一条。
+    //    到底是"请求没到假模型"还是"user 里没有那段原文"，只靠读代码猜不出来
+    //    （今天为了这个翻遍了 bot 日志）。⇒ 失败时把**收到的探针**和**请求总数**
+    //    直接打出来，一眼定性。
+    console.log(`    假模型一共收到 ${probes.length} 条请求，最后 8 条：`);
+    for (const p of probes.slice(-8)) {
+      console.log(
+        `      · 身份段=${p.sys.includes('现在跟你说话的是')} 预搜索=${isPresearch(p)} ` +
+          `sys=「${String(p.sys).replace(/\s+/g, ' ').slice(0, 40)}」 ` +
+          `user=「${String(p.user).replace(/\s+/g, ' ').slice(0, 60)}」`,
+      );
+    }
+  }
+  // ⚠️⚠️ 2026-10-04 这几条断言**跟着 `attitudeFor()` 的改动一起改的**（提交 0948e7c）。
+  //
+  //  原来断言的是「私聊里的陌生人按『普通群友』对待」—— 而 `speakerRole()` 私聊恒返回 'member' ⇒
+  //  私聊拿到的是**群聊**那段，于是她把私聊说成群聊的来源（用户另一个号，设定给他测的）。
   //  现在私聊有**自己的一档**：身份只认当前事件的 `user_id`，且明确「只有一个发件人」。
-  // ⚠️⚠️ 2026-10-04：断言也跟着「统一格式」改了。
-  //  以前身份块写的是 `昵称（QQ 号）`（**全角**），现在全项目统一 `昵称(QQ号)`（半角），
-  //  跟群上下文/引用行完全一致 —— 所以这里不能再找 `QQ 30001` 那种字样，
-  //  要找统一的 `昵称(QQ号)` 形态。
+  // ⚠️ 断言也跟着统一成 `昵称(QQ号)` 格式了（提交 6f689aa）—— **不能再找 `QQ 30001` 那种字样**。
   check(
     !!pPrivate?.sys.includes(`${MEMBER_NAME}(${MEMBER})`),
-    '私聊身份块用统一格式 `昵称(QQ号)`（模型不用猜他是谁）',
+    '私聊身份块用统一格式 `昵称(QQ号)`（模型不用猜谁是主）',
   );
   check(
     !pPrivate?.sys.includes(`${MEMBER_NAME}（QQ ${MEMBER}）`),
@@ -286,22 +389,22 @@ async function main() {
   );
   check(
     !!pPrivate?.sys.includes('私聊里只有他一个人'),
-    '私聊段明说只有一个发件人（不许脑补出第二个号）',
+    '私聊段声明只有一个发件人（不许脑补出第二个号）',
   );
   check(
     !!pPrivate?.sys.includes('## 现在跟你私聊的是：'),
-    '私聊用的是私聊自己的身份段（不是群聊那段）',
+    '私聊用的是『私聊自己的身份段』（不是群聊那段）',
   );
-  // ⚠️ 只查**身份段本身**，别查整个 sys —— 人设/知识库里本来就有
-  //    「对普通群友的规矩」这类文字（那是她的说话方式，与当前场景无关）。
+  // ⚠️ 只查**身份段本身**，别查整个 sys —— 人设/知识库里都有「朋友」这两个字，
+  //    对普通群友的规矩属于她的说话方式，与当前场景无关。
   const privIdBlock = (pPrivate?.sys ?? '').split('## 现在跟你私聊的是：')[1] ?? '';
   check(
     !privIdBlock.slice(0, 200).includes('普通群友'),
-    '私聊身份段没把对方说成「普通群友」',
+    '私聊身份块没把对面说成『普通群友』',
   );
   check(
     !!pPrivate?.sys.includes('永远要给解决方案'),
-    '陌生人私聊的语气要求没丢（仍可端着、必须给方案）',
+    '陌生人私聊的态度要求没丢（仍可怼、必须给方案）',
   );
 }
 
@@ -311,6 +414,9 @@ async function cleanup() {
   } catch {}
   try {
     sock?.close();
+  } catch {}
+  try {
+    rmSync(join(ROOT, CFG_REL), { force: true });
   } catch {}
   await new Promise((r) => wss.close(r));
   await new Promise((r) => llmServer.close(r));
@@ -326,5 +432,3 @@ main()
     console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
     process.exit(failures === 0 ? 0 : 1);
   });
-
-

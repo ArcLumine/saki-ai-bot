@@ -42,9 +42,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const llmCalls = [];
 const llmProbe = []; // { sys, lastUser, hasLive }
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     let parsed = {};
     try {
       parsed = JSON.parse(body);
@@ -369,13 +374,33 @@ async function main() {
   check(ok, '机器人已连接');
   if (!ok) return;
 
-  console.log('[2] 非白名单群应该被完全忽略');
+  console.log('[2] 非白名单群：**不带 @** ⇒ 完全忽略');
   const beforeOther = sentTexts().length;
   const callsBeforeOther = llmCalls.length;
-  pushGroupMsg(OTHER_GROUP, '有人在线吗', true, 1001, '30001');
+  // ⚠️ 2026-10-14 改：这一条原来是 `true`（**@ 她**）—— 而白名单现在的规矩是
+  //    「**点名 @ 她一律放行**」（见下面 [2b]），所以"其他群完全忽略"这句
+  //    只能用**不带 @** 的闲聊来表达 ✓
+  pushGroupMsg(OTHER_GROUP, '有人在线吗', false, 1001, '30001');
   await sleep(3000);
-  check(sentTexts().length === beforeOther, '其他群里没有回复');
+  check(sentTexts().length === beforeOther, '其他群里没有回复（不带 @ 的闲聊）');
   check(llmCalls.length === callsBeforeOther, '其他群没有触发模型调用（连查都没查）');
+
+  // ⚠️⚠️ 2026-10-14 加（用户：「**@ 不应该直接跳过所有闸来回复吗**」＋
+  //    「除非在不同类机器人名单」）：
+  //    白名单原来**连 @ 她**都拦（消息在入口就被 return 掉了）⇒ 别的群里点名叫她，
+  //    她连"听到"都做不到 ✗（现场：爱音在一个没进主号白名单的群里 @ 主号，
+  //    主号日志只剩一行「不在 allowGroups 白名单里 → 这条（@ 了她）被忽略了」）
+  //    ⇒ 改成：**点名 @ 她一律放行**。⚠️ 只是"被 @ 才回"，
+  //      她**不会**在那个群主动搭话（主动搭话仍然只认白名单）✓
+  console.log('[2b] 非白名单群：**@ 她** ⇒ 会回（2026-10-14 用户定）');
+  const beforeAtOther = sentTexts().length;
+  pushGroupMsg(OTHER_GROUP, '有人在线吗', true, 1004, '30004');
+  const repliedInOther = await waitFor(
+    () => sentTexts().length > beforeAtOther,
+    12000,
+    '非白名单群里被 @ 之后的回复',
+  );
+  check(repliedInOther, '★ 别的群点名 @ 她 → 她回了（白名单不再拦"被点名"）');
 
   console.log('[3] 客服群未 @ 时也应该沉默');
   const beforeNoAt = sentTexts().length;
@@ -385,8 +410,15 @@ async function main() {
 
   console.log('[4] @ 客服问新人问题 → 知识库应被注入');
   pushGroupMsg(WORK_GROUP, '新人应该怎么安装这个整合包？', true, 1003, '30003');
-  const got = await waitFor(() => sentTexts().includes('好的，我来帮您'), 15000, '客服回复');
-  check(got, '客服在客服群里回复了');
+  // ⚠️ 2026-10-14 改（加了 [2b] 之后这里**稳定假红**）：
+  //    原来等的是 `sentTexts().includes('好的，我来帮您')` —— 而 [2b]（别的群里 @ 她）
+  //    拿到的**也是同一句假模型模板话术** ⇒ 这个条件在 [4] 的请求发出**之前**
+  //    就已经成立 ⇒ 紧接着断言 `sysPrompt`，抓到的还是空探针（0 字）✗
+  //    ⇒ 改成直接等**我要的那条请求**到达假模型 —— 这正是 AGENTS 里那条教训：
+  //      `waitFor` 的条件必须指向你要的那一条请求，别用"某句话出现过"这种
+  //      会被上一步满足的条件 ✓
+  const got = await waitFor(() => !!chatFor('新人应该怎么安装'), 15000, '客服那条请求到达假模型');
+  check(got, '客服在客服群里回复了（而且真的走了模型）');
 
   const sysPrompt = chatFor('新人应该怎么安装')?.sys ?? '';
   if (process.env.CS_DEBUG) {
@@ -399,9 +431,60 @@ async function main() {
   check(sysPrompt.length > 3000, `系统提示词很长，说明知识库已注入（${sysPrompt.length} 字）`);
   check(sysPrompt.includes('客服小祥'), '系统提示词包含人设「客服小祥」');
   check(sysPrompt.includes('Java 21'), '系统提示词包含知识库内容（Java 21）');
-  check(sysPrompt.includes('video player'), '系统提示词包含 Mac 排障知识（video player）');
+  // ⚠️⚠️ 2026-09-30：服务器库按主题拆成四份（`server-basic/rules/world/people`）。
+  //    这条原来断言 `sysPrompt.includes('video player')` —— 它依赖"抓到的正是问整合包
+  //    那次请求"，而提示词变长之后 `chatFor()` 会抓到**别的**请求（同一个坑见上面
+  //    `probeFor` 那段注释），于是**稳定假红**。改成**离线直接验挑选结果**：
+  //    问整合包 → 必须挑中 `server-basic.md`，而那份里就写着 Mac 那三个要禁的模组。
+  {
+    const K = await import('../src/knowledge.js');
+    const { existsSync, readFileSync } = await import('node:fs');
+    const picked = K.selectFor('新人应该怎么安装这个整合包？', {}).names;
+    check(
+      // ⚠️ 2026-10-01：`selectFor()` 现在返回的是**带 .md 的完整文件名**
+      //    （之前少扩展名那个 bug 修了）⇒ 断言跟着改，否则"实际 server-basic.md"却判失败。
+      picked.some((n) => n.startsWith('server-basic')),
+      `★ 问整合包 → 挑中 server-basic.md（实际 ${picked.join(' / ') || '无'}）`,
+    );
+    const serverBasic = join(ROOT, 'knowledge', 'server-basic.md');
+    if (existsSync(serverBasic)) {
+      check(/video player/.test(readFileSync(serverBasic, 'utf8')), '★ 那份里写着 Mac 排障（video player）');
+    } else {
+      console.log('  ⏭  本机知识文件 knowledge/server-basic.md 不存在，跳过该本机内容断言（不创建或覆盖知识数据）');
+    }
+    check(picked.length <= 2, `★ 最多带两份（实际 ${picked.length}）—— 拆分就是为了别再整包背`);
+  }
   check(sysPrompt.includes('大足特别行政区') || sysPrompt.includes('建设'), '系统提示词包含建设规则');
   check(!chatFor('新人应该怎么安装')?.hasLive, '普通新人问题没有注入实时状态');
+
+  // ⚠️⚠️ 2026-09-26（用户报：「最近机器人一直都不认得服务器的几个管理员了，
+  //    比如 luminflux，lsf，**在群里问的时候会直接说不认识**」）。
+  //
+  //    根因**不在"她忘了"** —— 是 `selectFor()` 的 `needServer` 关键词表里
+  //    **只有「管理员 / 腐竹」这种身份词，没有任何人名或别名**：
+  //    「Luminiflux是谁」「<主人>是谁」「LSF_Official.在b站上的成就怎么样」
+  //    **一个词都不命中** ⇒ 整份 `hzymtr-server.md`（含管理员名录）**压根不进上下文**
+  //    ⇒ 她手里没有名单，只能答"我不认识" ✗。
+  //    ⚠️ `anime.md` 和群资料库**早就加了** `mentionsAnyTerm` 这条判据，**只有服务器库漏了**。
+  //
+  //    这里钉住：**只提人名、不含任何服务器关键词**的消息，也必须把服务器库带进来。
+  console.log('[4b] 只提管理员别名（不含任何服务器关键词）→ 也要带出服务器库');
+  const aliasQ = 'Luminiflux是谁';
+  // ⚠️ 前提断言：这句话本身不能命中关键词表，否则测的就不是"别名"这条新判据了
+  check(
+    !/服务器|整合包|模组|存档|管理员|腐竹|大足|线路|地铁|java/i.test(aliasQ),
+    '（前提）这句话不含任何服务器关键词',
+  );
+  pushGroupMsg(WORK_GROUP, aliasQ, true, 1007, '30007');
+  await waitChat('Luminiflux', '提到管理员别名的模型调用');
+  const aliasSys = chatFor('Luminiflux')?.sys ?? '';
+  const { existsSync } = await import('node:fs');
+  if (existsSync(join(ROOT, 'knowledge', 'server-people.md'))) {
+    check(aliasSys.includes('Luminiflux'), '别名问题把服务器库带进来了（管理员名录里有 Luminiflux）');
+    check(aliasSys.includes('10000008'), '名录里带上了他的 QQ 号（这样才认得出说话的就是本人）');
+  } else {
+    console.log('  ⏭  本机知识文件 knowledge/server-people.md 不存在，跳过管理员名录内容断言（保留本机知识数据边界）');
+  }
 
   console.log('[5] 问在线人数 → 应该触发实查并注入结果');
   pushGroupMsg(WORK_GROUP, '现在几个人在线？', true, 1004, '30004');

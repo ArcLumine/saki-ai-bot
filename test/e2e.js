@@ -11,7 +11,9 @@ import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import yaml from 'js-yaml';
+import { configWithOnebot } from './_config-base.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -31,9 +33,11 @@ rmSync(join(ROOT, RECENT_FILE), { force: true });
 const LLM_PORT = 39002;
 const WS_PORT = 39001;
 const TOKEN = 'test-token';
+const TEST_API_KEY = 'sk-test-fake';
 const SELF_ID = '10001';
 const GROUP_ID = '20002';
 const USER_ID = '30003';
+const CFG_REL = `logs/__test-e2e-${process.pid}.yml`;
 
 const REPLY_ZH = '这是一条来自假模型的测试回复。';
 const REPLY_EN = 'Hello from the fake model.';
@@ -60,9 +64,12 @@ const llmCalls = [];
  */
 let streamGapMs = 0;
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', async () => {
+    // ⚠️ 2026-10-06：先把分片收成 Buffer 再一次性按 UTF-8 解码 ——`body += c`（c 是 Buffer）
+    //    会让每个 TCP 分片各自解码，中文跨分片就烂成 ��，断言 includes 中文时偶发假失败。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     let parsed = {};
     try {
       parsed = JSON.parse(body);
@@ -257,6 +264,23 @@ const sentTexts = () =>
 let bot = null;
 
 async function main() {
+  const cfg = yaml.load(configWithOnebot()) ?? {};
+  cfg.onebot = { ...(cfg.onebot ?? {}), url: `ws://127.0.0.1:${WS_PORT}`, accessToken: TOKEN };
+  cfg.llm = { ...(cfg.llm ?? {}), baseURL: `http://127.0.0.1:${LLM_PORT}/v1`, apiKey: TEST_API_KEY };
+  cfg.trigger = {
+    ...(cfg.trigger ?? {}),
+    allowGroups: [GROUP_ID],
+    allowPrivateUsers: [USER_ID],
+    requireAtInGroup: true,
+    respondTo: 3,
+    groupRespondTo: {},
+  };
+  cfg.chat = { ...(cfg.chat ?? {}), enable: false };
+  cfg.groupParams ??= {};
+  delete cfg.groupParams[GROUP_ID];
+  mkdirSync(join(ROOT, 'logs'), { recursive: true });
+  writeFileSync(join(ROOT, CFG_REL), yaml.dump(cfg, { lineWidth: 120, noRefs: true }), 'utf8');
+
   await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
   console.log(`\n假模型服务: http://127.0.0.1:${LLM_PORT}/v1`);
@@ -268,7 +292,7 @@ async function main() {
     cwd: ROOT,
     env: {
       ...process.env,
-      QQBOT_CONFIG: 'config.test.yml',
+      QQBOT_CONFIG: CFG_REL,
       // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
       NO_PROXY: '127.0.0.1,localhost,::1',
@@ -403,7 +427,7 @@ async function main() {
   );
   check(thirdCall?.body?.stream === true, '请求使用了流式模式');
   check(
-    llmCalls.every((c) => c.auth === 'Bearer sk-test-fake-key'),
+    llmCalls.every((c) => c.auth === `Bearer ${TEST_API_KEY}`),
     '模型请求携带了正确的 Authorization 头',
   );
 
@@ -415,6 +439,13 @@ async function main() {
   //    这正是 AGENTS.md 里 trap ② 那条（"上一步迟到的请求"）的同一个坑。
   //
   //    修法：**等到调用数不再变**再取样，而不是固定睡 1.5 秒碰运气。
+  // ⚠️⚠️ 2026-09-25 再修一次（上次只把下面的死等从 2500 提到 7000，不够）：
+  //    光"等调用数不再变"会**太早收工** —— 第一轮 300ms 就认定"稳了"，
+  //    可上一轮那次「settle 期间来了新消息 → 丢掉草稿重新生成」**还没开始**：
+  //    `settleMs` 默认 2500，它要 2.5 秒后才冒出来，正好落进下面「清空对话」的
+  //    统计窗口，被算成"清空对话浪费的调用" ⇒ 假红（功能没坏）。
+  //    ⇒ 必须先睡够一个 settleMs，再去做"稳定检测"。
+  await sleep(3200);
   let stable = -1;
   for (let i = 0; i < 20 && stable !== llmCalls.length; i++) {
     stable = llmCalls.length;
@@ -422,7 +453,12 @@ async function main() {
   }
   const callsBefore = llmCalls.length;
   pushGroupMessage('清空对话', 5005);
-  await sleep(2500);
+  // ⚠️ 2026-09-25：**这个死等要覆盖 settleMs**。
+    //    `bot.js` 现在"生成完之后还会再等一小段"（`chat.settleMs` 默认 2500，见那行注释），
+    //    于是她回完一条的总耗时 = 生成 + 2.5 秒 ⇒ 原来只等 2500 就断言，
+    //    会**把下一轮已经开始的调用算进来** ⇒ 这条 check 假红 ✗（不是功能坏）。
+    //    ⇒ 等够「生成 + settle + 余量」。
+    await sleep(7000);
   check(
     sentTexts().includes('清空'),
     '「清空对话」指令被识别并回复',
@@ -611,6 +647,7 @@ async function cleanup() {
   } catch {}
   await new Promise((r) => wss.close(r));
   await new Promise((r) => llmServer.close(r));
+  rmSync(join(ROOT, CFG_REL), { force: true });
 }
 
 main()

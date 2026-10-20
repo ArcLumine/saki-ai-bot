@@ -44,6 +44,8 @@ const { config } = await import('../src/config.js');
 
 const G = '200000001';
 const OTHER = '200000005';
+const OWNER = '10000001';
+config.ownerQQ = OWNER;
 const say = (groupId, name, uid, text, atMe = false) =>
   recent.remember(
     { message_type: 'group', group_id: groupId, user_id: uid, sender: { card: name } },
@@ -234,6 +236,126 @@ console.log('\n【7】★ 落盘：重启不丢上下文（2026-09-17 用户要�
   check(!/牛肉丼/.test(recent.contextText(G)), '清空后内存里确实没有了');
   recent.reload();
   check(/牛肉丼/.test(recent.contextText(G)), '★★ reload 之后又回来了（这就是"重启不丢"）');
+}
+
+console.log('\n【私聊上下文 + 时间可读性】2026-10-03 加（用户报的两个问题）');
+{
+  // ① 私聊原来**压根没有上下文**（`remember` 一句 `!== 'group' return` 挡掉了）
+  const ME = '10000001';
+  const dmEv = (text) => ({
+    message_type: 'private',
+    user_id: ME,
+    message_id: `m-${text}-${Math.random()}`,
+    message: [],
+  });
+  recent.clear(`dm:${ME}`);
+  check(
+    recent.contextText(`dm:${ME}`) === '',
+    '前置：这个私聊的桶是空的（私聊走 `dm:<QQ号>`，和群各存各的）',
+  );
+  recent.remember(dmEv('我睡了'), { text: '我睡了' });
+  const dmText = recent.contextText(`dm:${ME}`);
+  check(dmText.includes('我睡了'), '★★ 私聊的消息**进上下文了**（原来一个字都不留）');
+  check(!/我睡了/.test(recent.contextText(G)), '★★ 群里那边**看不到**私聊内容（两个桶各存各的）');
+
+  // ② 时间标注要"能读"：绝对时间 + 人话相对时间（老写法只有「N分钟前」）
+  const now = Date.now();
+  const store = recent.__storeForTest();
+  store.set(`dm:${ME}`, [
+    { name: '<主人>', userId: ME, text: '我睡了', atMe: false, time: now - 8 * 3600 * 1000 },
+    { name: '<主人>', userId: ME, text: '早', atMe: false, time: now - 60 * 1000 },
+  ]);
+  const t2 = recent.contextText(`dm:${ME}`);
+  check(
+    /\d{2}:\d{2}（8 小时前）/.test(t2),
+    '★★ 8 小时前那条标成「HH:MM（8 小时前）」（不再是「480分钟前」）',
+  );
+  check(/（刚刚）|（\d+ 分钟前）/.test(t2), '★ 1 分钟前那条标成「刚刚 / N 分钟前」');
+  check(/不是刚刚发生的/.test(t2), '★★ 跨度 ≥1 小时 → 明说"这些不是刚刚发生的，按括号里的时间理解"');
+  // ③ 跨度小的时候不许加这句（别每次都啰嗦）
+  store.set(`dm:${ME}`, [
+    { name: '<主人>', userId: ME, text: '在吗', atMe: false, time: now - 5000 },
+    { name: '<主人>', userId: ME, text: '在', atMe: false, time: now - 1000 },
+  ]);
+  check(!/不是刚刚发生的/.test(recent.contextText(`dm:${ME}`)), '★ 全是刚刚的话 → 不加那句');
+  recent.clear(`dm:${ME}`);
+}
+
+// ★★ 2026-10-05 加（用户：小豆也接入了 saki bot 之后 ——「saki 们并没有发现另一个人
+//    说话方式和自己很像，而且好像还把对面说的话当作自己说的话了」）
+console.log('\n【8】★★ 上下文里的「同款机器人」要标出来（别把它的立场当成自己的）');
+{
+  const BOTID = '10000008'; // 是der的小豆（用了同一套 saki 人设）
+  const isBot = (uid) => String(uid) === BOTID;
+  const now2 = Date.now();
+  const ME2 = '10000001';
+  recent.__storeForTest().set(G, [
+    { name: '是der的小豆', userId: BOTID, text: '想让它顶我的班啊', atMe: false, time: now2 - 3000 },
+    { name: 'Saki', userId: '__self__', self: true, text: '我倒是没意见', atMe: false, time: now2 - 2000 },
+    { name: '<主人>', userId: ME2, text: '你俩别闹', atMe: true, time: now2 - 1000 },
+  ]);
+  const t = recent.contextText(G, '', [], { isBot });
+  check(/另一个在模仿你的家伙/.test(t), '★★ 那个同款机器人那行被标出来了');
+  check(/不是你/.test(t), '★★ 而且写明「不是你」');
+  check(
+    /它的班、它的活/.test(t),
+    '★★ 最前面有一段解释：它说的「我」是它自己 —— 它的班不是你的',
+  );
+  check(/【你自己说的】/.test(t), '★ 她自己那句仍然标着「你自己说的」（两者没被搞混）');
+  // 不传 isBot 时行为**一个字都不变**（别的调用方不受影响）
+  const t2 = recent.contextText(G);
+  check(!/另一个在模仿你的家伙/.test(t2), '★ 不传 isBot → 跟以前一模一样（向后兼容）');
+  recent.clear(G);
+}
+
+console.log('\n【7】★★ 主人给的活 ⇒ 她那句回执**不进上下文**（2026-10-16 用户要求）');
+{
+  // 用户原话：「**这种指令相关的消息不要进上下文**，比如按这个来」。
+  // 判据（用户选的）：「**上游是主人**」—— 群里主人跟她说了话（多半是给活干），
+  // 她那句执行回执（「行，就按这个来，等我一下」）就不该进上下文 ✗
+  // ⚠️ 实测代价：她在群里回了这么一句，旁边的爱音把它当台词接，
+  //    追问「等我一下是等谁啊」✗（<主人> 截图，群 200000007）
+  recent.clearAll();
+  recent.rememberBot(
+    { message_type: 'group', group_id: G, user_id: OWNER, sender: { nickname: '<主人>' } },
+    '行，就按这个来，等我一下（',
+  );
+  check(!recent.contextText(G).includes('就按这个来'), '★★ 主人给的活，她那句回执不进上下文');
+
+  // ⚠️ 别一刀切：群友说话时她的回复**照旧记**
+  recent.rememberBot(
+    { message_type: 'group', group_id: G, user_id: '30001', sender: { nickname: '甲' } },
+    '这是我自己的看法。',
+  );
+  check(recent.contextText(G).includes('我自己的看法'), '★ 群友说话时她的回复照旧记（没一刀切）');
+
+  // ⚠️ 只管**群里**：私聊主人照旧记（不然她就不记得跟主人聊过什么、答应过什么了）。
+  // ⚠️ 私聊在 `recent` 里的 key **不是 QQ 号**（见 `contextKey`），所以这里读不回来 ——
+  //    只验"这道判据没有顺手把私聊也拦掉"（拉了 `mt === 'group'` 那道闸就够）✓
+  recent.clearAll();
+  let threw = false;
+  try {
+    recent.rememberBot({ message_type: 'private', user_id: OWNER }, '知道了，我这就改。');
+  } catch {
+    threw = true;
+  }
+  check(!threw, '★★ 私聊主人照旧记（那道判据只管群里，不误伤私聊）');
+
+  // ⚠️⚠️ 再加一类：**她自己的系统面板**（剧情结算那种）⇒ 不进上下文
+  //    （用户截图：面板发到群里，爱音追问「你那边还带结算面板的？」✗）
+  recent.clearAll();
+  recent.rememberBot(
+    { message_type: 'group', group_id: G, user_id: '30001', sender: { nickname: '甲' } },
+    '【本次剧情结束 · 好结局】\n好感度 +3（参与 2 人）：\n1. Anon 54 → 57\n2. <主人> 62 → 65',
+  );
+  check(!recent.contextText(G).includes('好感度'), '★★ 剧情结算面板不进上下文（系统信息不是聊天内容）');
+  // ⚠️ 但正常的「【标题】链接」那种分享**不许**被误杀
+  recent.clearAll();
+  recent.rememberBot(
+    { message_type: 'group', group_id: G, user_id: '30001', sender: { nickname: '甲' } },
+    '【爱素：谢谢，我不吃】 https://www.bilibili.com/video/BV1xx',
+  );
+  check(recent.contextText(G).includes('爱素'), '★ 正常的「【标题】链接」分享照旧记（判据够窄）');
 }
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);

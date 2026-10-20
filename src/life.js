@@ -34,22 +34,58 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT, KNOWLEDGE_DIR, paramsFor } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, paramsFor, stateDir } from './config.js';
 import { log } from './log.js';
 import { phrase } from './llm.js';
 import * as storyline from './storyline.js';
 import * as holiday from './holiday.js';
+// ⚠️ 2026-10-09 加：生日（用户要「随机事件和剧情里能出现**互相庆祝生日**的好事」）。
+import * as birthday from './birthday.js';
+// ⚠️ 2026-10-09 加：**群友**的生日（好感度 90 以上才祝贺）—— 用户：「还可以对好感度 90
+//    以上群友庆祝生日，日期直接从个人名片那里取」。
+import * as memberBirthday from './member-birthday.js';
 import { personaText, castBlock, personaDataFile } from './knowledge.js';
 import * as persona from './persona.js';
+// ⚠️ 2026-10-04：套话句式（「谁也没喊谁」）的二次改写 —— 见 `src/rewrite.js` 顶部
+import { naturalize } from './rewrite.js';
+// ⚠️ 2026-10-11 加：生日那一段要**看群里最近说过什么**（跨机器去重靠群消息，见下）
+import * as recent from './recent.js';
 
 // ⚠️ 2026-09-21：事件库是**角色专属**的（换个角色"今天遇到什么事"完全不同），
 //    所以跟着人设包走（`personas/<id>/life-events.md`）。
 //    `personaDataFile()` = 人设包优先、共用 `knowledge/` 回落。
-const FILE = personaDataFile('life-events.md');
+//
+// ⚠️⚠️ 2026-09-30 修：这里原来是 `const FILE = personaDataFile(...)` ——
+//    **模块加载那一刻**就把路径钉死了。后果（实测踩到）：
+//      · 用户在界面上**热切换人设包**，FILE 还指着旧包的路径；
+//      · 包里缺这份文件时它会回落到 `knowledge/life-events.md`，
+//        之后**再把文件补进包里也不会生效**（一直报
+//        「日常事件库读不到（ENOENT …knowledge\life-events.md）」，
+//        而文件其实已经躺在 `personas/<id>/` 里了）。
+//    ⇒ 改成**每次读盘时现算**（`personaDataFile` 自己就是现算的）。
+function file() {
+  return personaDataFile('life-events.md');
+}
 
 const STATE_FILE = process.env.QQBOT_LIFE_FILE
   ? join(ROOT, process.env.QQBOT_LIFE_FILE)
-  : join(ROOT, 'state', 'life.json');
+  : join(stateDir(), 'life.json');
+
+/**
+ * ⚠️⚠️ 2026-10-13 加（用户截图：同一个群里同一条事件 15 分钟内出现了两遍）：
+ *
+ *   真因**不在计划器**，在回执 —— 现场日志：
+ *     [12:21:05] [分条] 第 1/1 条发送失败：retcode=100 send reply … timed out after 15000
+ *     [12:21:05] [日常] 群 X「天台上有别人在，她端着饭换了个地方」→ ❌ 没发出去 → 不记账，顺延重排
+ *     [12:36:15] [日常] 群 X「天台上有别人在，她端着饭换了个地方」→ ❌ 没发出去   ← 又抽到同一条
+ *   而用户截图里那句话**就在群里** ⇒ 「回执超时」**不等于没发到** ⇒
+ *   不记账 + 顺延重排 = 同一句话再发一遍 ✗
+ *
+ *   ⇒ 发失败（含超时这种"不确定到没到"的）之后，**这条文本在这个群里冷藏 45 分钟**：
+ *     `plan()` 抽池子时把它剔掉，重排就会抽到别的事，而不是把同一句再顶上去。
+ *   ⚠️ 只冷藏"文本"，**不记账**（`fired` 照旧不加，今天该发的条数不会少）✓
+ */
+const FAIL_COOLDOWN_MS = 45 * 60 * 1000;
 
 // ─────────────────────────────────────────────────────────────
 // 事件库解析
@@ -112,7 +148,8 @@ export function parse(text) {
 /** 读盘（知识库热重载后由 `reload()` 调） */
 export function reload() {
   try {
-    slots = parse(readFileSync(FILE, 'utf8'));
+    // ⚠️ 现算路径（见上面 `file()` 那段）：换人设包 / 刚补进包里的文件都要能读到
+    slots = parse(readFileSync(file(), 'utf8'));
     loadedAt = Date.now();
     log.debug(
       `日常事件库：${slots.length} 个时段 / ${slots.reduce((n, s) => n + s.templates.length, 0)} 条事件`,
@@ -121,6 +158,12 @@ export function reload() {
     log.warn(`日常事件库读不到（${e.message}），一级事件将不发`);
     slots = [];
   }
+  // ⚠️ 2026-10-14 加（爱音那次）：「文件读不到」和**「读到了但是空的」**要分开报。
+  //    原来只有 readFileSync 抛错才 warn，而"这个人设包里压根没有 life-events.md"是回落成空，
+  //    表现是「立刻发一条」回一句**「现在这个时刻没有对应时段（0-7 点不发）」** ——
+  //    完全看不出真因是**事件库空的**（查了半天才知道）✗
+  //    ⇒ 空库在这里就点名，附上它找的那条路径。
+  if (!slots.length) log.warn(`日常事件库是空的（${file()}）—— 日常事件不会发，检查这个人设包`);
   // 节日表跟着一起重载（两个都是知识库文件，改完一起生效）
   try {
     holiday.reload();
@@ -142,6 +185,11 @@ export function reload() {
 export async function preview(now = Date.now(), groupId = '') {
   const gid = gkOf(groupId);
   if (cfgFor(gid).enable === false) return { ok: false, reason: '这个群的日常事件没开' };
+  // ⚠️ 2026-10-14 加：**库是空的**和"不在时段内"分开报（见 `reload()` 里那段说明）。
+  //    这两件事在界面上原来长得一模一样，爱音那次就是被它带偏的 ✗
+  if (!slots.length) {
+    return { ok: false, reason: '日常事件库是空的（这个人设包里缺 life-events.md，或者里面一条事件都没有）' };
+  }
   const slot = slotAt(now);
   if (!slot) return { ok: false, reason: '现在这个时刻没有对应时段（0-7 点不发）' };
   const { pool, off, holidayEvents } = poolFor(slot, now, gid);
@@ -149,7 +197,7 @@ export async function preview(now = Date.now(), groupId = '') {
   const tpl = pickFrom(pool, Math.random);
   let text = '';
   try {
-    text = await compose({ template: tpl, slot: slot.name, off, holidayEvents });
+    text = await compose({ template: tpl, slot: slot.name, off, holidayEvents, groupId: gid });
   } catch (e) {
     log.debug(`预览润色失败：${e.message}`);
   }
@@ -247,13 +295,30 @@ function pickFrom(pool, rng) {
 
 const stats = { fired: 0, skipped: 0, lastError: '', lastFireAt: 0 };
 
-const emptyBucket = () => ({ day: '', target: 0, fired: 0, lastFireAt: 0, nextAt: 0, recent: [] });
+const emptyBucket = () => ({
+  day: '',
+  target: 0,
+  fired: 0,
+  lastFireAt: 0,
+  nextAt: 0,
+  recent: [],
+  /** 刚发失败（含回执超时）的**事件文本** → 失败时刻（45 分钟内重排不再抽它，见 `FAIL_COOLDOWN_MS`） */
+  tried: {},
+});
 /** 群号 → 状态桶 */
 let buckets = new Map();
 
 const gkOf = (gid) => String(gid ?? '').trim();
 
 function readBucket(v) {
+  /** @type {Record<string, number>} */
+  const tried = {};
+  if (v?.tried && typeof v.tried === 'object') {
+    for (const [k, ts] of Object.entries(v.tried)) {
+      const n = Number(ts);
+      if (k && Number.isFinite(n)) tried[k] = n;
+    }
+  }
   return {
     day: String(v?.day ?? ''),
     target: Number(v?.target) || 0,
@@ -261,6 +326,7 @@ function readBucket(v) {
     lastFireAt: Number(v?.lastFireAt) || 0,
     nextAt: Number(v?.nextAt) || 0,
     recent: Array.isArray(v?.recent) ? v.recent.slice(-20) : [],
+    tried,
   };
 }
 
@@ -295,7 +361,7 @@ function loadState() {
     try {
       const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
       writeFileSync(
-        join(ROOT, 'state', `life.备份-分群前-${stamp}.json`),
+        join(stateDir(), `life.备份-分群前-${stamp}.json`),
         JSON.stringify(j, null, 2),
         'utf8',
       );
@@ -312,7 +378,7 @@ function loadState() {
 
 function save() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const byGroup = {};
     for (const [k, b] of buckets) byGroup[k] = b;
     const tmp = `${STATE_FILE}.tmp`;
@@ -448,6 +514,74 @@ export function syncTarget(groupId = '') {
  * @param {string} [groupId] 哪个群；不给 = `''` 那个桶（老用法/测试）
  * @returns {{fire:boolean, reason:string, template?:object, slot?:string, nextAt?:number}}
  */
+/* ── 日常事件的**跨群去重**（2026-10-10 用户报：「刚才为什么 200000002 又发了一遍」）──
+ * 实测（今天，日志原文）：
+ *   [11:07:54] 群 200000007「上课打瞌睡被老师点起来回答问题」→ 已发
+ *   [11:12:53] 群 200000002「上课打瞌睡被老师点起来回答问题」→ 已发   ← 同一条，5 分钟内两个群各一遍 ✗
+ * 设计上"每个群各排各的"没错，但**两个群他都在** ⇒ 看着就是复读机 ✗
+ * ⇒ 同一天里**同一条事件文本只发一次**（哪个群先用算哪个）✓
+ *   库存 114 条、一天最多 4 群 × 3 条 = 12 条 ⇒ 够用，不会"没得发" ✓
+ *   ⚠️ 万一某天真的全发过了（库小的号）⇒ 调用方退回原池，别让日常事件停摆 ✓
+ *   ⚠️ 只在**真的发出去之后**才记（没发成不记 —— 和"不记账，顺延重排"那条一致）✓
+ */
+const SENT_FILE = process.env.QQBOT_LIFE_SENT_FILE
+  ? join(ROOT, process.env.QQBOT_LIFE_SENT_FILE)
+  : join(stateDir(), 'life-sent.json');
+
+function _readSent() {
+  try {
+    return JSON.parse(readFileSync(SENT_FILE, 'utf8')) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function _writeSent(j) {
+  try {
+    mkdirSync(stateDir(), { recursive: true });
+    const t = `${SENT_FILE}.tmp`;
+    writeFileSync(t, JSON.stringify(j), 'utf8');
+    renameSync(t, SENT_FILE);
+  } catch {}
+}
+
+/** 这条事件**今天在别的群发过了吗**（按文本比） */
+export function sentToday(text, now = Date.now()) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  return (_readSent()[dayKey(now)] ?? []).includes(t);
+}
+
+/** 记下"这条今天发过了"（**发出去之后**才调） */
+export function markSent(text, now = Date.now()) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  try {
+    const j = _readSent();
+    const k = dayKey(now);
+    const arr = Array.isArray(j[k]) ? j[k] : [];
+    if (!arr.includes(t)) arr.push(t);
+    j[k] = arr.slice(-400);
+    // ⚠️ 只留最近 3 天（不然文件一直长）
+    for (const key of Object.keys(j)) {
+      if (key === k) continue;
+      const d = Date.parse(`${key}T00:00:00`);
+      if (Number.isFinite(d) && now - d > 3 * 86400000) delete j[key];
+    }
+    _writeSent(j);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 测试用 */
+export function __resetSent() {
+  try {
+    _writeSent({});
+  } catch {}
+}
+
 export function plan(now = Date.now(), rng = Math.random, groupId = '') {
   const gid = gkOf(groupId);
   const b = bucketOf(gid, true);
@@ -492,16 +626,75 @@ export function plan(now = Date.now(), rng = Math.random, groupId = '') {
   if (!slot) return { fire: false, reason: '现在这个时刻没有对应时段', nextAt: b.nextAt };
 
   const { pool, off, holidayEvents } = poolFor(slot, now, gid);
+  // ⚠️⚠️⚠️ 2026-10-10 加（用户报：「**刚才为什么 200000002 又发了一遍**」）：
+  //    跨群去重 —— 同一天里**同一条事件文本只发一次**（哪个群先用算哪个）✓
+  //    实测那条重复：「上课打瞌睡被老师点起来回答问题」11:07 在 200000007、
+  //    11:12 在 200000002 —— 同一条，两个群各一遍 ✗（两个群他都在，看着就是复读）
+  //    ⚠️ 兜底：当天**全都发过了**就退回原池，别让日常事件停摆 ✓
+  const fresh = pool.filter((t) => !sentToday(t?.text, now));
+  const usePool = fresh.length ? fresh : pool;
+  // ⚠️ 2026-10-13：**发失败过的、45 分钟内不再抽**（那次回执超时其实已经发到群里了，
+  //    重排又抽到同一条 ⇒ 群里同一句话出现两遍，见 `FAIL_COOLDOWN_MS`）。
+  //    ⚠️ 全被冷藏了就退回 `usePool` —— 宁可重复一次，也别让日常事件停摆。
+  const usable = usePool.filter((t) => !triedRecently(b?.tried, t?.text, now));
+  const finalPool = usable.length ? usable : usePool;
+  if (finalPool !== usePool) {
+    log.debug(`[日常] 群 ${gid || '(默认)'} 跳过 ${usePool.length - usable.length} 条刚发失败的事件`);
+  }
   return {
     fire: true,
     reason: '',
     groupId: gid,
     slot: slot.name,
-    template: pickFrom(pool, rng),
+    template: pickFrom(finalPool, rng),
     off,
     holidayEvents,
     nextAt: 0,
   };
+}
+
+/** 这条文本是不是**刚试过但没发成**（含回执超时那种"不确定到没到"） */
+function triedRecently(tried, text, now) {
+  const t = String(text ?? '').trim();
+  if (!t || !tried) return false;
+  const at = Number(tried[t]);
+  return Number.isFinite(at) && at > 0 && now - at < FAIL_COOLDOWN_MS;
+}
+
+/**
+ * 记下"**这条刚发失败了**"（调用方：`index.js` 的日常发送分支）。
+ *
+ * ⚠️ 和 `markSent()` 是两件事，别混：
+ *   · `markSent()` = 真发出去了（跨群去重用，**不**冷却本群，因为它本来就不该再发）；
+ *   · `noteFailed()` = 没发出去**或回执超时**（本群 45 分钟内不再抽它 —— 防重复）。
+ * ⚠️ 两者都**不**加 `fired`（不记账 = 今天该发的条数不会少，会顺延重排）✓
+ *
+ * @param {string} groupId
+ * @param {string} text 事件库原文（`plan.template.text` —— 抽池子是按它抽的）
+ * @param {number} [now]
+ */
+export function noteFailed(groupId = '', text = '', now = Date.now()) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  try {
+    const gid = gkOf(groupId);
+    const b = bucketOf(gid, true);
+    const tried = (b.tried ??= {});
+    tried[t] = now;
+    // 过期的顺手清掉，别让状态文件一直长
+    for (const [k, v] of Object.entries(tried)) {
+      if (!Number.isFinite(Number(v)) || now - Number(v) > FAIL_COOLDOWN_MS) delete tried[k];
+    }
+    save();
+    log.info(
+      `[日常] 群 ${gid || '(默认)'} 这条刚发失败 → ${Math.round(FAIL_COOLDOWN_MS / 60000)} 分钟内不再抽它：` +
+        `「${t.slice(0, 24)}」`,
+    );
+    return true;
+  } catch (e) {
+    log.debug(`记"发失败"出错（不影响发送）：${e.message}`);
+    return false;
+  }
 }
 
 /**
@@ -515,6 +708,12 @@ export function plan(now = Date.now(), rng = Math.random, groupId = '') {
 export async function compose(planObj, extra = {}) {
   const tpl = planObj?.template;
   if (!tpl) return '';
+  // ⚠️⚠️ 2026-10-09：**群号要从这两个地方拿** —— 生日那段要按群查"今天谁生日"，
+  //    而我第一版直接写了 `groupId`：`compose()` 的作用域里**根本没有这个变量** ⇒
+  //    `ReferenceError` 被下面那个 `catch {}` 吞掉 ⇒ 生日段永远为空，
+  //    表现是"预览出来还是别的小事"（查了两轮才找到）✗
+  //    `plan()` 的返回值里本来就带 `groupId`（见它 `fire: true` 那个 return）✓
+  const gidBd = String(extra?.groupId ?? planObj?.groupId ?? '');
   const related = relatedPast(tpl, 4);
 
   // ⚠️ 2026-09-15：事件里点名了谁，就把谁那一段设定补进提示词。
@@ -547,9 +746,116 @@ export async function compose(planObj, extra = {}) {
     log.debug(`节日上下文失败：${e.message}`);
   }
 
+  // ⚠️⚠️ 2026-10-01（用户原话：「随机事件现在还是太单调了，而且『谁也没喊谁』这句话经常出现。
+  //    随机事件应该**完全随机由模型生成**，而不是由模板限定太多」）
+  //
+  //    查下来单调有两个原因，都在"模板限定太死"：
+  //      ① 下面那句 `今天发生的事：${tpl.text}` 是**逐字剧本** —— 模型只能照它铺开，
+  //         于是每天同一类事翻来覆去（「谁也没喊谁」就是照着
+  //         「两个人谁都没先开口」这类模板长出来的句式）；
+  //      ② 模板就那么几十条，一个月里同一条要撞好几次。
+  //    ⇒ 三件事一起做：
+  //      ① 模板**降级成"方向"**，明说具体那一下完全由她定、可以换成同一类的别的小事；
+  //      ② 把**最近发过的几条**摆出来，要求"别重复同类事、也别用同样的句式"；
+  //      ③ 再随一个**随机方向**（地点 / 细节 / 落点），逼出多样性。
+  const noRepeat = [];
+  try {
+    const b = bucketOf(gkOf(planObj?.groupId ?? ''), false);
+    for (const r of (b?.recent ?? []).slice(-5)) {
+      const ev = String(r.event ?? '').trim();
+      const said = String(r.text ?? '').trim();
+      if (ev || said) {
+        noRepeat.push(`· ${ev}${said ? `（她当时说的是：「${said.slice(0, 40)}」）` : ''}`);
+      }
+    }
+  } catch (e) {
+    log.debug(`取最近事件失败：${e.message}`);
+  }
+  const ROLL = {
+    在哪: ['教室里', '走廊上', '回家路上', '便利店里', '楼梯间', '天台上', '自己房间里', '校门口', '电车上', '窗边'],
+    一个细节: ['一个声音', '一束光', '一股味道', '别人的一句话', '手机屏幕', '手上的东西', '天气', '时间'],
+    落点: ['有点烦', '无所谓', '想扎人', '累', '不想说话', '突然停了一下'],
+  };
+  const roll = Object.entries(ROLL)
+    .map(([k, arr]) => `${k}：${arr[Math.floor(Math.random() * arr.length)]}`)
+    .join('；');
+
+  // ⚠️⚠️ 2026-10-09（用户要的是「**随机事件**和剧情可以出现**互相庆祝生日**的好事」）：
+  //    光把"今天谁生日"塞进去**不够** —— 实测预览两次，出来的还是"电车上小孩盯我屏幕"
+  //    「去月之森送东西」这种跟生日八竿子打不着的小事：**事件模板那句更具体，模型就跟着它走了** ✗
+  //    ⇒ 生日当天改成**由生日主导**：下面"今天发生的事"那句直接换成生日方向，
+  //      并把模板降级成"不用跟着走"。这样那天至少有一条日常事件是过生日 ✓
+  let bdLine = '';
+  try {
+    // ⚠️⚠️⚠️ 2026-10-10 加（用户：「**那个生日的日常事件还是太多了，一天最多两条就够了**，
+    //    除非那个过生日的人或者 bot 在群内」）：
+    //    ⇒ 默认一天最多 `birthday.LIFE_CAP`（2）条"生日主导"的日常事件；
+    //      **寿星本人（那个群友 / 那个 bot 号）就在这个群里 ⇒ 不限** ✓
+    //    ⚠️ 计数按**群 + 天**落盘（重启不重置 —— 不然重启一次又能多刷两条）✓
+    const selfId0 = String(config.persona?.id ?? '');
+    let peers0 = [];
+    try {
+      peers0 = (config.groupParams?.[gidBd]?.peers ?? []).map(String);
+    } catch {}
+    // 群友生日：`memberBirthday.today(gid)` 非空 ⇒ **那个人真的在这个群里** ✓
+    let memberToday = [];
+    try {
+      memberToday = memberBirthday.today(gidBd) ?? [];
+    } catch {}
+    const starInGroup =
+      memberToday.length > 0 ||
+      birthday.lifeStarInGroup(gidBd, { selfId: selfId0, peers: peers0 });
+    const used = birthday.lifeCount(gidBd);
+    // ⚠️⚠️⚠️ 2026-10-11 加（用户报：「**saki 刚才又发了一次生日**」）：
+    //    现场：**黑祥 16:37 在群里说「宇田川巴今天生日…」**，而 saki 17:20 的日常事件
+    //    又顺着生日写（位置还标了"买炸鸡"）⇒ 群里看着就是"生日被说了两遍" ✗
+    //    真因：**两台机器各自生成日常事件** —— 我上次做的"跨群去重"是**本机文件**
+    //    （`state/life-sent.json`），**跨机器无效** ✗（黑祥在另一台机器上）
+    //    ⇒ 改用**群消息**判 —— 那是两台机器**天然共享**的：
+    //      最近 30 分钟里群里已经有人提过"生日" ⇒ 这条**别再提** ✓
+    //    ⚠️ 覆盖不了的情况：两台机器同一分钟各发一条（窗口里都还没看到对方的）——
+    //      那种只能靠共享文件，先不管 ✓
+    let saidBirthday = false;
+    try {
+      const ctx = recent.contextText(gidBd, '', [], { maxChars: 3000 });
+      saidBirthday = /生日/.test(String(ctx ?? ''));
+    } catch {}
+    if (saidBirthday) {
+      log.info(`[生日] 群 ${gidBd} 最近已经有人提过生日 → 这条**不再提**（跨机器也管得住）`);
+    }
+    if (!saidBirthday && (starInGroup || used < birthday.LIFE_CAP)) {
+      bdLine =
+        birthday.lifeNote(Date.now(), { selfId: selfId0 }) + memberBirthday.note(gidBd);
+      if (bdLine) {
+        bdLine +=
+          '\n⚠️ **今天这条就围绕生日写**（挑礼物 / 被叫去对方家里 / 顺路买个蛋糕 /' +
+          '路上碰见说一句）—— 今天最特别的就是这件事，别写成别的小事。';
+        birthday.bumpLife(gidBd); // 拼了就计数（拼了就会生成）✓
+      }
+    } else {
+      log.info(
+        `[生日] 群 ${gidBd} 今天生日事件已到上限（${birthday.LIFE_CAP} 条，寿星不在群内）→ ` +
+          '这条走普通事件',
+      );
+    }
+  } catch (e) {
+    log.debug(`[生日] 判定失败（当没生日）：${e.message}`);
+  }
+
   const lines = [
     todayLine ? `今天是：${todayLine}` : '',
-    `今天发生的事：${tpl.text}`,
+    bdLine,
+    bdLine
+      ? `今天发生的事（**只是个方向**）：**今天有人过生日**（见上面那段）——` +
+        `具体写哪一下你自己定，**不用跟着「${tpl.text}」走**。`
+      : `今天发生的事（**只是个方向，不是逐字剧本**）：${tpl.text}`,
+    '⚠️⚠️ 上面那句**别原样复述** —— 具体那一下到底怎么样（在哪儿、旁边有没有人、你心里怎么想）',
+    '   **完全由你自己定**，也可以换成同一类的别的小事。',
+    '   ⚠️ **每次都写出不一样的那一下** —— 别像在填模板，也别用「谁也没…」这种套话开头。',
+    `🎲 这次随机到的方向（用一两个就行，不必全用）：${roll}`,
+    noRepeat.length
+      ? `⚠️ 最近已经发过这些（**别再写同一类事、也别用同样的句式**）：\n${noRepeat.join('\n')}`
+      : '',
     // ⚠️ 2026-09-15：**别把这个时段提示当句子开头用**。
     //    实测它会把模型带成「下午房东来催房租，回了句知道了」这种
     //    —— 以时间开头、而且**把主语省掉了**（读起来像房东回的话）。
@@ -577,18 +883,44 @@ export async function compose(planObj, extra = {}) {
     '   · 群友说「不相干」「这跟刚才聊的没关系」只是在说**话题跳了** ——',
     '     可以「嗯」一声、可以嘴硬（「谁说一定要有关系」）、也可以不理，**但别认成"我编的"**；',
     '   · 被追问细节就照实说（不知道的部分就说不知道），**别改口**。',
-    '⚠️ **别自己往上加职业 / 场景的细节**：她的打工地点就是**客服室**（接单、回消息、排班），' +
-      '不是后厨、食堂那类地方 —— 所以**别写围裙、餐盘、粉笔灰、讲台**这些。' +
-      '事件里没提到的东西就别补；实在要写环境，就写客服室里的桌子、屏幕、排班表。',
+    '⚠️ **但别自己发明身份 / 场所**：你是什么身份、平时在哪儿，**以你的人设设定为准** ——' +
+      '别凭空加围裙、餐盘、粉笔灰、讲台这种跟你设定不符的东西。' +
+      '（**细节可以自由补**：地点、声音、天气、心里那一下都行；能改的只是细节，身份和场所的类别不能改。）',
     extra.extraHint ? `\n${extra.extraHint}` : '',
   ].filter(Boolean);
 
-  return phrase({
+  const raw = await phrase({
     system: extra.system ?? buildSystem(),
     user: lines.join('\n'),
     maxTokens: 260,
     timeoutMs: 25000,
   });
+  const tidied = tidyLifeText(raw);
+  // ⚠️⚠️ 2026-10-04 用户要求（「在剧情和事件里 saki 转述的话里，有大量的『我们谁也没XX』，
+  //    要转换一下」）⇒**生成后再过一次模型改写**，把那句套话换掉。
+  //    ⚠️ 为什么提示词拦不住：上面那句只说了「别用『谁也没…』这种套话**开头**」，
+  //      而实测冒出来的全在**句中/句末**（「…远远看见立希在马路对面，我们谁也没喊谁。」）
+  //      —— 规则压根没覆盖到。详见 `src/rewrite.js` 顶部。
+  //    ⚠️ 只有命中才花这一次调用；失败/长度异常一律退回上面这句原文。
+  return naturalize(tidied, { where: '一级事件' });
+}
+
+/**
+ * ⚠️ 2026-10-03 加（用户截图问「为什么这两句连一起了」）：
+ *
+ *   现场那条一级事件的文本是：
+ *     `……那个新来的，已经在群里把话往我这儿引了 我还在门口站着呢，她先来敲门了……`
+ *   注意「引了」和「我还在」之间**只有一个空格，没有标点** —— 读起来是病句。
+ *
+ *   提示词里明明写着「标点只用：。 ， ？ ！ …… ~」，但模型偶尔还是会漏一个。
+ *   ⇒ 代码兜底：**汉字 + 空格 + 汉字 ⇒ 补一个「。」**
+ *     （中文聊天里这个位置出现空格本来就不是正常用法；
+ *       ⚠️ 只认**空格/全角空格**，不碰换行 —— 她真分了行就别动它。）
+ */
+function tidyLifeText(t) {
+  const s = String(t ?? '').trim();
+  if (!s) return s;
+  return s.replace(/([\u4e00-\u9fa5])[ \u3000]+([\u4e00-\u9fa5])/g, '$1。$2');
 }
 
 /**
@@ -761,14 +1093,33 @@ export function commit(planObj, text, at = Date.now(), opts = {}) {
  *    把**某个群**单独关掉（它就不收日常事件了）。
  *    例：大群不想刷屏、小群想多发几条 —— 用这个，不用动全局。
  */
-export function targetGroups() {
+/**
+ * **进事件系统的群**（= 档位 1 + 在 `trigger.allowGroups` 里）—— **不管 `life.enable`**。
+ *
+ * ⚠️⚠️ 2026-10-15 抽出这个函数（用户报：「**另一个群也是 1 级群，为什么这里没显示**」）。
+ *    起因：**B站分享**要的是「1 档群」，我当时却接了 `targetGroups()` ——
+ *    那个是**「现在开着日常事件的群」**（末尾多一条 `life.enable !== false` 的过滤）✗
+ *    ⇒ 用户把某个群的日常事件关掉之后，那个群就从 B站分享的下拉里**消失了** ✗
+ *    ⚠️ 这两套判据本来就说好是分开的 —— 见下面 `isEventGroup` 的注释：
+ *      「`life.enable=false` 的群**仍然算"进事件系统"**（只是被单独关掉了日常事件）」。
+ *    ⇒ 要「1 档群」用**这个**；要「现在该发日常事件的群」用 `targetGroups()` ✓
+ */
+export function eventGroups() {
   const allow = (config.trigger?.allowGroups ?? []).map(String);
   const lv = config.trigger?.groupRespondTo ?? {};
   return Object.keys(lv)
     .map(String)
     .filter((g) => Number(lv[g]) === 1)
-    .filter((g) => !allow.length || allow.includes(g))
-    .filter((g) => config.groupParams?.[g]?.life?.enable !== false);
+    .filter((g) => !allow.length || allow.includes(g));
+}
+
+/**
+ * 日常事件该发到哪些群 —— **1 档群，再排掉自己单独关掉日常事件的那些**。
+ * ⚠️ 只在 `life.js` 内部（和「今天该发几条」那套）用；要「1 档群」的场合
+ *    （B站分享、手动开剧情…）请用 `eventGroups()` —— 别再用这个（2026-10-15 栽过一次）✗
+ */
+export function targetGroups() {
+  return eventGroups().filter((g) => config.groupParams?.[g]?.life?.enable !== false);
 }
 
 /**
@@ -823,6 +1174,8 @@ export function status(groupId = '') {
     lateToleranceMs: lateToleranceMs(gid),
     nowInWindow: Date.now() >= start && Date.now() < end,
     targets: targetGroups(),
+    // ⚠️ 2026-10-15 加：**1 档群**（不管日常事件开没开）—— B站分享的下拉用它 ✓
+    targetsAll: eventGroups(),
     // ⚠️⚠️ `fired` 一律是「**这个群今天记账了几条**」（= `todayPlan().fired`）。
     //
     //    2026-09-15 修：原来 `...stats` 放在最后，把 `fired` **覆盖**成了

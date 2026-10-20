@@ -9,15 +9,25 @@
  *   - 改完热重载，不用重启机器人
  */
 import { createServer } from 'node:http';
-import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, unlinkSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, unlinkSync, statSync, copyFileSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 
-import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, SAFETY_DIR, paramsFor, personaDir, personaId, thinkingField } from './config.js';
+import {
+  config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, SAFETY_DIR,
+  paramsFor, personaDir, personaId, thinkingField, ACCOUNT, SHARED_SECTIONS,
+} from './config.js';
+// ⚠️ 2026-10-07 多 QQ 号：账号目录（`accounts/<QQ>.yml`）的读写都走它。
+//    ⚠️ 这个文件导入它**不构成环** —— `accounts.js` 只依赖 node 内建 + js-yaml。
+import * as accounts from './accounts.js';
+// ⚠️ 2026-10-07 加：「机器人池」自动同步（同类池互相加、不同类池复用）——
+//    见 `src/pools.js` 顶部那段说明。
+import * as pools from './pools.js';
 import { log } from './log.js';
-import { ping } from './llm.js';
+// ⚠️ 2026-10-09：`llmFetch` 一起引进来 —— "拉取模型列表"要**走代理**（见下面 `/api/models` 那段）
+import { ping, llmFetch } from './llm.js';
 // 生图（群里说的「拍个照」）—— 界面上的「测试生图」用它，见下面 /api/imagegen/test
 import * as imagegen from './imagegen.js';
 // 「这次拍什么」—— 单独跑一次模型理解（见 src/photo-plan.js 文件头）
@@ -31,11 +41,15 @@ import { queryServer, describe, clearCache } from './status.js';
 import * as napcat from './napcat.js';
 // ⚠️ 协议端适配层（2026-09-17 加）：管理面按它分派，换协议端只改 config.yml
 import * as provider from './provider.js';
+// ⚠️ 2026-10-07 加（多 QQ 号）：**协议端那边的"多账号"** —— 给每个号开一个
+//    OneBot WebSocket 端口（改 SnowLuma 的 `config/onebot_<QQ>.json` + 重启它）。
+import * as providerAccounts from './provider-accounts.js';
 // ⚠️ 2026-09-20 加：LLBot 的「登录状态 / 二维码」适配（形状和 `napcat.js` 一致，
 //    所以下面那段二维码路由两边通用 —— 用户要求"二维码要和之前一样能自动刷新"）。
 import * as llbot from './llbot.js';
 // ⚠️ 开机自启（2026-09-17 加）：写注册表 Run 键，界面上开/关
 import * as autostart from './autostart.js';
+import * as cleanup from './cleanup.js';
 import { backupKnowledge } from './backup.js';
 import { listUnannotated, annotateAll } from './face-annotate.js';
 // 二维码画图（纯 JS，无原生依赖）
@@ -47,6 +61,8 @@ import { hasKnowledge, reloadKnowledge, knowledgeText } from './knowledge.js';
 //    判据改成"总规则在不在里面" —— 见那个 handler 里的注释）
 import { sensitiveRules } from './sensitive.js';
 import * as life from './life.js';
+// ⚠️ 2026-10-05 加：同类机器人搭话（「立刻试一次」那个按钮要用它的 compose / pickPeer）
+import * as peerChat from './peer-chat.js';
 import * as persona from './persona.js';
 import * as personaAdmin from './persona-admin.js';
 import * as personaDraft from './persona-draft.js';
@@ -62,6 +78,7 @@ import { streamChat } from './llm.js';
 import { validateFile as learnedValidate, listEntries as learnedList } from './learned.js';
 import * as qzone from './qzone.js';
 import * as qzoneCompose from './qzone-compose.js';
+import * as biliShare from './bili-share.js';
 
 /** 由 index.js 传进来，QQ空间那几个接口需要它来调 NapCat */
 let bot = null;
@@ -359,6 +376,21 @@ function configForUi() {
       exitKeys: [...(config.diceMode?.exitKeys ?? [])],
       skipDiceKeys: [...(config.diceMode?.skipDiceKeys ?? [])],
     },
+    // ⚠️ 2026-10-06 加 `sealdice.relay`：海豹**接了同号 IM** 时小祥要闭嘴，
+    //    否则群里 `.ra` 海豹回一次 + 小祥转述一次 = **两条结果**。
+    //    归一化成三态，好让前端能直接 select 绑定、别在前端判一堆 falsy：
+    //      true       = 小祥转述（海豹不接 IM，默认）
+    //      false      = 小祥闭嘴（海豹自己收发）
+    //      'fallback' = 海豹在线让位、离线兜底
+    // ⚠️⚠️ **这里绝不能带 token** —— 那是本机密钥，`/api/config` 是明文 JSON。
+    sealdice: {
+      relay:
+        config.sealdice?.relay === 'fallback'
+          ? 'fallback'
+          : config.sealdice?.relay === false
+            ? false
+            : true,
+    },
     ownerQQ: config.ownerQQ,
     /** 机器人自己的号（用来做快速登录、页面上显示） */
     botQQ: config.botQQ,
@@ -368,17 +400,189 @@ function configForUi() {
   };
 }
 
+/**
+ * ⚠️ 2026-10-07 多 QQ 号：**拆分** —— 把 `config.yml` 里属于"这个号"的设置
+ * 搬进 `accounts/<QQ>.yml`，config.yml 只留共用的那些。
+ *
+ * 为什么必须做：老配置里"私有段"和"共用段"是混在一份文件里的。
+ * 不拆的话，**新加的号会莫名继承主号的一切**（群列表、灵敏度、按群设定、剧情参数…）——
+ * 表现是"我刚加了个号，它怎么认识我主号那些群"。
+ *
+ * ⚠️ 这是**改用户 config.yml** 的动作，所以：
+ *    · 先原样备份成 `config.yml.bak-多号拆分-<时间戳>`；
+ *    · 内容**等价**（私有段换个文件存，合并出来的配置逐字不变）；
+ *    · 界面上是用户点了确认才走到这里（确认框里写着会做什么）。
+ * ⚠️ 拆完**要重启**才生效 —— 这个进程的 `ACCOUNT` 是加载时定下的（界面会提示）。
+ */
+function migrateToAccounts(qq) {
+  const raw = yaml.load(readFileSync(CONFIG_FILE, 'utf8')) ?? {};
+  const KEEP = new Set([...SHARED_SECTIONS, 'mainAccount', 'ownerQQ', 'logLevel', 'webui', 'provider', 'cleanup']);
+  const priv = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (KEEP.has(k) || k.startsWith('__')) continue;
+    priv[k] = v;
+  }
+  priv.name = String(priv.name ?? '').trim() || '主号';
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const bak = `${CONFIG_FILE}.bak-多号拆分-${stamp}`;
+  copyFileSync(CONFIG_FILE, bak);
+  accounts.write(qq, priv);
+
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!KEEP.has(k) || k.startsWith('__')) continue;
+    out[k] = v;
+  }
+  out.mainAccount = String(qq);
+  const ordered = { mainAccount: String(qq), ...out };
+  writeFileSync(
+    CONFIG_FILE,
+    '# 由管理界面 http://127.0.0.1:' +
+      (Number(config.webui?.port) || 3099) +
+      ' 维护。\n# 详细注释和说明见 README.md。\n' +
+      yaml.dump(ordered, { lineWidth: 200, noRefs: true, quotingType: '"' }),
+    'utf8',
+  );
+  return { backup: bak, moved: Object.keys(priv) };
+}
+
+/**
+ * 把 patch 合进一个对象，**`null` = 删掉这个键**。
+ *
+ * ⚠️ 2026-10-07 加：`accounts.patch()` 走的是 `deepMerge`，而它把 `null` 当成
+ *    "用 null 覆盖"（其实会退回原值）⇒ **"传 null 清掉这个群的覆盖"在写账号文件
+ *    那条路上会静默失效**（界面回读还是旧值）。`test/webui.js` 里
+ *    「传 `null` = 删掉覆盖 → 回到默认 50」那条断言就是抓这个的。
+ *    ⇒ 私有段自己走这份带删除语义的合并，和 `saveConfig` 里 `put()` 的规矩保持一致。
+ */
+function applyPatch(obj, patch) {
+  for (const [k, v] of Object.entries(patch ?? {})) {
+    if (v === null) {
+      delete obj[k];
+      continue;
+    }
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      if (!obj[k] || typeof obj[k] !== 'object' || Array.isArray(obj[k])) obj[k] = {};
+      applyPatch(obj[k], v);
+    } else {
+      obj[k] = v;
+    }
+  }
+}
+
+/**
+ * ⚠️ 2026-10-07 多 QQ 号：把界面提交的 patch 拆成「**共用**」和「**这个号私有**」两份。
+ *
+ * 用户拍板的分法：「只有模型页面所有 QQ 共用，其他配置全部分 QQ 控制」。
+ * 所以判据就是 `config.js` 的 `SHARED_SECTIONS` —— **和读取时过滤私有的那张表同一个来源**。
+ * （两处若各写一份，迟早会出现"存进去、读不回来"或者反过来"改了没生效"。）
+ *
+ * | 往哪写 | 哪些 |
+ * | --- | --- |
+ * | `config.yml`（所有号一起变） | 大模型 / 生图 / 搜索 / 识图 / 协议端 / 清理 / 主人 QQ / 日志级别 |
+ * | `accounts/<QQ>.yml`（只有它变） | 灵敏度 / 按群设定 / 日常事件 / 剧情 / 好感度 / QQ空间 / 机器人 QQ … |
+ *
+ * ⚠️ 还没建过账号文件时（老用户刚升级上来）**整个 patch 照老样子写 config.yml** ——
+ *    这条保证了"没做迁移也能正常用"，行为跟以前逐字一样。
+ */
+function splitPatch(patch) {
+  const shared = {};
+  const priv = {};
+  for (const [k, v] of Object.entries(patch ?? {})) {
+    // ⚠️ `ownerQQ`（同一个主人）和 `logLevel` 是顶层键，按共用算；
+    //    `botQQ` 必须按号 —— 两个进程都写同一个 botQQ 的话，
+    //    登录脚本会去登录同一个号，另一个号就永远上不来。
+    if (k === 'ownerQQ' || k === 'logLevel' || SHARED_SECTIONS.includes(k)) shared[k] = v;
+    else priv[k] = v;
+  }
+  if (Object.keys(priv).length) {
+    // ⚠️ 只有"这个号**真的有账号文件**"时才写它 —— 老用户没拆分时
+    //    `ACCOUNT.id` 可能来自 `mainAccount`/env 而文件并不存在，
+    //    那种情况必须照老样子写回 `config.yml`（否则会凭空造出一个账号文件）。
+    if (ACCOUNT.id && accounts.has(ACCOUNT.id)) {
+      const cur = accounts.read(ACCOUNT.id) ?? {};
+      // ⚠️ 用带删除语义的 `applyPatch`（`null` = 删键），**不能**用 `accounts.patch`
+      //    —— 它的 `deepMerge` 会把 `null` 当成"覆盖"，于是"清掉这个群的覆盖"
+      //    这条路上会静默失效（`test/webui.js` 那条断言就是抓它的）。
+      applyPatch(cur, priv);
+      accounts.write(ACCOUNT.id, cur);
+      log.info(
+        `配置写入账号私有文件（号 ${ACCOUNT.id}）：${Object.keys(priv).join(', ')} → ${accounts.fileOf(ACCOUNT.id)}`,
+      );
+    } else {
+      Object.assign(shared, priv);
+    }
+  }
+  return shared;
+}
+
 /** 界面提交的配置 → 合并进现有 yaml（保留其它字段） */
 function saveConfig(patch) {
+  // ⚠️ 2026-10-07 多 QQ 号：**只改了私有段时，共用文件一个字都不许动**。
+  //
+  //    这里原来是无条件 `writeFileSync(CONFIG_FILE, yaml.dump(...))` ——
+  //    于是"我只改了这个号的灵敏度"也会把**所有号共用的那份 config.yml**
+  //    整个重新序列化一遍（注释全丢、格式全变），而且多号并发时还有互相覆盖的风险。
+  //    实测是 `test/accounts.js`【8】抓出来的（它盯着共用文件有没有被动过）。
+  const touchedLife = !!patch?.life;
+  // ⚠️⚠️ 2026-10-09 加：**`splitPatch` 之前**先把 `persona` 记下来。
+  //
+  //    为什么必须记在这里：`persona` **不在 `SHARED_SECTIONS` 里** ⇒
+  //    `splitPatch()` 会把它当成"这个号私有"的段、**从返回值里摘掉**
+  //    （写进 `accounts/<当前号>.yml`）⇒ 下面那句 `put('persona', patch.persona)`
+  //    和 `if (patch.persona)` **永远不成立** ⇒ 日志那行"谁改了人设"
+  //    **一次都不会打**。实测：`logs/bot-2026-10-09.log` 里那次切人设
+  //    （13:49:42）**没有**「配置写入 persona.id」这行，只有
+  //    「配置写入账号私有文件（号 …）：persona → accounts/<QQ>.yml」。
+  const personaPatch = patch?.persona;
+  patch = splitPatch(patch);
+  if (Object.keys(patch).length === 0) {
+    reloadConfig();
+    if (touchedLife) {
+      try {
+        life.syncTarget();
+      } catch (e) {
+        log.debug(`日常事件“今天的目标条数”同步失败：${e.message}`);
+      }
+    }
+    return config;
+  }
   const raw = yaml.load(readFileSync(CONFIG_FILE, 'utf8')) ?? {};
 
   const put = (section, fields) => {
     if (!patch[section]) return;
     raw[section] = raw[section] ?? {};
     for (const [k, v] of Object.entries(patch[section])) {
-      if (v !== undefined) raw[section][k] = v;
+      // ⚠️ 2026-10-07：`null` = **删掉这个键**（不是写一个 null 进去）。
+      //    按群设定那边"把这个群的所有覆盖都清掉"要用它
+      //    （`delete raw.groupParams[gid]` 那种语义，见 `POST /api/group-params`）。
+      if (v === null) delete raw[section][k];
+      else if (v !== undefined) raw[section][k] = v;
     }
   };
+
+  // ⚠️⚠️ 2026-09-28 加：**子对象要深合并（一层）**。
+  //
+  //    `put()` 是**浅合并**（逐键覆盖），所以像 `qzone.comment` 这种**子对象**，
+  //    前端只改其中一个开关时如果直接传 `comment: { enable: false }`，
+  //    会把 `days` / `maxPerDay` / `intervalMs` **一起冲掉** ✗ ——
+  //    用户会看到"我只关了一个开关，怎么天数也变回默认了"。
+  //    ⇒ 这里先把它和文件里原有的值合起来，前端就**只需要传要改的键**。
+  //    ⚠️ 只做**一层**：够用，而且不会把数组之类的结构意外合坏。
+  //    ⚠️ 必须放在下面那些 `put(...)` **之前** —— `put` 是按 `patch` 里的值覆盖的，
+  //       放后面就白合并了。
+  const SUB_MERGE = { qzone: ['comment'] };
+  for (const [section, subs] of Object.entries(SUB_MERGE)) {
+    for (const sub of subs) {
+      const before = raw[section]?.[sub];
+      const incoming = patch[section]?.[sub];
+      if (incoming && before && typeof before === 'object' && typeof incoming === 'object') {
+        patch[section][sub] = { ...before, ...incoming };
+      }
+    }
+  }
 
   put('llm', patch.llm);
   put('imagegen', patch.imagegen);
@@ -401,6 +605,24 @@ function saveConfig(patch) {
   //    （那个文件里的注释写得很清楚："存得进去、显示不出来"的坑踩过一次）。
   //    ⚠️ **不要**在这里写 `sealdice.token` —— 那是本机密钥，界面只用来填触发词。
   put('diceMode', patch.diceMode);
+// ⚠️ 2026-10-06：海豹的**转述开关**（防「海豹接了 IM ⇒ 两条结果」）。
+  //    和 configForUi 里那段是**一对**，别只加一个（"存得进去、显示不出来"踩过）。
+  //
+  // ⚠️⚠️ **必须白名单式挑字段**，只放行 `relay`。
+  //    `put()` 是逐键覆盖，而 `patch` 直接来自请求体 —— 图省事写成
+  //    `put('sealdice', patch.sealdice)` 的话，任何人 POST 一个 `token` 到
+  //    `/api/config` 就能把 `config.yml` 里的**本机密钥换成他想要的**。
+  //    （这层白名单就是唯一的闸门，别绕过它。）
+  if (patch.sealdice && typeof patch.sealdice === 'object') {
+    const r0 = patch.sealdice.relay;
+    // ⚠️ 归一化到三态：非 `false`、非 `'fallback'` 一律当 true。
+    //    非法值（传对象、传 'xxx'）别写进 yaml —— 那会让 `shouldRelay()`
+    //    的行为变得不可预期，而界面上还完全看不出来。
+    const clean = r0 === false ? false : r0 === 'fallback' ? 'fallback' : true;
+    raw.sealdice = raw.sealdice ?? {};
+    raw.sealdice.relay = clean;
+    log.info(`配置写入 sealdice.relay → ${clean}（文件：${CONFIG_FILE}）`);
+  }
   // ⚠️⚠️ 2026-09-22 加：**`persona`**（人设包 id）。
   //    踩到的：这一行原来没有它 ⇒ `POST /api/persona/switch` 里那句
   //    `saveConfig({ persona: { id } })` **什么也没发生**，而接口照样返回
@@ -410,9 +632,18 @@ function saveConfig(patch) {
   put('persona', patch.persona);
   // ⚠️ 2026-09-22 加：**谁在改人设**要留下痕迹。
   //    查"config.yml 被莫名改成别的人设"时，就是靠这行定位到是哪个套件干的。
-  //    带上 CONFIG_FILE 一眼能看出改的是**真实配置**还是套件的临时配置。
-  if (patch.persona) {
-    log.info(`配置写入 persona.id → ${JSON.stringify(patch.persona?.id ?? '')}（文件：${CONFIG_FILE}）`);
+  //    带上文件名一眼能看出改的是**真实配置**还是套件的临时配置。
+  //
+  // ⚠️⚠️ 2026-10-09 修：**原来这里打的是 `CONFIG_FILE`（config.yml），而真实落点是
+  //    `accounts/<当前号>.yml`** —— `persona` 不在 `SHARED_SECTIONS` 里，走 `splitPatch`
+  //    就成了"这个号私有"。当天用户问「主号怎么变成别人的人设了、不是我改的」，
+  //    我照这行日志去翻 `config.yml`，**整个扑空**（那份文件确实一个字没动）。
+  //    ⇒ 打**真实落点**，并且判据用 `personaPatch`（patch 已被 splitPatch 摘过一遍，
+  //      原来的 `patch.persona` 在私有段这条路上恒为 undefined）。
+  if (personaPatch || patch.persona) {
+    const pId = (personaPatch ?? patch.persona)?.id ?? '';
+    const where = ACCOUNT.id && accounts.has(ACCOUNT.id) ? accounts.fileOf(ACCOUNT.id) : CONFIG_FILE;
+    log.info(`配置写入 persona.id → ${JSON.stringify(pId)}（文件：${where}）`);
   }
   // ⚠️ 分群参数（2026-09-15）——和 configForUi 里那一行是**一对**，别只加一个
   put('groupParams', patch.groupParams);
@@ -479,7 +710,7 @@ function saveConfig(patch) {
   // ⚠️ 2026-09-16：改了「日常事件每日条数」要**当天立刻生效**
   //    （用户报的：「为什么我改成日常事件每日3条，现在还是6条」——
   //      当天的目标条数是当天定下并落盘的，原来要等第二天才换）。
-  if (patch.life) {
+  if (touchedLife) {
     try {
       life.syncTarget();
     } catch (e) {
@@ -617,8 +848,453 @@ function allLearned() {
   }
   return out;
 }
+/**
+ * ⚠️⚠️ 2026-10-13 加（用户：「**然后加任务页**」）。
+ *
+ * 为什么是**一个自包含页面**而不是往 `webui.html` 里加标签页：
+ *   那个文件 6000+ 行、导航/切页/渲染三套逻辑缠在一起，动它风险大 ✗
+ *   ⇒ 这里直接吐一页完整的 HTML（内联样式 + 内联 JS，只用两个接口）✓
+ *     · `GET /agent-tasks` —— 打开这一页
+ *     · `GET /api/agent-tasks` —— 任务列表（新的在前）
+ *     · `GET /api/agent-task?id=` —— 单条 + 那次会话的对话
+ *   ⚠️ 好处：**刷新就有**，完全不依赖 DSH 那个侧边栏（那边要重启才更新，实测过 ✗）
+ */
+const AGENT_TASKS_HTML = [
+  '<!doctype html>',
+  '<html lang="zh"><head><meta charset="utf-8"><title>本机任务</title>',
+  '<meta name="viewport" content="width=device-width,initial-scale=1">',
+  '<style>',
+  'body{font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif;margin:0;background:#111;color:#eee}',
+  '.wrap{max-width:920px;margin:0 auto;padding:16px}',
+  'h1{font-size:18px;margin:0 0 4px}',
+  '.hint{color:#888;font-size:12px;margin-bottom:12px}',
+  '.t{border:1px solid #333;border-radius:8px;padding:10px;margin-bottom:8px;background:#161616;cursor:pointer}',
+  '.t:hover{border-color:#555}',
+  '.m{color:#8b8b8b;font-size:12px;margin-top:2px}',
+  '.s{padding:1px 6px;border-radius:6px;font-size:12px;margin-left:6px}',
+  '.running{background:#3a2f00;color:#ffd166}.done{background:#12351f;color:#7ee787}',
+  '.failed,.killed{background:#3a1a1a;color:#ff7b72}.asking{background:#1f2a3a;color:#79c0ff}',
+  '.talk{margin-top:8px;border-top:1px dashed #333;padding-top:8px;display:none}',
+  '.u{color:#9ecbff}.a{color:#e8e8e8}',
+  'pre{white-space:pre-wrap;word-break:break-word;margin:4px 0;font:inherit}',
+  '</style></head><body><div class="wrap">',
+  '<h1>本机任务</h1>',
+  '<div class="hint">点一条看那次她到底在做什么 ｜ <a href="#" id="rf" style="color:#79c0ff">刷新</a>（有更新会自动刷）</div>',
+  '<div id="list">加载中…</div>',
+  '</div><script>',
+  'function esc(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}',
+  'function fmt(t){try{return new Date(t).toLocaleString("zh-CN",{hour12:false})}catch(e){return ""}}',
+  'async function load(){',
+  '  var r=await fetch("/api/agent-tasks?limit=50");var j=await r.json();',
+  '  var L=document.getElementById("list");',
+  '  if(!j.tasks||!j.tasks.length){L.textContent="还没有任务";return}',
+  '  L.innerHTML=j.tasks.map(function(t){',
+  '    var arts=(t.arts||[]).map(function(a){return a.name}).join("、");',
+  '    return "<div class=\\"t\\" data-id=\\""+esc(t.id)+"\\">"+',
+  '      "<div><b>"+esc(t.task||"")+"</b><span class=\\"s "+esc(t.status||"")+"\\">"+esc(t.status||"")+"</span></div>"+',
+  '      "<div class=\\"m\\">"+fmt(t.startedAt)+" ｜ "+esc(t.byName||t.by||"")+(t.cost?" ｜ "+t.cost+" 秒":"")+(t.gid?" ｜ 群 "+esc(t.gid):"")+"</div>"+',
+  '      (t.text?"<div class=\\"m\\">她说的："+esc(String(t.text).slice(0,140))+"</div>":"")+',
+  '      (arts?"<div class=\\"m\\">产物："+esc(arts)+"</div>":"")+',
+  '      "<div class=\\"talk\\" id=\\"talk-"+esc(t.id)+"\\"></div></div>"',
+  '  }).join("");',
+  '  Array.prototype.forEach.call(L.querySelectorAll(".t"),function(el){',
+  '    el.addEventListener("click",function(){openTalk(el)})',
+  '  })',
+  '}',
+  'async function openTalk(el){',
+  '  var id=el.getAttribute("data-id");var box=document.getElementById("talk-"+id);',
+  '  if(box.style.display==="block"){box.style.display="none";return}',
+  '  box.style.display="block";box.textContent="加载对话…";',
+  '  try{',
+  '    var r=await fetch("/api/agent-task?id="+encodeURIComponent(id));var j=await r.json();',
+  '    if(!j.ok){box.textContent=j.error||"读不到";return}',
+  '    if(!j.talk||!j.talk.length){box.textContent="（这次没有可显示的对话）";return}',
+  '    box.innerHTML=j.talk.map(function(x){',
+  '      return "<pre class=\\""+(x.role==="user"?"u":"a")+"\\">"+(x.role==="user"?"我：":"她：")+esc(x.text)+"</pre>"',
+  '    }).join("");',
+  '  }catch(e){box.textContent="出错："+e.message}',
+  '}',
+  'load();',
+  'document.getElementById("rf").addEventListener("click",function(e){e.preventDefault();load()});',
+  '// ⚠️ 2026-10-13：不再定时轮询 —— 服务端在任务有变化时用 SSE 推一下（断了自己会重连）',
+  'try{var es=new EventSource("/agent-tasks/stream");es.addEventListener("change",function(){load()});',
+  'es.addEventListener("open",function(){/* 连上了 */});}catch(e){}',
+  '</script></body></html>',
+].join('\n');
 
 const routes = {
+  /**
+   * 「这个进程是谁」—— 多 QQ 号的地基接口（2026-10-07 加）。
+   *
+   * 用途有两个：
+   *   ① 界面刚打开时问一句"我现在在控制哪个号"，好把侧栏那条横幅显示对；
+   *   ② 别的号的进程用它**探活**（见 `GET /api/accounts`）——
+   *      `http://127.0.0.1:<那个号的端口>/api/whoami` 通 = 那个号在跑。
+   */
+  'GET /api/whoami': async (_req, res) => {
+    send(res, 200, {
+      ok: true,
+      qq: displayId(),
+      main: ACCOUNT.main || displayId(),
+      isMain: ACCOUNT.isMain,
+      // ⚠️ 有没有做过"多号拆分"（**看磁盘**，见 `splitState`）；
+      //    `needRestart` = 磁盘拆好了但这个进程还没重启，界面要提示。
+      ...splitState(),
+      name: ACCOUNT.id ? accounts.displayName(ACCOUNT.id) : '',
+      port: Number(config.webui?.port) || 3099,
+      botQQ: String(config.botQQ ?? ''),
+      persona: personaId(),
+      pid: process.pid,
+      ignoredPrivate: ACCOUNT.ignoredPrivate ?? [],
+    });
+  },
+
+  /**
+   * 号列表（界面上「QQ 号」那一页）。
+   *
+   * ⚠️ 每个号**单独探活**：只有"那个号的进程真的在跑"，它的界面端口才回应。
+   *    所以这一页能一眼看出"哪个号在线、哪个号没起来"。
+   * ⚠️ 探测用 1.5 秒超时并**并发**发出去 —— 号多了也不该让这一页卡住。
+   */
+  'GET /api/accounts': async (_req, res) => {
+    const ids = accounts.ids();
+    // ⚠️ 主号可能**还没有账号文件**（老用户没做拆分）—— 也要列出来，
+    //    不然界面上"正在控制的那个号"反而看不见，切都没法切。
+    const shownMain = ACCOUNT.main || displayId();
+    if (shownMain && !ids.includes(shownMain)) ids.unshift(shownMain);
+
+    const sharedPort = Number(config.webui?.port) || 3099;
+    const one = async (qq) => {
+      const a = accounts.read(qq) ?? {};
+      const isMain = qq === shownMain;
+      const port = Number(a.webui?.port) || (isMain ? sharedPort : 0);
+      const self = qq === displayId();
+      let alive = self;
+      let info = self
+        ? { qq, port: sharedPort, persona: personaId(), pid: process.pid, isMain }
+        : null;
+      if (!self && port) {
+        try {
+          const r = await fetch(`http://127.0.0.1:${port}/api/whoami`, {
+            signal: AbortSignal.timeout(1500),
+          });
+          if (r.ok) {
+            info = await r.json();
+            alive = true;
+          }
+        } catch {
+          /* 连不上 = 那个号没在跑，界面显示成灰的就行 */
+        }
+      }
+      return {
+        qq,
+        name: String(a.name ?? '').trim(),
+        note: String(a.note ?? '').trim(),
+        botQQ: String(a.botQQ ?? qq),
+        persona: String(info?.persona ?? a.persona?.id ?? config.persona?.id ?? 'saki'),
+        port,
+        isMain,
+        self,
+        alive,
+        pid: info?.pid ?? 0,
+        hasFile: accounts.has(qq),
+        // ⚠️ 2026-10-14 加：**人工接管**（一号一份，存在 `accounts/<QQ>.yml` 里）——
+        //    界面那个开关直接读它就够了，不用再为它单开一个接口
+        takeover: a.humanTakeover?.enable === true,
+        // ⚠️ 2026-10-14 加：**私聊工作模式**（同样一号一份、默认关）——
+        //    就是那个"接单号"用的：好友私聊按"先摸需求 → 问要不要开始 → 到点交付"走
+        workMode: a.privateWork?.enable === true,
+        // ⚠️ 协议端那边：这个号**登录过没有**（有没有它的配置文件）、
+        //    以及它的 OneBot 端口配了没（界面上的"接协议端"按钮用这两个判断）
+        protoSupported: providerAccounts.supported(),
+        protoLoggedIn: providerAccounts.supported() ? existsSync(providerAccounts.fileOf(qq)) : false,
+        protoPort: providerAccounts.supported() ? providerAccounts.wsPortOf(qq) : 0,
+      };
+    };
+    send(res, 200, {
+      ok: true,
+      current: displayId(),
+      main: shownMain,
+      sharedPort,
+      // ⚠️ 没拆分时界面要提示"加第二个号之前先拆一次"；拆了但没重启要提示重启
+      ...splitState(),
+      // ⚠️ 协议端那边配到哪一步了（界面上"接协议端"那个按钮要用）
+      provider: {
+        supported: providerAccounts.supported(),
+        reason: providerAccounts.supported() ? '' : providerAccounts.unsupportedReason(),
+        manageUrl: provider.manageUrl(),
+        // 协议端里**已经有配置文件**的号（= 已经登录进去过的号）
+        known: providerAccounts.supported() ? providerAccounts.knownAccounts() : [],
+        ports: providerAccounts.supported() ? providerAccounts.wsPorts() : [],
+      },
+      accounts: await Promise.all(ids.map(one)),
+    });
+  },
+
+  /**
+   * 号的增 / 删 / 改名 / **复制配置**（用户要的「配置可以被复用」）。
+   *
+   * ⚠️ 这个接口故意**不跟着"当前号"转发** —— 它是"管所有号"的接口，
+   *    由用户当前连着的那个进程处理就行（都是同一个磁盘上的文件）。
+   */
+  /**
+   * ⚠️ 2026-10-14 加：**「工作模式」页里那张「分好友的设置」表**要的数据 ——
+   *    好友名单（协议端拉回来的那份）+ 每个人现在的状态 + 他自己的设置 + 全局默认值。
+   *    ⚠️ 它和 `affinity`（好感度那套好友设置）**没有半点关系**（用户特意说过）。
+   */
+  'GET /api/private-work': async (_req, res) => {
+    try {
+      const pw = await import('./private-work.js');
+      if (!pw.enabled()) {
+        return send(res, 200, { ok: true, off: true, friends: [], counting: 0, defaults: {} });
+      }
+      return send(res, 200, pw.uiData());
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
+  // ── B 站视频分享（2026-10-15 用户要求）──────────────────────
+  // ⚠️⚠️ **按群**存的（用户：「b站分享也要分群调节」）——
+  //    写 `accounts/<QQ>.yml` 的 `groupParams.<群>.biliShare` ✓
+  //    （跟「按群设定」页同一套机制：`accounts.patch` 深合并 ⇒ 不冲掉别的段）✓
+  'GET /api/bili-share': async (req, res) => {
+    try {
+      const bs = await import('./bili-share.js');
+      const gid = String(new URL(req.url, 'http://x').searchParams.get('groupId') ?? '').trim();
+      return send(res, 200, { ok: true, groupId: gid, cfg: bs.uiCfg(gid), status: bs.status(gid) });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+  // ⚠️ 「立刻发送」（2026-10-15 用户要求）—— 界面上点一下**马上**给选中的那个群发一条。
+  //    跳过时段/冷却判定（`force`），但仍然**排除发过的**、仍然记账（手动发的也算那个群今天一条）✓
+  'POST /api/bili-share/send': async (req, res) => {
+    const body = await jsonBody(req);
+    try {
+      const bs = await import('./bili-share.js');
+      const gid = String(body.groupId ?? '').trim();
+      if (!gid) return send(res, 400, { ok: false, error: '先选个群' });
+      // ⚠️⚠️ 2026-10-15 用户要求：「**手动发一条视频不开自动发也要能发**」
+      //    ⇒ 这里**不再看那个群的开关** —— 那个开关管的是"**定时自动发**"，
+      //      手动点一下是另一回事（原来把它一起拦了，用户点了会看到"开关还没打开"✗）
+      //    ⚠️ 但"这个群有没有关键词"还得管 —— 没关键词压根搜不到东西，
+      //      这种要**说清楚**（不然界面上只会显示"没挑到能发的视频"，看不出为什么）✓
+      if (!bs.keywordsOf(gid).length) {
+        return send(res, 400, {
+          ok: false,
+          error: '这个群还没填关键词（自动发的开关可以关着，但关键词得先填一个）',
+        });
+      }
+      const life = await import('./life.js');
+      // ⚠️ 2026-10-15：用 `eventGroups()`（1 档群）—— 手动发不该被「日常事件开关」挡住 ✓
+      const r = await bs.runOnce(bot, life.eventGroups(), { force: true, groupId: gid });
+      log.info(`[B站分享] 界面上手动发了群 ${gid} 一条：${r.sent ? r.url : '没发成（' + r.why + '）'}`);
+      return send(res, 200, { ok: r.sent === true, ...r });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+  'POST /api/bili-share': async (req, res) => {
+    const body = await jsonBody(req);
+    try {
+      const bs = await import('./bili-share.js');
+      const gid = String(body.groupId ?? '').trim();
+      if (!gid) return send(res, 400, { ok: false, error: '先选个群（这是按群设的）' });
+      const clean = bs.normalizeCfg(body); // ⚠️ 规矩在模块里（界面和手写 yml 同一套）✓
+      if (!ACCOUNT.id || !accounts.has(ACCOUNT.id)) {
+        return send(res, 400, { ok: false, error: '读不到当前账号，没法按号保存' });
+      }
+      // ⚠️ 写进 `groupParams.<群>.biliShare`（深合并 ⇒ 不冲掉这个群的别的段）✓
+      accounts.patch(ACCOUNT.id, { groupParams: { [gid]: { biliShare: clean } } });
+      // ⚠️ 写完让内存里的 config 跟着变（不然要重启才生效）✓
+      reloadConfig();
+      log.info(
+        `管理界面改了 B站分享（群 ${gid}）：enable=${clean.enable} ` +
+          `关键词=${JSON.stringify(clean.keywords)} 每天 ${clean.minPerDay}~${clean.maxPerDay} 条`,
+      );
+      return send(res, 200, { ok: true, cfg: clean });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/accounts': async (req, res) => {
+    const body = await jsonBody(req);
+    const action = String(body.action ?? '');
+    const qq = String(body.qq ?? '').trim();
+    try {
+      // ── 「拆分」：把 config.yml 里属于这个号的设置搬进 accounts/<QQ>.yml ──
+      //    界面上是用户点了确认才走到这里（见 `migrateToAccounts` 的说明）。
+      if (action === 'migrate') {
+        const target = qq || displayId();
+        if (!accounts.isValidId(target)) throw new Error('要拆分的 QQ 号不合法');
+        if (accounts.has(target)) throw new Error(`号 ${target} 已经有配置文件了，不用再拆`);
+        const out = migrateToAccounts(target);
+        log.info(
+          `多号拆分完成：${out.moved.length} 段搬进 accounts/${target}.yml（原 config.yml 备份在 ${out.backup}）`,
+        );
+        return send(res, 200, { ok: true, qq: target, moved: out.moved, backup: out.backup });
+      }
+      if (action === 'create') {
+        if (!accounts.isValidId(qq)) throw new Error('QQ 号要填 5~12 位数字');
+        if (accounts.has(qq)) throw new Error(`号 ${qq} 已经加过了`);
+        if (qq === ACCOUNT.main) throw new Error('这就是主号，不用新建');
+        // 端口从 3100 往上找没被占的（主号固定是 config.yml 里那个）
+        const taken = [
+          Number(config.webui?.port) || 3099,
+          ...accounts.ids().map((id) => Number(accounts.read(id)?.webui?.port) || 0),
+        ];
+        const port = await accounts.allocatePort(taken);
+        if (!port) throw new Error('找不到空闲端口（3100 往后 200 个都被占了）');
+        const made = accounts.create(qq, {
+          name: body.name,
+          copyFrom: body.copyFrom,
+          sections: body.sections,
+          webuiPort: port,
+        });
+        // ⚠️ 2026-10-07：顺手建好这个号**私有知识目录**（群记忆 / 学习档案 / 群资料都落这儿）。
+        //    不建的话，它第一次跑起来会满日志找 `knowledge/accounts/<QQ>/learned.md`；
+        //    建了空目录 + 一个空档案，就是"这个号还没学过任何东西"的正常起点。
+        try {
+          const kd = join(KNOWLEDGE_DIR, 'accounts', qq);
+          mkdirSync(kd, { recursive: true });
+          const lf = join(kd, 'learned.md');
+          if (!existsSync(lf)) {
+            writeFileSync(lf, '# 学习档案（这个号自己学到的）\n\n' + '<!-- LEARNED:BEGIN -->\n<!-- LEARNED:END -->\n', 'utf8');
+          }
+        } catch (e) {
+          log.warn(`给号 ${qq} 建私有知识目录失败（不影响加号）：${e.message}`);
+        }
+        log.info(`新加了一个号：${qq}（界面端口 ${port}${body.copyFrom ? `，配置复制自 ${body.copyFrom}` : ''}）`);
+        // ⚠️ 用户要求「**以后每次加号都能自动互相加池**」：
+        //    新号一加进来就立刻和已有的号互相进同类池，并复用它缺的不同类池。
+        //    ⚠️ 失败**不影响加号**（池是加成，不该因为它把加号回滚）。
+        let poolReport = null;
+        try {
+          poolReport = pools.sync();
+          if (poolReport.changed.length) {
+            log.info(
+              `机器人池自动同步：改了 ${poolReport.changed.length} 个号（${poolReport.changed
+                .map((c) => `${c.qq} 同类+${c.peersAdded.length}/不同类+${c.otherAdded.length}`)
+                .join('，')}）`,
+            );
+          }
+        } catch (e) {
+          log.warn(`加号后自动同步机器人池失败（不影响加号）：${e.message}`);
+        }
+        return send(res, 200, { ok: true, qq, port, account: made, pools: poolReport });
+      }
+      if (action === 'rename') {
+        if (!accounts.has(qq)) throw new Error(`没有这个号：${qq}`);
+        accounts.patch(qq, { name: String(body.name ?? ''), note: String(body.note ?? '') });
+        return send(res, 200, { ok: true, qq });
+      }
+      if (action === 'copy') {
+        const from = String(body.from ?? '').trim();
+        const to = String(body.to ?? '').trim();
+        if (!from || !to) throw new Error('要指明从哪个号复制到哪个号');
+        if (from === to) throw new Error('源和目标是同一个号');
+        if (!accounts.has(from)) throw new Error(`源号 ${from} 没有配置文件`);
+        if (!accounts.has(to)) throw new Error(`目标号 ${to} 没有配置文件`);
+        const src = accounts.read(from) ?? {};
+        const sections = Array.isArray(body.sections) && body.sections.length ? body.sections : null;
+        const out = {};
+        for (const [k, v] of Object.entries(src)) {
+          // ⚠️ 这两样**永远不复制**：`onebot` 是那个号专属的 WS 端口 + token
+          //    （复制过去两个进程会抢同一个端口）；`botQQ` 复制了就是把"自己是谁"搞错。
+          if (k === 'onebot' || k === 'botQQ' || k === 'name' || k === 'note') continue;
+          if (sections && !sections.includes(k)) continue;
+          out[k] = v;
+        }
+        accounts.patch(to, out);
+        log.info(`把号 ${from} 的配置复制给了 ${to}（${Object.keys(out).join(', ') || '没有可复制的段'}）`);
+        return send(res, 200, { ok: true, from, to, sections: Object.keys(out) });
+      }
+      if (action === 'remove') {
+        if (!accounts.has(qq)) throw new Error(`没有这个号：${qq}`);
+        if (qq === ACCOUNT.main) throw new Error('主号不能删（它是"用老路径"的那个号，删了数据路径就乱了）');
+        if (qq === ACCOUNT.id) throw new Error('不能删掉正在跑的这个号');
+        const backup = accounts.remove(qq);
+        log.info(`删掉了一个号：${qq}（原文件备份在 ${backup}）`);
+        return send(res, 200, { ok: true, qq, backup });
+      }
+      throw new Error(`不认识的 action：${action || '(空)'}`);
+    } catch (e) {
+      send(res, 400, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * 协议端那边：给某个号配 OneBot 端口 / 重启协议端（2026-10-07 加，用户要求「我自动改协议端配置」）。
+   *
+   * ⚠️ 分成两个动作是**故意的**：
+   *   · `sync`    只改配置文件（协议端的 `onebot_<QQ>.json` + 我们这边那个号的接入点），
+   *               **不影响正在跑的连接**；
+   *   · `restart` 才让新端口真正生效 —— 但它会让**所有号**掉线约 1 分钟，
+   *               所以单独一个动作，界面上要用户点确认才发。
+   *
+   * ⚠️ 前置条件**做不了自动化**：新号必须先在协议端自己的界面里登录过（扫码），
+   *    协议端才会为它生成配置文件。没登录过就 `sync`，这里会如实说明，
+   *    不会假装成功（项目里对"不支持/做不到"一向是这个态度）。
+   */
+  'POST /api/accounts/provider': async (req, res) => {
+    const body = await jsonBody(req);
+    const action = String(body.action ?? '');
+    const qq = String(body.qq ?? '').trim();
+    try {
+      if (!providerAccounts.supported()) throw new Error(providerAccounts.unsupportedReason());
+      if (action === 'sync') {
+        if (!accounts.has(qq)) throw new Error(`号 ${qq} 还没加进来 —— 先在「加一个 QQ 号」那里加它`);
+        const r = providerAccounts.ensure(qq);
+        if (!r.ok) throw new Error(r.reason);
+        // ⚠️ 把接入点写进**这个号**的账号文件（不是共用的 config.yml）
+        accounts.patch(qq, {
+          onebot: {
+            mode: 'forward',
+            url: `ws://127.0.0.1:${r.port}`,
+            accessToken: r.token,
+            reconnectInterval: 3000,
+          },
+        });
+        log.info(`协议端：号 ${qq} 配好 OneBot 端口 ${r.port}（${r.created ? '新建' : '已存在，token 已同步'}）`);
+        return send(res, 200, { ok: true, qq, port: r.port, created: !!r.created, needRestart: true });
+      }
+      if (action === 'restart') {
+        const r = await providerAccounts.restart();
+        if (!r.ok) throw new Error(r.reason);
+        log.info(`协议端已重启（${r.waitedMs} ms 后重新监听 ${r.port}），各号会自动重连`);
+        return send(res, 200, { ok: true, port: r.port, waitedMs: r.waitedMs });
+      }
+      throw new Error(`不认识的 action：${action || '(空)'}`);
+    } catch (e) {
+      send(res, 400, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * 「机器人池」手动同步一次（2026-10-07 用户要求）。
+   *
+   * ⚠️ 这个接口**不跟着"当前号"转发**（它是"管所有号"的接口，见前端 `api()` 的白名单）。
+   * ⚠️ `dryRun` 只算不改，界面上有个「先看看会改什么」——
+   *    因为这一下会改到**所有号**的按群设定，值得先看一眼。
+   */
+  'POST /api/pools/sync': async (req, res) => {
+    const body = await jsonBody(req);
+    try {
+      const r = pools.sync({ dryRun: !!body.dryRun });
+      if (!body.dryRun && r.changed.length) {
+        log.info(
+          `机器人池同步（手动）：${r.changed.length} 个号 —— ` +
+            r.changed.map((c) => `${c.qq} 同类+${c.peersAdded.length}/不同类+${c.otherAdded.length}`).join('，'),
+        );
+      }
+      send(res, 200, { ...r, dryRun: !!body.dryRun });
+    } catch (e) {
+      send(res, 400, { ok: false, error: e.message });
+    }
+  },
+
   'GET /api/state': async (_req, res) => {
     const data = await queryServer(config.status.host, 0).catch((e) => ({ ok: false, error: e.message }));
     send(res, 200, {
@@ -650,6 +1326,28 @@ const routes = {
     });
   },
 
+  /**
+   * 2026-10-06 加：**只读**的读配置。
+   *
+   * ⚠️⚠️ **为什么必须有这个 GET**：界面上 `renderDiceMode()`（骰娘触发词）和
+   *    `renderSealdiceRelay()`（海豹转述开关）都是**读**配置，用的是裸的
+   *    `api('/api/config')`，也就是 **GET**。而路由表里**只有 POST**
+   *    ⇒ GET 落到 404、响应体是纯文本 `Not found` ⇒ 前端 `r.json()` 抛
+   *    `Unexpected token 'N', "Not found" is not valid JSON`。
+   *    ⚠️ 那个错又被各自的 `catch` 吞掉、只在反馈位显示 ⇒ **整张卡填不上**：
+   *    骰娘那三个触发词框不出现、海豹下拉框停在第一项，用户只会看到一句
+   *    「Unexpected token 'N'」，完全看不出是**后端少了个路由**。
+   *
+   * ⚠️ 别改成让前端改用 POST 空 body 绕过去 —— 那等于每进一次页面就
+   *    触发一次「写配置」的代码路径（`saveConfig({})`）。这里给 GET 是正解。
+   *
+   * ⚠️ 只读，所以**不碰 config.yml**，也不会误伤 `sealdice.token`
+   *    （`configForUi()` 本来就不吐 token，见那里「绝不能带 token」的注释）。
+   */
+  'GET /api/config': async (req, res) => {
+    send(res, 200, { ok: true, config: configForUi(), problems: validate() });
+  },
+
   'POST /api/config': async (req, res) => {
     const patch = await jsonBody(req);
     try {
@@ -670,7 +1368,12 @@ const routes = {
     if (!baseURL) return send(res, 200, { ok: false, error: 'baseURL 是空的' });
 
     try {
-      const r = await fetch(`${baseURL}/models`, {
+      // ⚠️⚠️ 2026-10-09 修（用户：「**为什么拉取失败了**」）：
+      //    这里原来是**裸 `fetch`** —— 它**不走项目那套代理逻辑**（`llmFetch` 才有：
+      //    "走代理，代理失败自动换直连"）⇒ 换成 Gemini（`generativelanguage.googleapis.com`）
+      //    这种**国内必须走代理**的地址，裸 fetch 必然 `fetch failed` ✗
+      //    ⇒ 换成 `llmFetch`（和真正聊天用的是同一条网络出口 ✓）
+      const r = await llmFetch(`${baseURL}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(20000),
       });
@@ -731,7 +1434,7 @@ const routes = {
     let error = '';
     if (baseURL && apiKey) {
       try {
-        const r = await fetch(`${baseURL}/models`, {
+        const r = await llmFetch(`${baseURL}/models`, {
           headers: { Authorization: `Bearer ${apiKey}` },
           signal: AbortSignal.timeout(15000),
         });
@@ -833,13 +1536,16 @@ const routes = {
     const text = String(t.prompt ?? '').trim() || '拍张照片看看，你现在什么样';
     const picked = await photoPlan.plan({ text, said: '', marker, facts });
     const withSelf = picked.withSelf;
+    // ⚠️ 2026-10-02：`refs` 先算 —— 拼提示词时要告诉它这次带没带参考图
+    //    （带了就在提示词里指认参考图里的那个女孩，见 `imagegen.buildPrompt`）。
+    const refs = withSelf ? persona.refImages() : [];
     const prompt = imagegen.buildPrompt({
       what: picked.what,
       withSelf,
       time: picked.time || facts.now,
       place: picked.place || facts.where,
+      hasRef: refs.length > 0,
     });
-    const refs = withSelf ? persona.refImages() : [];
     const r = await imagegen.generate({ prompt, refs, expectRef: withSelf, over: t.imagegen ?? {} });
     if (!r.ok) {
       // ⚠️ 两条信息**分开**给（2026-09-22 实测踩到 `ModelNotOpen` 之后改的）：
@@ -1301,6 +2007,27 @@ const routes = {
     }
   },
 
+  // ── 自动清理（2026-10-06 用户要求）──────────────────
+  // 界面上看各处占用 + 待清项，以及"立刻清一次"。
+  // ⚠️ POST **默认只演练**（`dryRun` 必须显式传 false 才真删）—— 这个接口会 rm 东西，
+  //    默认不删比默认删安全得多。
+  'GET /api/cleanup': async (_req, res) => send(res, 200, cleanup.status()),
+
+  'POST /api/cleanup': async (req, res) => {
+    const body = await jsonBody(req);
+    try {
+      const dryRun = body.dryRun !== false;
+      const r = cleanup.run({ dryRun });
+      log.info(
+        `管理界面${dryRun ? '预览' : '执行'}了自动清理：${r.deleted.length} 项 / ` +
+          `${(r.freedBytes / 1048576).toFixed(1)} MB${dryRun ? '（没真删）' : ''}`,
+      );
+      send(res, 200, { ok: true, ...r });
+    } catch (e) {
+      send(res, 400, { ok: false, error: e.message });
+    }
+  },
+
   /**
    * **某个群**的日常事件进度（2026-09-16 分群之后加的）。
    * 不给 `groupId` = 所有 1 档群各来一行（界面上那张"按群"的表直接用）。
@@ -1477,6 +2204,70 @@ const routes = {
    * ⚠️ 2026-09-15 晚加：收紧度按群之后，界面上那个下拉框需要"选中群现在是什么值"。
    *    这里**故意不校验档位**（只是读，界面不该因为不是 1 档群就报错）。
    */
+  /** ⚠️⚠️ 2026-10-13 加（用户：「15 秒刷新改成**对话有更新时刷新**吧」）：
+   *  任务页不再定时轮询 —— 服务端推送（SSE）：任务一开始/结束/产物发了/在问话，都会推一下 ✓
+   *  ⚠️ 这是**长连接**：必须把 socket 的超时关掉，不然被服务端掐掉 ✗ */
+  'GET /agent-tasks/stream': async (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    try {
+      req.socket?.setTimeout?.(0);
+      res.socket?.setTimeout?.(0);
+    } catch {}
+    res.write(': connected\n\n');
+    const ab = await import('./agent-bridge.js');
+    const off = ab.onTaskChange(() => {
+      try {
+        res.write('event: change\ndata: {}\n\n');
+      } catch {}
+    });
+    // ⚠️ 心跳：中间可能有代理/防火墙，久了不发东西会被断
+    const hb = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {}
+    }, 25000);
+    const bye = () => {
+      clearInterval(hb);
+      try {
+        off();
+      } catch {}
+      try {
+        res.end();
+      } catch {}
+    };
+    req.on('close', bye);
+    req.on('error', bye);
+  },
+
+  'GET /agent-tasks': async (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(AGENT_TASKS_HTML);
+  },
+
+  /** 任务列表（新的在前） */
+  'GET /api/agent-tasks': async (req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const limit = Math.min(200, Math.max(1, Number(u.searchParams.get('limit') ?? 50) || 50));
+    const ab = await import('./agent-bridge.js');
+    send(res, 200, { ok: true, tasks: ab.taskHistory(limit), running: ab.status().running });
+  },
+
+  /** 单条任务 + 那次会话的对话（页面点开就看这个） */
+  'GET /api/agent-task': async (req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const id = String(u.searchParams.get('id') ?? '').trim();
+    const ab = await import('./agent-bridge.js');
+    const t = ab.taskHistory(200).find((x) => String(x.id) === id);
+    if (!t) return send(res, 200, { ok: false, error: '没有这条任务（可能太老了，只留最近 200 条）' });
+    const talk = t.sessionId ? await ab.readSessionTalk(t.sessionId).catch(() => []) : [];
+    send(res, 200, { ok: true, task: t, talk });
+  },
+
   'GET /api/group-params': async (req, res) => {
     const u = new URL(req.url, 'http://x');
     const gid = String(u.searchParams.get('groupId') ?? '').trim();
@@ -1485,7 +2276,13 @@ const routes = {
       ok: true,
       groupId: gid,
       overrides: config.groupParams?.[gid] ?? {},
-      params: { life: paramsFor('life', gid), quest: paramsFor('quest', gid), chat: paramsFor('chat', gid) },
+      params: {
+        life: paramsFor('life', gid),
+        quest: paramsFor('quest', gid),
+        chat: paramsFor('chat', gid),
+        biliShare: biliShare.uiCfg(gid),
+      },
+      biliShareStatus: biliShare.status(gid),
     });
   },
 
@@ -1497,17 +2294,66 @@ const routes = {
     //    2 档群只是"她会在那儿说话"，没有日常事件也没有剧情 —— 给它设这些参数毫无意义，
     //    而且会让人以为"设了就会生效"。直接拒绝，并告诉他去哪儿改档位。
     if (!life.isEventGroup(gid)) {
-      const lv = config.trigger?.groupRespondTo?.[gid];
-      return send(res, 200, {
-        ok: false,
-        error:
-          `群 ${gid} 不是 1 档群（当前档位 ${lv ?? '没配'}）→ **不进事件系统**，` +
-          '设了也不会生效。想让它收日常事件/跑剧情，先去「活跃度」把档位改成 1。',
-      });
+      // ⚠️ 2026-10-07 修（本轮发现的真 bug）：**`answerServer` 跟事件系统没关系**。
+      //    它是"这个群要不要回服务器消息"（她怎么说话），2/3 档群一样需要它 ——
+      //    而这一页的其它字段（life / quest）确实只有 1 档群才有意义。
+      //    ⇒ 只有**事件类**字段（life/quest）才卡 1 档；纯 chat 的改动放行。
+      const onlyChat = b.patch && Object.keys(b.patch).every((k) => k === 'chat');
+      if (!onlyChat) {
+        const lv = config.trigger?.groupRespondTo?.[gid];
+        return send(res, 200, {
+          ok: false,
+          error:
+            `群 ${gid} 不是 1 档群（当前档位 ${lv ?? '没配'}）→ **不进事件系统**，` +
+            '设了也不会生效。想让它收日常事件/跑剧情，先去「群与触发」把档位改成 1。',
+        });
+      }
     }
-    const raw = yaml.load(readFileSync(CONFIG_FILE, 'utf8')) ?? {};
-    raw.groupParams ??= {};
-    const cur = raw.groupParams[gid] ?? {};
+    // ⚠️⚠️ 2026-10-07 修（本轮发现的真 bug）：这里原来**直接读写共用的 `config.yml`**。
+    //    而拆分之后 `groupParams`（按群设定）属于**每个号私有**（`accounts/<QQ>.yml`）——
+    //    于是"改按群设定"实际写进了共用文件，而真正生效的是账号文件里那一份
+    //    ⇒ 表现是「改了按群设定，一点效果都没有」，而且界面**照样回读成功**（最阴的那种）。
+    //    ⇒ 现在统一交给 `saveConfig`（它按段分派：`groupParams` 是私有段 ⇒ 写账号文件）。
+    //    ⚠️ 底稿用 `config.groupParams`（**合并后**的值）而不是从 config.yml 读的 raw ——
+    //       否则会把账号文件里已有的设置当成"不存在"，一保存就冲掉。
+    const cur = JSON.parse(JSON.stringify(config.groupParams?.[gid] ?? {}));
+    // ⚠️ 2026-10-05 加（用户要求）：「机器人同类池」是**顶层数组**（不是 life/quest/chat
+    //    那种 kind 对象）⇒ 单独收。规矩跟 config.js 那边一致：
+    //    去空值、统一字符串、去重、封顶 10 个。
+    if (Array.isArray(b.patch?.peers)) {
+      const seen = new Set();
+      const peers = [];
+      for (const x of b.patch.peers) {
+        const id = String(x ?? '').trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        peers.push(id);
+        if (peers.length >= 10) break;
+      }
+      if (peers.length) cur.peers = peers;
+      else delete cur.peers;
+    }
+    // ⚠️ 2026-10-06 加（用户要求）：「不同类机器人池」—— 和同类池**正好相反**：
+    //    填进去的号她**完全不回应**（连 @ 她都不回，也不进剧情/好感度）。
+    //    规矩跟 `peers` 一模一样：去空值、统一字符串、去重、封顶 10 个。
+    if (Array.isArray(b.patch?.otherBots)) {
+      const seen = new Set();
+      const otherBots = [];
+      for (const x of b.patch.otherBots) {
+        const id = String(x ?? '').trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        otherBots.push(id);
+        if (otherBots.length >= 10) break;
+      }
+      if (otherBots.length) cur.otherBots = otherBots;
+      else delete cur.otherBots;
+    }
+    if (b.patch?.biliShare === null) {
+      delete cur.biliShare;
+    } else if (b.patch?.biliShare && typeof b.patch.biliShare === 'object') {
+      cur.biliShare = biliShare.normalizeCfg(b.patch.biliShare);
+    }
     for (const [kind, fields] of Object.entries(b.patch ?? {})) {
       // ⚠️ `chat` = 收紧度这类"她怎么说话"的参数（2026-09-15 晚加）
       if (!['life', 'quest', 'chat'].includes(kind) || !fields || typeof fields !== 'object') continue;
@@ -1518,19 +2364,46 @@ const routes = {
       }
       if (!Object.keys(cur[kind]).length) delete cur[kind];
     }
-    if (Object.keys(cur).length) raw.groupParams[gid] = cur;
-    else delete raw.groupParams[gid];
-    // ⚠️ 先备份再写（和其它保存一样，走 `backupKnowledge` 那条路不需要 —— 这是配置文件）
-    writeFileSync(CONFIG_FILE, yaml.dump(raw, { lineWidth: 120, noRefs: true }), 'utf8');
-    reloadConfig();
+    // ⚠️ 交给 `saveConfig`：它按段分派 —— `groupParams` 是**私有段**，
+    //    会写进 `accounts/<这个号>.yml`（不是共用的 config.yml）。
+    //    空对象传 `null` = 把这个群的覆盖整个删掉（`put()` 里 `null` 就是删除语义）。
+    saveConfig({ groupParams: { [gid]: Object.keys(cur).length ? cur : null } });
     log.info(`管理界面改了群 ${gid} 的覆盖参数：${JSON.stringify(b.patch ?? {})}`);
     send(res, 200, {
       ok: true,
       // ⚠️ 回读一遍**规范化之后**的值（夹取/默认值都在 config.js 里）
       // ⚠️ 收紧度（`chat.strictness`）也按群返回（2026-09-15 晚）
-      params: { life: paramsFor('life', gid), quest: paramsFor('quest', gid), chat: paramsFor('chat', gid) },
+      params: {
+        life: paramsFor('life', gid),
+        quest: paramsFor('quest', gid),
+        chat: paramsFor('chat', gid),
+        biliShare: biliShare.uiCfg(gid),
+      },
       overrides: config.groupParams?.[gid] ?? {},
     });
+  },
+
+  'POST /api/bili-share/send-now': async (req, res) => {
+    let body = {};
+    try {
+      body = await jsonBody(req);
+    } catch (e) {
+      return send(res, 400, { ok: false, error: `请求体无效：${e.message}` });
+    }
+    const gid = String(body.groupId ?? '').trim();
+    if (!gid) return send(res, 200, { ok: false, error: '要指定群号' });
+    if (!life.isEventGroup(gid)) {
+      return send(res, 200, { ok: false, error: `群 ${gid} 不是 1 档群，不能发送 B 站分享` });
+    }
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    try {
+      const result = await biliShare.runOnce(bot, [gid], { force: true, groupId: gid });
+      if (!result.sent) return send(res, 200, { ok: false, error: result.why });
+      send(res, 200, { ok: true, ...result });
+    } catch (e) {
+      log.warn(`[B站分享] WebUI 手动发送失败（群 ${gid}）：${e.message}`);
+      send(res, 200, { ok: false, error: e.message });
+    }
   },
 
   /**
@@ -1858,6 +2731,139 @@ const routes = {
     }
   },
 
+  // 让她**在群里说一句**（2026-10-05 加）。
+  //
+  // ⚠️ 为什么需要它：群里那条「读一下这个」（<主人> 引用一个日志文件）她当时没读出来，
+  //    要**补发**一条 —— 而现成的 `/api/life/send-now` 会把它当成**今天的日常事件**
+  //    记进 `life.json` + 故事线（她的记忆里就凭空多出一件"她真经历过的事"）✗
+  //    ⇒ 这个接口**只发话、不记账**。
+  // ⚠️ 走 `sendChatLike`（不是裸 `send_group_msg`）—— 那是她所有发言的唯一出口，
+  //    打码 / 口癖抑制 /「倒」降频 / 分条那一整套都在里面，绕过去就不是她的说话了。
+  // 立刻试一次「同类机器人搭话」（2026-10-05 加）。
+  //
+  // ⚠️ 为什么需要：那个功能的定时器是"每 5 分钟看一次、群里冷场 15 分钟才开口"——
+  //    想马上看到效果时，等它自己触发要十几分钟。这个接口**跳过那几道时间闸**
+  //    （但仍然要求"配了同类池"），直接生成一句发出去，并**照样记账**（冷却该算）。
+  'POST /api/peer-chat/now': async (req, res) => {
+    const b = await jsonBody(req);
+    const gid = String(b.groupId ?? '').trim();
+    if (!gid) return send(res, 200, { ok: false, error: '要填群号' });
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    const peers = peerChat.peersOf(gid);
+    if (!peers.length) {
+      return send(res, 200, { ok: false, error: `群 ${gid} 没配同类池（去「按群设定」里填 QQ 号）` });
+    }
+    const peer = peerChat.pickPeer(gid, peers);
+    const peerName = names.of(peer, gid) || peer;
+    try {
+      if (b.poke === true) {
+        await bot.call('send_poke', { user_id: peer, group_id: gid });
+        peerChat.note(gid, peer);
+        log.info(`管理界面手动触发：她戳了「${peerName}」一下（群 ${gid}）`);
+        return send(res, 200, { ok: true, gid, peer, name: peerName, poke: true });
+      }
+      const text = await peerChat.compose(gid, peer, 15 * 60 * 1000, 30000);
+      if (!text) return send(res, 200, { ok: false, error: '模型没生成出内容（再试一次看看）' });
+      await bot.sendToGroup(gid, text, { at: peer, atName: names.of(peer, gid) || '' });
+      peerChat.note(gid, peer, text);
+      log.info(`管理界面手动触发同类搭话 → 群 ${gid}，@「${peerName}」：「${text}」`);
+      send(res, 200, { ok: true, gid, peer, name: peerName, text });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * ⚠️ 2026-10-14 加（用户：「**现在直接补回刚才的消息**」）：
+   *   **把一条消息当成"刚收到"投给她** —— 走的是正常的 `handle()` 那条路，
+   *   她自己判断、自己回，跟真收到一样。
+   *
+   * 为什么需要它：一条"被闸拦掉 / 被重启打断"的消息，想补回来本来只有两条路，都不行 ——
+   *   · `catchUpMissed()`：只认**上线前 10 分钟**的消息，而且被 `recent` / `handled`
+   *     两道去重挡着 —— 而那条消息在线时**已经被收进群聊上下文了**
+   *     ⇒ 补看永远不认它（去重命中）✗
+   *   · 界面上的「立刻试一次」：那是让她**主动**找同类搭话（内容由模型另生成），
+   *     不是"回应刚才那条"✗（实测生成的是「最近排练累不累啊」这种开场白）
+   * ⇒ 这个是第三种：**原样重放一条群消息** ✓
+   *
+   * ⚠️ 它会在群里**真的发**一条回复（跟"手动触发同类搭话"同一性质，
+   *    不可逆），所以只给本机诊断用，不做任何自动调用 ✓
+   * ⚠️ `at !== false` 时会在消息前面加一个"@她"的段 —— 模拟"别人点名她"。
+   */
+  'POST /api/replay-message': async (req, res) => {
+    const b = await jsonBody(req);
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    const gid = String(b.groupId ?? '').trim();
+    const uid = String(b.userId ?? '').trim();
+    const text = String(b.text ?? '').trim();
+    if (!gid || !uid || !text) {
+      return send(res, 200, { ok: false, error: '要 groupId / userId / text 三个都填' });
+    }
+    const name = String(b.name ?? '').trim() || names.of(uid, gid) || uid;
+    const at = b.at !== false;
+    const ev = {
+      post_type: 'message',
+      message_type: 'group',
+      group_id: Number(gid),
+      user_id: Number(uid),
+      self_id: bot.selfId,
+      message_id: Date.now(),
+      time: Math.floor(Date.now() / 1000),
+      raw_message: text,
+      sender: { user_id: Number(uid), nickname: name, card: name, role: 'member' },
+      message: at
+        ? [
+            { type: 'at', data: { qq: String(bot.selfId) } },
+            { type: 'text', data: { text } },
+          ]
+        : [{ type: 'text', data: { text } }],
+    };
+    log.info(
+      `管理界面重放一条消息 → 群 ${gid}，来自「${name}」（${uid}）` +
+        `${at ? '（带 @ 她）' : '（不带 @）'}：「${text}」`,
+    );
+    try {
+      // ⚠️⚠️⚠️ 2026-10-14 修（真实事故：重放「继续」时**任务桥根本没收到那条消息**，
+      //    她只当闲聊回了一句、压根没开工 ✗）：
+      //    任务桥（`agentBridge.handle`）是在 **`onMessage`（真实消息入口）** 里接的，
+      //    而这里原来只调了 `bot.handle()` ⇒ 重放的消息**跳过了任务桥** ✗
+      //    ⇒ 重放必须走**和真实消息一样的那条路**：先任务桥，它不接管才交给聊天 ✓
+      const { toSegments } = await import('./message.js');
+      const segs = toSegments(ev.message);
+      const ab = await import('./agent-bridge.js');
+      if (await ab.handle(ev, segs, bot)) {
+        log.info('（这条被任务桥接管了 —— 重放走的是和真实消息一样的路）');
+        return send(res, 200, { ok: true, gid, uid, name, at, handled: 'task' });
+      }
+      await bot.handle(ev);
+      send(res, 200, { ok: true, gid, uid, name, at });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/say': async (req, res) => {
+    const b = await jsonBody(req);
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    const gid = String(b.groupId ?? '').trim();
+    const text = String(b.text ?? '').trim();
+    if (!gid) return send(res, 200, { ok: false, error: '要填群号' });
+    if (!text) return send(res, 200, { ok: false, error: '要填要说的话' });
+    try {
+      const sent = await bot.sendChatLike(gid, text, { kind: 'manual' });
+      const ok = Array.isArray(sent) && sent.length > 0;
+      log.info(`管理界面手动让她在群 ${gid} 说了一句（${ok ? `发出 ${sent.length} 条` : '一条都没出去'}）`);
+      send(res, 200, {
+        ok,
+        sent: sent ?? [],
+        text,
+        error: ok ? undefined : '一条都没发出去（去查协议端是不是假在线：tools/napcat-state.mjs）',
+      });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
   // 诊断：确认**机器人内存里**的知识库跟磁盘一致。
   //
   // ⚠️ 为什么需要：知识是启动时读进内存的，`/api/knowledge/list` 读的是**磁盘**，
@@ -1895,6 +2901,15 @@ const routes = {
       global: config.trigger.respondTo,
       perGroup: config.trigger.groupRespondTo ?? {},
       allowGroups: config.trigger.allowGroups ?? [],
+      // ⚠️ 2026-10-07 加：「这个群回不回服务器消息」（`groupParams.<群>.chat.answerServer`）。
+      //    「分群调节」那张卡片要**每行一个开关**显示它 —— 用户找的就是它
+      //    （他原话是"分群调节那里"，之前做在「按群设定」页里、而且只对 1 档群显示，
+      //     于是有些群压根看不到 ⇒ 他说"找不到了"）。
+      answerServer: Object.fromEntries(
+        Object.entries(config.groupParams ?? {})
+          .map(([g, v]) => [String(g), v?.chat?.answerServer === true])
+          .filter(([, on]) => on),
+      ),
     });
   },
 
@@ -2041,6 +3056,11 @@ const routes = {
       'life-events.md': '一级日常事件库（她一天里会遇到哪些小事）· **角色专属**',
       'quest-ideas.md': '剧情素材池（二级主线的点子）· **角色专属**',
       'hzymtr-server.md': '服务器知识库（进服、排障、规则、存档）',
+      // ⚠️ 2026-10-02 接入上游：熟人资料独立成一份 ——
+      //    `owner.md` 只对主人注入，别人问他认识的人就答"不知道"；
+      //    这一份**谁问都读**，所以界面里得能直接编辑它。
+      'friends.md':
+        '熟人 / 朋友（主人现实里的朋友、老同学）· ⚠️ **谁问都读，写之前想清楚**',
       'observe/': '★ 群观察（这个群自己暗中攒的：群友性格、群里的大事）· **只在这个群注入**',
       'sensitive/sensitive-words.md':
         '敏感词库（全局注入）：认出雷点后**只认不接**，不重复、不引申、不顺着说',
@@ -2202,7 +3222,11 @@ const routes = {
       } catch {}
       // ⚠️ 动画库的名字是人设声明的，写不进固定表 —— 这里现算一个顺序表。
       const animeNames = files.filter((f) => f.name.startsWith('anime/')).map((f) => f.name);
-      const order = ['persona.md', 'hzymtr-server.md', ...animeNames, 'observe/'];
+// ⚠️ 2026-10-04：保留本地的单文件 `hzymtr-server.md`，接入上游新增的 `friends.md`。
+    //    上游那个 `server-basic/rules/world/people` 四分片**先不加** ——
+    //    配套的 `src/knowledge.js` 与服务器库方案（TODO 第 18 节）押后处理，
+    //    这里提前加只会让界面列出一堆**不存在**的文件名。
+    const order = ['persona.md', 'hzymtr-server.md', ...animeNames, 'friends.md', 'observe/'];
       files.sort((a, b) => {
         // ⚠️ 人设包的排最前（那是"她是谁"、最常改），其次共用库
         const fa = a.from === 'persona' ? 0 : 1;
@@ -2489,7 +3513,14 @@ const routes = {
 
   'GET /api/persona': async (_req, res, url) => {
     try {
-      send(res, 200, { ok: true, ...personaAdmin.readPack(url.searchParams.get('id')) });
+      send(res, 200, {
+        ok: true,
+        ...personaAdmin.readPack(url.searchParams.get('id')),
+        // ⚠️ 2026-09-30 加：把「对主人例外」这个**运行开关**搭这趟车带上。
+        //    它是 `config.yml` 的 `persona.ownerException`（不在 identity.json 里），
+        //    但人设页要显示它的当前状态 —— 为它单开一个 GET 接口不值当。
+        ownerException: config.persona?.ownerException !== false,
+      });
     } catch (e) {
       send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
     }
@@ -2547,12 +3578,19 @@ const routes = {
         );
       }
       if (qqApply.problems.length) log.warn(`QQ 资料没全换上：${qqApply.problems.join('；')}`);
+      // ⚠️ 2026-10-09 加：把**真实落点**告诉界面。
+      //    切人设只改**当前这个号**（`accounts/<QQ>.yml`），界面上过去只说
+      //    "已切到 xxx"，看不出"别的号没变" ⇒ 用户会以为整个机器人换了人设。
+      const wrote =
+        ACCOUNT.id && accounts.has(ACCOUNT.id) ? accounts.fileOf(ACCOUNT.id) : CONFIG_FILE;
       send(res, 200, {
         ok: true,
         current: personaId(),
         status: persona.status(),
         knowledge,
         qqApply,
+        wrote,
+        account: ACCOUNT.id || '',
         problems: validate(),
       });
     } catch (e) {
@@ -2815,11 +3853,108 @@ function loadPage() {
 loadPage();
 
 /**
- * 启动管理界面。
+ * 界面上"正在控制哪个号"。
  *
- * ⚠️ 返回 Promise（2026-09-29）：要等 `listen()` 出结果才能决定 IPv6 失败后要不要
- *    换 IPv4 重来，所以不能再是同步函数。调用方 `index.js` 本来就忽略返回值，
- *    不用跟着改；想等它就 `await startWebUI(bot)`。
+ * ⚠️ 还没做多号拆分时（`ACCOUNT.id` 是空的，配置和设置全在 config.yml 里），
+ *    界面上也得有个号可显示、可控制 —— 那就是 `config.yml` 里的 `botQQ`。
+ *    （不这么做的话，「QQ 号」那一页会是空的，用户连自己现在控制谁都不知道。）
+ */
+function displayId() {
+  return ACCOUNT.id || String(config.botQQ ?? '').trim();
+}
+
+/**
+ * 「拆分了没有」——⚠️ **看磁盘，不看这个进程的内存**（2026-10-07 修）。
+ *
+ * 踩到的（用户原话：「为什么加不上新号，一直说没拆分」）：
+ *   拆分动作是**写文件**（`accounts/<QQ>.yml` + config.yml 的 mainAccount），
+ *   而当前进程的 `ACCOUNT` 是**启动时定下的常量** —— 拆完不重启，它就还是空的。
+ *   于是 `/api/whoami` 一直报 `split:false`，界面据此把"加号"拦住 ⇒
+ *   用户被困在"点了拆分 → 还说没拆分 → 加不上号"的循环里。
+ *   ⇒ 判据改成"**磁盘上已经有主号的账号文件了**"；另外单给一个
+ *     `needRestart`，界面照它提示"重启后生效"（进程没重启时保存私有段
+ *     仍然会写回 config.yml，所以那个提示是必须的，不是客套）。
+ */
+function splitState() {
+  const id = displayId();
+  const onDisk = !!ACCOUNT.id || (accounts.isValidId(id) && accounts.has(id));
+  return { split: onDisk, needRestart: onDisk && !ACCOUNT.id };
+}
+
+/**
+ * 某个号的管理界面端口（2026-10-07 多 QQ 号）。
+ *
+ * ⚠️ 主号在 `config.yml` 里（那是**共用**那份的 `webui.port`，默认 3099）；
+ *    别的号各自记在 `accounts/<QQ>.yml` 的 `webui.port` 里。
+ * ⚠️ 主号**没有账号文件**时也要能算出来（老用户没迁移）⇒ 最后那条兜底。
+ */
+function portOfAccount(qq) {
+  const mine = Number(config.webui?.port) || 3099;
+  // ⚠️ 还没拆分时，"主号"就是本进程自己在跑的那个号（按 botQQ 认）
+  if (!ACCOUNT.id && qq === String(config.botQQ ?? '').trim()) return mine;
+  if (qq === ACCOUNT.id) return mine;
+  const p = Number(accounts.read(qq)?.webui?.port);
+  if (p) return p;
+  if (qq === ACCOUNT.main) return mine;
+  return 0;
+}
+
+/**
+ * 把请求**转发给另一个号的那个进程**（2026-10-07 多 QQ 号的核心）。
+ *
+ * 为什么要有它：每个号是一个独立进程（各自一套单例状态），
+ * 而用户只用**一个**浏览器页面 —— 页面上切到哪个号，
+ * 请求就由"用户连着的那个进程"转发给"那个号的进程"，
+ * 于是所有既有接口（`/api/state`、`/api/life/...`、保存配置…）**一行都不用改**，
+ * 它们在那个进程里照常读写自己的数据。
+ *
+ * ⚠️ 去头 `x-saki-account` 是**必须的**：不去的话对面会照着同一个头再转一次，
+ *    两个进程之间来回弹（排查时表现为"界面转圈转到超时"）。
+ * ⚠️ 只透传几个必要的头（这是本机、无登录的界面；cookie 之类没必要，
+ *    而且把 `host`/`connection` 这些逐个透传反而容易踩 undici 的禁止头）。
+ */
+async function proxyToAccount(qq, req, res, url) {
+  const port = portOfAccount(qq);
+  if (!port) {
+    return send(res, 200, { ok: false, offline: true, error: `号 ${qq} 还没配管理界面端口` });
+  }
+  let body = null;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      return send(res, 400, { ok: false, error: e.message });
+    }
+  }
+  const headers = {};
+  for (const k of ['content-type', 'accept', 'accept-language']) {
+    if (req.headers[k]) headers[k] = req.headers[k];
+  }
+  try {
+    const up = await fetch(`http://127.0.0.1:${port}${url.pathname}${url.search}`, {
+      method: req.method,
+      headers,
+      body: body && body.length ? body : undefined,
+    });
+    const buf = Buffer.from(await up.arrayBuffer());
+    res.writeHead(up.status, {
+      'content-type': up.headers.get('content-type') ?? 'application/json; charset=utf-8',
+      'content-length': buf.length,
+      'cache-control': 'no-store',
+    });
+    res.end(buf);
+  } catch (e) {
+    log.debug(`转发给号 ${qq}（界面端口 ${port}）失败：${e.message}`);
+    send(res, 200, {
+      ok: false,
+      offline: true,
+      error: `号 ${qq} 的进程没在运行（界面端口 ${port} 连不上）—— 它起来之后刷新这一页就行`,
+    });
+  }
+}
+
+/**
+ * 启动管理界面并等待监听结果，以便 IPv6 不可用时回退到 IPv4。
  */
 export async function startWebUI(botInstance = null) {
   bot = botInstance;
@@ -2840,10 +3975,24 @@ export async function startWebUI(botInstance = null) {
       const key = `${req.method} ${url.pathname}`;
 
       try {
+        const want = String(req.headers['x-saki-account'] ?? '').trim();
+        const minePort = Number(config.webui?.port) || 3099;
+        if (want && want !== ACCOUNT.id && url.pathname.startsWith('/api/')) {
+          const targetPort = portOfAccount(want);
+          if (targetPort && targetPort !== minePort) {
+            return await proxyToAccount(want, req, res, url);
+          }
+          if (!targetPort) {
+            return send(res, 200, {
+              ok: false,
+              offline: true,
+              error: `号 ${want} 没在运行（也没有它的界面端口）`,
+            });
+          }
+        }
         if (routes[key]) return await routes[key](req, res, url);
         return serveStatic(req, res, url);
       } catch (e) {
-        // ⚠️ 请求体本身不合法 → 400，不是 500（「调用方 JSON 写错了」≠「服务端崩了」）
         if (e.badBody) {
           if (!res.headersSent) send(res, 400, { ok: false, error: e.message });
           return;
@@ -2875,7 +4024,6 @@ export async function startWebUI(botInstance = null) {
       // host 用 "::" 时 Node 默认同时接受 IPv4 和 IPv6（双栈），
       // 这样浏览器无论是走 127.0.0.1 还是 localhost→::1 都能打开。
       const host = config.webui.host === '127.0.0.1' ? '::' : config.webui.host;
-
       server.listen({ port: config.webui.port, host, ipv6Only: false }, () => {
         if (settled) return;
         settled = true;

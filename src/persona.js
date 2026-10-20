@@ -25,7 +25,7 @@
  */
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, personaDir, personaId } from './config.js';
+import { config, personaDir, personaId, ROOT } from './config.js';
 import { log } from './log.js';
 
 let cache = null;
@@ -185,6 +185,21 @@ export const style = () => {
  * 兼容旧格式：`style.verbalTics: ["xxx"]` 会被视为句首口癖；
  * 新格式是 `{ sentenceStart: [], sentenceEnd: [] }`。
  * 这里返回规范化后的结构，调用方不必重复处理旧数据。
+ *
+ * ⚠️⚠️ 2026-10-04 合并修：口癖同时是一个**开关** —— `bot.js` 里那些"给她加口癖"的
+ *    提示词段（「句尾缀个『捏』」、语气共振）要看它非不非空才注入。
+ *    为什么：用户的另一句话是「**那几个之前调的语气词不要放入黑祥了**」。
+ *    `sakiko-dark`（Crychic 刚解散那版）人设里明说"不用语气词、不用捏"，
+ *    但那些规则**对所有包生效** ⇒ 不拦就会跟它的人设直接打架。
+ *      · `saki` → `{ sentenceStart: ["倒"] }`（有）⇒ 注入
+ *      · `sakiko-dark` / `mortis` → 空（没有）⇒ **整段跳过**
+ *
+ * ⚠️ 判据**不要**再写 `verbalTics().length` —— 返回值是对象、没有 `.length` ⇒
+ *    恒为 `undefined` ⇒ 那段提示词会**永远不注入**。用 `hasVerbalTics()`。
+ *
+ * ⚠️ 这里**只能声明一次**：合并上游时两版（新版返回对象 / 旧版返回数组）同时进了
+ *    本文件，ESM 不允许重名导出 ⇒ 整个 `persona.js` 加载失败、**机器人起不来**。
+ *    要改口癖结构就改这一处。
  */
 export function verbalTics() {
   const raw = style().verbalTics;
@@ -193,6 +208,21 @@ export function verbalTics() {
     sentenceStart: arr(raw?.sentenceStart),
     sentenceEnd: arr(raw?.sentenceEnd),
   };
+}
+
+/**
+ * 这个角色**有没有口癖**（给 `bot.js` 当开关用）。
+ *
+ * 旧写法是 `persona.verbalTics().length` —— 但 `verbalTics()` 返回的是
+ * `{ sentenceStart, sentenceEnd }` **对象**，对象没有 `.length`，
+ * 于是判据恒假、「句尾缀个捏」那整段提示词**永远不会被注入** ✗
+ * （这是合并上游时留下的静默 bug，不报错、只是功能一直没生效）。
+ *
+ * 「没写这个字段」和「写了空数组」都算**没有**，换角色时不会突然多出一堆口癖。
+ */
+export function hasVerbalTics() {
+  const { sentenceStart, sentenceEnd } = verbalTics();
+  return sentenceStart.length > 0 || sentenceEnd.length > 0;
 }
 
 /**
@@ -270,6 +300,58 @@ export function refImages() {
   if (refs.length) return refs;
   const avatar = pick(qq().avatar);
   return avatar ? [avatar] : [];
+}
+
+/**
+ * **指定人设包**的生图参考图（2026-10-07 加，合照要用）。
+ *
+ * 「合照」那张图里除了她自己，还有**另一个角色**（比如剧情里和她在一起的
+ * 千早爱音）—— 那个角色长什么样，得从**它自己那个人设包**里取立绘；
+ * 拿当前这个包的，画出来就是"两个祥子"✗
+ *
+ * ⚠️ 只读，**不切人设**：这里绝不调 `personaId()` 去动当前角色，
+ *    只是按 id 去那个包里取一下参考图。
+ * ⚠️ `id` 走白名单（和 `personaId()` 同一套规矩）—— 它会拼进文件路径，
+ *    不能让一个 `../` 把读取带出项目目录。
+ * ⚠️ `QQBOT_PERSONA_DIR`（测试用：把整包搬走）那种情况下只认**当前**那个包，
+ *    别的包按 `personas/<id>/` 找 —— 套件里不会走合照这条路。
+ */
+export function refImagesOf(id) {
+  const want = String(id ?? '').trim();
+  if (!/^[\w.-]+$/.test(want)) return [];
+  const dir = want === personaId() ? personaDir() : join(ROOT, 'personas', want);
+  const pick = (rel) => {
+    const safe = String(rel ?? '').replace(/[^\w.-]/g, '');
+    if (!safe || !/\.(png|jpe?g|gif|webp|bmp)$/i.test(safe)) return '';
+    const f = join(dir, safe);
+    return existsSync(f) ? f : '';
+  };
+  let idf;
+  try {
+    idf = JSON.parse(readFileSync(join(dir, 'identity.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  const refs = arr(idf?.image?.refs).map(pick).filter(Boolean);
+  if (refs.length) return refs;
+  const avatar = pick(idf?.qq?.avatar);
+  return avatar ? [avatar] : [];
+}
+
+/**
+ * **指定人设包**的显示名（合照用：提示词里要告诉模型"图2是谁"）。
+ * ⚠️ 和 `refImagesOf()` 同一套白名单规矩。
+ */
+export function nameOf(id) {
+  const want = String(id ?? '').trim();
+  if (!/^[\w.-]+$/.test(want)) return '';
+  const dir = want === personaId() ? personaDir() : join(ROOT, 'personas', want);
+  try {
+    const idf = JSON.parse(readFileSync(join(dir, 'identity.json'), 'utf8'));
+    return String(idf?.selfName ?? idf?.name ?? '').trim() || want;
+  } catch {
+    return want;
+  }
 }
 
 /**
@@ -436,6 +518,35 @@ export function ownerIdentityText() {
 export function promptText(key) {
   const p = load().prompt;
   return p && typeof p === 'object' ? str(p[key]) : '';
+}
+
+/**
+ * 这个角色**要不要注入"暖色"提示词**（`identity.style.warm`，默认 `true`）。
+ *
+ * ⚠️⚠️ 2026-09-30 加。用户在做 `sakiko-dark`（Crychic 刚解散的黑祥）时要求：
+ *    「**把所有关心，正向阳光人设的提示词全删了，必须要有强烈反差**」、
+ *    「**那个白祥模式也删了，一点都不要留，必须时刻都要带刺**」、
+ *    「**发表情机制直接在黑祥人设取消**」。
+ *
+ *    这些提示词段（安慰对方 / 好感度 / 别连着抬杠 / 口癖 / 表情包 / 白祥模式）
+ *    是**对所有包都生效**的通用规则 ⇒ 不拦就会跟黑祥的人设直接打架。
+ *
+ * ⚠️⚠️ **为什么是包级开关，而不是复用 `config.persona.ownerException`** ——
+ *    用户原话：「**注意我刚才说的都是黑祥人设，如果切到原来的 saki 千万不要被影响到了**」。
+ *    `ownerException` 是**演示开关**（要不要对 <主人> 一视同仁），他随时会在 `saki` 包下
+ *    关掉它给人演示 —— 那种情况下客服小祥的温柔、口癖、表情包**一个都不该少**。
+ *    所以两者必须分开：
+ *
+ *    | 开关 | 管什么 | 谁的 |
+ *    | --- | --- | --- |
+ *    | `config.persona.ownerException` | 只关「<主人> 是例外」那几段 | 运行时演示用的 |
+ *    | `identity.style.warm`（这里） | 关掉**一切**暖色：安慰 / 好感度 / 抬杠刹车 / 口癖 / 表情 / 白祥 | **人设包自带的** |
+ *
+ *    ⇒ `saki` 没写这个字段 ⇒ 默认 `true` ⇒ **一个字都不受影响**。
+ */
+export function warm() {
+  const s = load().style;
+  return !(s && s.warm === false);
 }
 
 /**

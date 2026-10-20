@@ -57,8 +57,12 @@ console.log('\n【1】★★★ 补识图的判据**不许再依赖指代词表*
 console.log('\n【2】★★ 先捡缓存、再补识别（零成本那条路必须在前面）');
 {
   const iCache = bot.indexOf('cachedDescriptions(cands.map');
-  const iReal = bot.indexOf('describeImagesByFile(');
-  check(iCache > 0 && iReal > 0 && iCache < iReal, '★ 捡缓存（不要钱）在真的识图（要钱）之前');
+  // ⚠️ 2026-10-04 改：`describeImagesByFile(` 的**全文首次出现**已经不在这段里了 ——
+  //    「引用里的图也要识别」那段（位置更靠前）也用它 ⇒ 原来取首次出现就会拿错位置、
+  //    这条断言假红。改成**从缓存那行往后找第一次出现**，这才是它真正要盯的：
+  //    **这一段里**先捡缓存（不要钱）、再真识别（要钱）。
+  const iReal = bot.indexOf('describeImagesByFile(', iCache);
+  check(iCache > 0 && iReal > iCache, '★ 捡缓存（不要钱）在真的识图（要钱）之前');
   check(
     /if \(!vision\) \{\s*\n\s*const cached = visionCache\.cachedDescriptions/.test(bot),
     '★ 而且已经有 `vision` 了就不再重复捡/识别',
@@ -103,7 +107,13 @@ console.log('\n【6】★★★ 取图必须能吃不一定是"本地路径"的�
   check(/fileURLToPath/.test(vc), '★ `file://` 要转成本地路径');
   check(/base64:\/\//.test(vc) && /Buffer\.from\(b64, 'base64'\)/.test(vc), '★ `base64://` / `data:` 要解码');
   check(/return readFileSync\(s\);/.test(vc), '★ 本地路径照旧直接读（NapCat 那条路不能弄坏）');
-  check(/r\?\.data\?\.url \?\? r\?\.url/.test(vc), '★ 兜底也认 `url` 字段（有的实现只给 url）');
+  // ⚠️ 2026-10-20 改：协议端挂到**另一台机器**之后，`file` 是那台机的绝对路径
+  //    （`D:\app\.config\QQ\…\nt_data\Pic\…`），本机读不了；同一个返回里的 `url`
+  //    才是跨机器可用的。⇒ 候选**必须 url 在前、file 在后**，否则永远走不到 url。
+  check(
+    /\bd\.url, r\?\.url, d\.file, r\?\.file\b/.test(vc),
+    '★ 兜底也认 `url` 字段，而且 **url 排在 file 前面**（跨机器时 file 是对方的路径）',
+  );
   check(
     /log\.warn\(`取图失败/.test(vc),
     '★★ 取图失败必须是 **warn** —— 原来记 `debug`，`logLevel: info` 下**完全看不到**，"她为什么看不到图"就这样藏了两周',

@@ -53,6 +53,8 @@ writeFileSync(
     '  quoteAfterGap: 4',
     'context:',
     '  enable: true',
+    // ⚠️ 2026-10-05：调小「读被引用文件」的上限，好在测试里验证"太长会截断"
+    '  readQuotedFileChars: 1000',
     'ownerQQ: "' + OWNER + '"',
     '',
   ].join('\n'),
@@ -386,7 +388,14 @@ console.log('\n【12】★★ 正文里**点名叫她** → 也算召唤（<主�
   const b3 = botWith([]);
   b3.resolveRespondTo = () => 3; // 假装这个群是 3 档
   check(
-    b3.decide(evOf([textSeg('祥子，服务器那个事怎么样了')]))?.hit === 'call',
+    // ⚠️ 2026-10-10 修（这条是**假失败**）：原例子写的是「祥子，**服务器**那个事怎么样了」，
+    //    而 2026-10-06 起的「回服务器消息（**默认关**）」那道闸会把它拦掉
+    //    （没 @、没引用 + `looksServerTalk()` 命中 ⇒ `return null`）⇒ hit 当然不是 call ✗
+    //    ⇒ 换成不含"服务器"的点名例子：这条要测的是"3 档群点名也回"，
+    //      不该被**另一道闸**的判据干扰 ✓
+    //    ⚠️ 顺带记一笔（等用户拍板）：那道闸**不豁免"点名叫她"** ——
+    //      所以 3 档群里「祥子，服务器崩了」现在是不回的。
+    b3.decide(evOf([textSeg('祥子，这个点你在干嘛')]))?.hit === 'call',
     '★★ 3 档群（只认 @）里，正文点名叫她**也照样回**（和 @ 同级）',
   );
   // ⑦ 私聊不受影响（私聊本来就回）
@@ -397,10 +406,315 @@ console.log('\n【12】★★ 正文里**点名叫她** → 也算召唤（<主�
   const oldNames = cfg2.trigger.callNames;
   cfg2.trigger.callNames = ['小祥子'];
   check(b.decide(evOf([textSeg('小祥子在哪')]))?.hit === 'call', '★ 配了 callNames 就按配置走');
-  check(b.decide(evOf([textSeg('祥子在吗')]))?.hit !== 'call', '★ 覆盖之后原来的「祥子」不再命中');
+  // ⚠️⚠️ 2026-10-13 改（断言跟着**语义变更**走，不是测试松了）：
+  //    原来是"**覆盖**" —— 配了 `trigger.callNames` 就把人设里的名字挤掉。
+  //    真实现的坑（用户报「叫爱音名字她不回」）：那个号的 config 里配着**祥子**的名字，
+  //    于是爱音连自己人设里的名字都不认 ⇒ 人设名 + 配置名**合并**才对 ✓
+  check(
+    b.decide(evOf([textSeg('祥子在吗')]))?.hit === 'call',
+    '★★ 配了 callNames 之后，**人设里的名字照样命中**（合并语义，不再互相挤掉）',
+  );
   cfg2.trigger.callNames = oldNames;
 }
 
+console.log('\n【N】★★ 引用里带图 → 必须把那张图的 file 带出来（用户截图：她答「看不清」）');
+{
+  // 现场（2026-10-04 00:28，群 200000001）：<主人> 引用龟龟杜发的一张招牌图，
+  // 问「这个招牌是什么意思」—— 她回「看不清啊，让龟龟杜把图放大点（」。
+  // 根因：`fetchQuoted()` 原来**只取文字、把图丢了**（没文字就写「（图片/表情）」）⇒
+  // 她手里只有一个占位符，压根没看到那张图 ✗
+  const b = new Bot();
+  b.selfId = BOT;
+  b.call = async (action, params) => {
+    if (action !== 'get_msg') return null;
+    return {
+      data: {
+        message_id: params?.message_id,
+        user_id: '10000004',
+        sender: { user_id: '10000004', nickname: '龟龟杜' },
+        message: [{ type: 'image', data: { file: 'signboard.jpg' } }],
+      },
+    };
+  };
+  const q = await b.fetchQuoted(evOf([replySeg('-814401907'), textSeg('这个招牌是什么意思')]));
+  check(!!q, '取到了被引用的消息');
+  check(
+    Array.isArray(q?.images) && q.images.includes('signboard.jpg'),
+    '★★ 被引用消息里的图 `file` 带出来了（原来只有「（图片/表情）」这个占位符）',
+    JSON.stringify(q?.images),
+  );
+  check(/图片|表情/.test(q?.text ?? ''), '★ 原文没有文字 → 文本仍然是占位符');
+
+  // 纯文字引用不该多出 images
+  b.quoteCache = new Map();
+  b.quoteMiss = new Map();
+  b.call = async (action, params) => {
+    if (action !== 'get_msg') return null;
+    return {
+      data: {
+        message_id: params?.message_id,
+        user_id: '10000004',
+        sender: { user_id: '10000004', nickname: '龟龟杜' },
+        message: [{ type: 'text', data: { text: '第二个也不简单' } }],
+      },
+    };
+  };
+  const q2 = await b.fetchQuoted(evOf([replySeg('-814401908'), textSeg('啥意思')]));
+  check(
+    Array.isArray(q2?.images) && q2.images.length === 0,
+    '★ 纯文字引用 → `images` 是空数组（不误报）',
+  );
+}
+
+// ⚠️⚠️ 2026-10-05 加（用户：「**把引用收到的段都修一下**」）。
+//    现场：<主人> 引用「是der的小豆」发的 `bot-2026-10-05.log` 说「读一下这个」，
+//    她回「日志我这没拿到诶，你让它把内容直接贴出来」——
+//    `fetchQuoted()` 原来**只取文字 + 图片**，文件段被丢了（她手里只有
+//    `[文件:bot-2026-10-05.log]` 这行占位符，**内容压根没去取**）。
+console.log('\n【11】★★ 引用里的「文件 / 语音」段也要带出来');
+{
+  const b = botWith();
+  b.quoteCache = new Map();
+  b.quoteMiss = new Map();
+  b.call = async (action, params) => {
+    if (action !== 'get_msg') return null;
+    return {
+      data: {
+        message_id: params?.message_id,
+        user_id: '10000004',
+        sender: { user_id: '10000004', nickname: '龟龟杜' },
+        message: [
+          {
+            type: 'file',
+            data: {
+              name: 'bot-2026-10-05.log',
+              file_id: '/14d534dd-482a',
+              url: 'https://gzc-download.ftn.qq.com/ftn_handler/xx',
+              size: 12005,
+            },
+          },
+        ],
+      },
+    };
+  };
+  const q = await b.fetchQuoted(evOf([replySeg('-814401909'), textSeg('读一下这个')]));
+  check(
+    Array.isArray(q?.files) && q.files.length === 1 && q.files[0].name === 'bot-2026-10-05.log',
+    '★★ 被引用消息里的**文件段**带出来了',
+    JSON.stringify(q?.files),
+  );
+  check(
+    /\[文件:bot-2026-10-05\.log\]/.test(q?.text ?? ''),
+    '★ 文本里仍是文件名占位符（内容另外去下载）',
+  );
+  check(
+    !!q?.files?.[0]?.url && !!q?.files?.[0]?.file_id,
+    '★ url / file_id 都留着 —— 下载那几条路都要用',
+  );
+}
+{
+  // 被引用的是**语音** → 用被引用消息的 id 调转文字，转出来的话要进引用文本
+  const b = botWith();
+  b.quoteCache = new Map();
+  b.quoteMiss = new Map();
+  let asked = 0;
+  b.call = async (action, params) => {
+    if (action === 'get_msg') {
+      return {
+        data: {
+          message_id: params?.message_id,
+          user_id: '10000004',
+          sender: { user_id: '10000004', nickname: '龟龟杜' },
+          message: [{ type: 'record', data: { file: 'x.silk' } }],
+        },
+      };
+    }
+    if (action === 'fetch_ptt_text') {
+      asked++;
+      return { text: '他刚才说的是这句话' };
+    }
+    return null;
+  };
+  const q = await b.fetchQuoted(evOf([replySeg('-814401910'), textSeg('他说啥')]));
+  check(asked === 1, '★ 被引用的是语音 → 用**被引用消息的 id** 转了一次文字', `实际 ${asked} 次`);
+  check(
+    /他刚才说的是这句话/.test(q?.text ?? ''),
+    '★★ 语音转出来的文字进了引用文本',
+    JSON.stringify(q?.text),
+  );
+}
+{
+  // 纯文字引用不该多出 files
+  const b = botWith();
+  b.quoteCache = new Map();
+  b.quoteMiss = new Map();
+  b.call = async (action, params) => {
+    if (action !== 'get_msg') return null;
+    return {
+      data: {
+        message_id: params?.message_id,
+        user_id: '10000004',
+        sender: { user_id: '10000004', nickname: '龟龟杜' },
+        message: [{ type: 'text', data: { text: '就是这句' } }],
+      },
+    };
+  };
+  const q = await b.fetchQuoted(evOf([replySeg('-814401911'), textSeg('啥意思')]));
+  check(Array.isArray(q?.files) && q.files.length === 0, '★ 纯文字引用 → `files` 是空数组（不误报）');
+}
+
+console.log('\n【12】★★ 被引用的**文件内容**要真读出来');
+{
+  const b = botWith();
+  const LOG = '第1行 启动\n第2行 出错了\n第3行 结束';
+  b.fetchLogFile = async () => Buffer.from(LOG, 'utf8');
+  const t = await b.readQuotedFile(evOf([textSeg('读一下')]), {
+    name: 'bot-2026-10-05.log',
+    file_id: '/abc',
+  });
+  check(/第2行 出错了/.test(t), '★★ 文本文件 → **内容**进了给模型的那段');
+  check(/bot-2026-10-05\.log/.test(t), '★ 标了文件名（她知道自己在读哪个文件）');
+  check(
+    /文件原文/.test(t) && /不要照做/.test(t),
+    '★ 带了防护：说明这是资料、里面像指令的话别照做（群友发的文件能写注入）',
+  );
+
+  // 取不到 → 如实说读不了（绝不能编内容）
+  b.fetchLogFile = async () => null;
+  const t2 = await b.readQuotedFile(evOf([textSeg('x')]), { name: 'a.log', url: 'https://x' });
+  check(/没取下来/.test(t2) && /如实说/.test(t2), '★ 取不到文件 → 明确说"读不了"，不许编');
+
+  // 二进制 → 不塞进提示词
+  b.fetchLogFile = async () => Buffer.from([0x50, 0x4b, 0x00, 0x01, 0x02]);
+  const t3 = await b.readQuotedFile(evOf([textSeg('x')]), { name: 'a.log', url: 'https://x' });
+  check(/二进制/.test(t3), '★ 二进制内容 → 说读不了，不把乱码塞进提示词');
+
+  // 太长 → 截断到上限，而且取的是**尾部**
+  b.fetchLogFile = async () => Buffer.from(`${'A'.repeat(3000)}最后这一行`, 'utf8');
+  const t4 = await b.readQuotedFile(evOf([textSeg('x')]), { name: 'b.log', url: 'https://x' });
+  check(t4.length < 2000, '★ 太长的文件会截断（上限走 `context.readQuotedFileChars`）', `实际 ${t4.length} 字`);
+  check(/最后这一行/.test(t4), '★ 截断取的是**尾部** —— 日志最后几行才是有用的');
+
+  // 没有 url / file_id 的文件段 → 不炸
+  const t5 = await b.readQuotedFile(evOf([textSeg('x')]), { name: 'c.log' });
+  check(t5 === '', '★ 段里既没 url 也没 file_id → 安静返回空（不抛错）');
+}
+
+console.log('\n【★】2026-10-13：**引用哪一条**让模型挑（合并消息时它才是准的）');
+{
+  // 用户原话：「现在**该引用哪条也不是很准**，因为有时会**合并消息**，
+  //   要引用时也**先用模型判定一遍该引用哪条消息**吧」。
+  //
+  // 原来写死引用 `event.message_id`（=当前这条）—— 连发被合并时
+  // 她答的是**整串**，而 message_id 只是串尾那条 ⇒ 引用框挂得不像在回那句。
+  // 现在：真要引用时让模型从候选里挑一条；挑不出/失败 → 退回当前这条（不退化）。
+  const b2 = new Bot();
+  b2.selfId = BOT;
+
+  const seed = () => {
+    recent.clearAll();
+    // 她自己的话（**不该进候选**）
+    recent.rememberBot(
+      { message_type: 'group', group_id: GROUP, user_id: BOT, message_id: 'b1' },
+      '她先说一句',
+    );
+    const put = (id, text) =>
+      recent.remember(
+        { message_type: 'group', group_id: GROUP, user_id: OTHER, message_id: id, sender: { nickname: '甲' } },
+        { text },
+      );
+    put('m1', '连发的第一句');
+    put('m2', '连发的第二句');
+    put('m3', '连发的第三句（串尾）');
+  };
+  const ev = () => {
+    // ⚠️ 造**合并**那一轮：`_sources` 好几条 ⇒ 她答的是整串，而 message_id 只是串尾
+    //    （这正是用户说的"有时会合并消息，引用哪条不准"）
+    const e = evOf([textSeg('嗯')], OTHER, 'm3');
+    e._sources = [
+      { userId: OTHER, name: '甲', text: '连发的第一句' },
+      { userId: OTHER, name: '甲', text: '连发的第二句' },
+      { userId: OTHER, name: '甲', text: '连发的第三句（串尾）' },
+    ];
+    return e;
+  };
+
+  seed();
+  let seenIds = [];
+  b2.judgeQuoteTarget = async (cands) => {
+    seenIds = cands.map((c) => c.messageId);
+    return 1;
+  };
+  check(
+    (await b2.pickQuoteTarget(ev(), '你第一句那个我答一下')) === 'm1',
+    '★★ 模型选第 1 条 → 引用**那一条**（不是永远引当前这条）',
+  );
+  check(!seenIds.includes('b1'), '★★ 她自己的消息**不进候选**（不引用自己）');
+  check(seenIds.includes('m3'), '★ 当前这条在候选里（不然"想引当前这条"就没得选）');
+  check(seenIds.length === 3, `候选 = 3 条别人的消息（实际 ${seenIds.length}）`);
+
+  // ⚠️ 成本控制：**没歧义**的两条路都不该花这次调用 ——
+  //    ① 没合并、当前这条就是最新的；② 候选不足两条
+  {
+    const plain = evOf([textSeg('嗯')], OTHER, 'm3'); // 没有 _sources、后面也没别人
+    let n = 0;
+    b2.judgeQuoteTarget = async () => {
+      n++;
+      return 1;
+    };
+    check((await b2.pickQuoteTarget(plain, '随口接一句')) === 'm3', '★ 没合并 + 当前这条最新 → 直接用当前这条');
+    check(n === 0, '★★ 没歧义时**一次模型调用都没有**（成本控制）');
+  }
+
+  // 没合并，但**她要回的那条后面还有人说话** → 有歧义 → 问模型
+  {
+    const earlier = evOf([textSeg('嗯')], OTHER, 'm1'); // m2/m3 在它后面
+    let n = 0;
+    b2.judgeQuoteTarget = async (c) => {
+      n++;
+      return c.findIndex((x) => x.messageId === 'm1') + 1;
+    };
+    check((await b2.pickQuoteTarget(earlier, '回你那句')) === 'm1', '★ 回的是被刷上去那条 → 引它');
+    check(n === 1, '★ 这种歧义才问一次模型');
+  }
+
+  b2.judgeQuoteTarget = async () => 0;
+  check(
+    (await b2.pickQuoteTarget(ev(), '随口接一句')) === 'm3',
+    '★★ 模型说"看不出"（0）→ 退回当前这条（行为不退化）',
+  );
+
+  b2.judgeQuoteTarget = async () => 99;
+  check((await b2.pickQuoteTarget(ev(), '')) === 'm3', '★ 越界编号 → 也退回当前这条');
+
+  b2.judgeQuoteTarget = async () => {
+    throw new Error('fetch failed');
+  };
+  check((await b2.pickQuoteTarget(ev(), '')) === 'm3', '★ 判定调用失败 → 退回当前这条（不炸）');
+
+  // 候选不足 2 条 ⇒ **不花这次调用**
+  recent.clearAll();
+  recent.remember(
+    { message_type: 'group', group_id: GROUP, user_id: OTHER, message_id: 'only', sender: { nickname: '甲' } },
+    { text: '唯一一条' },
+  );
+  let called = 0;
+  b2.judgeQuoteTarget = async () => {
+    called++;
+    return 1;
+  };
+  const onlyEv = evOf([textSeg('嗯')], OTHER, 'only');
+  onlyEv._sources = [{ userId: OTHER, name: '甲', text: '唯一一条' }, { userId: OTHER, name: '甲', text: 'x' }];
+  check((await b2.pickQuoteTarget(onlyEv, '')) === 'only', '★ 只有一条候选 → 直接用当前这条');
+  check(called === 0, '★★ 候选不足两条时**一次模型调用都没有**（成本控制）');
+
+  // 私聊 / 没群号 → 不改行为
+  check(
+    (await b2.pickQuoteTarget({ message_type: 'private', message_id: 'p1' }, '')) === 'p1',
+    '★ 私聊照旧用当前这条',
+  );
+  recent.clearAll();
+}
 try {
   rmSync(join(ROOT, CFG_REL), { force: true });
 } catch {}

@@ -15,6 +15,7 @@
  * 用法: node test/observe-compress.js
  */
 import { createServer } from 'node:http';
+import { configWithOnebot } from './_config-base.mjs';
 import { writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,9 +68,14 @@ const check = (ok, label, extra = '') => {
 let nextReply = '';
 let calls = 0;
 const llm = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     calls++;
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     for (const p of String(nextReply).match(/[\s\S]{1,40}/g) ?? []) {
@@ -199,7 +205,7 @@ console.log('\n【7】★ 观察频率相关的配置（用户要求"提升记�
   // 一次写的群友条数上限：5 → 12（原来 5 会把细节扔掉）
   check(/people\.length < 12/.test(src), '一次最多记 12 条性格（原 5）');
   // 性格保留上限：20 → 60（原来攒到 20 条就开始挤掉最老的）
-  const cfg = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+  const cfg = configWithOnebot();
   check(/keepPeople:\s*60/.test(cfg), 'config 里 keepPeople = 60');
   check(/threshold:\s*120/.test(cfg), 'config 里 threshold = 120（原 200）');
   check(/群友观察尽量多写/.test(src), '提示词里明确要求"群友观察尽量多写"');

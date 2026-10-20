@@ -129,12 +129,17 @@ console.log('\n【5】★★★★ 三处拦截点全都在（最要紧的一组
   const bj = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
 
   // ① decide()：最前面就要拦，且要在「骂她妈妈」那条之前
-  const dec = bj.slice(bj.indexOf('  decide(event, voluntary'), bj.indexOf('  decide(event, voluntary') + 2600);
+  const decAt = bj.indexOf('  decide(event, voluntary');
+  const decEnd = bj.indexOf('\n  recentContextFor(', decAt);
+  const dec = decEnd > decAt ? bj.slice(decAt, decEnd) : '';
   check(/this\.isDiceMode\(event\)/.test(dec), '★★ decide() 里调了 isDiceMode');
   check(/diceMode\.isDiceCommand\(/.test(dec), '★★ decide() 用 isDiceCommand 判「这句能不能开口」');
+  const modeAt = bj.indexOf('if (this.isDiceMode(event))', decAt);
+  const swearAt = bj.indexOf('const swearAtMom', decAt);
   check(
-    dec.indexOf('isDiceMode') < dec.indexOf('swearAtMom'),
+    modeAt > decAt && swearAt > modeAt,
     '★★ 放在「骂她妈妈」那条**之前**（用户显式下的令高于自动判定）',
+    `[isDiceMode@${modeAt - decAt}, swearAtMom@${swearAt - decAt}]`,
   );
   check(
     /isDiceCommand\([\s\S]{0,300}?return null/.test(dec),
@@ -160,7 +165,10 @@ console.log('\n【5】★★★★ 三处拦截点全都在（最要紧的一组
   );
 
   // 权限：必须复用 canTeach()（用户明确「权限和安静指令一致」）
-  const h = bj.slice(bj.indexOf('async handleDiceMode'), bj.indexOf('async handleDiceMode') + 2000);
+  // ⚠️⚠️ 2026-10-06：窗口从 2000 加到 3200 —— 因为插进了 `sealdice.shouldRelay()`
+  //    的分支（防「海豹接了 IM ⇒ 两条结果」），`sealdice.ask()` 被推到 2000 字符之外，
+  //    这条断言就红了。⚠️ 别为了让它过就把窗口缩回去 —— 那是把新代码挤出检查范围。
+  const h = bj.slice(bj.indexOf('async handleDiceMode'), bj.indexOf('async handleDiceMode') + 3200);
   check(/this\.canTeach\(event\)/.test(h), '★★ handleDiceMode 用 canTeach() 判权限（同安静指令）');
 
   // 转述：只在骰娘模式下做

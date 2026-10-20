@@ -6,25 +6,49 @@
  *
  * ## 为什么是「小祥主动调海豹」，而不是「海豹接 QQ 把消息推给小祥」
  *
- * 2026-09-30 用户定的方案是「甲」：**海豹不接 IM**。
- * 缘由是一条架构级的硬约束（实测 + 读源码得出）：
- *   小祥现在是通过 `onebot.url` 用 WebSocket 连 NapCat 的。海豹要接 QQ 也得连 NapCat。
- *   **同一个 NapCat 实例挂两个 WebSocket 客户端**会出三种问题，其中第三种无解：
- *     · 抢连接 —— 后连的顶掉先连的，小祥掉线
- *     · 重复处理 —— 同一条群消息两个都响应
- *     · ⚠️ **自反馈死循环** —— 同一个账号下，小祥发的消息海豹也当成"群友消息"，
- *       海豹插件再转回给小祥 ⇒ 她在跟自己对话。
- *   那是**架构问题，不是调参能解决的**。所以海豹干脆不碰 QQ。
+ * 2026-09-30 起方案是「甲」：**海豹不接 IM**，小祥主动调它的 HTTP API。
+ * 2026-10-06 复核源码后**推翻了当初选方案甲的三条理由**（详见下面「已证伪」）。
  *
- * 于是职责变成：
- *   · 群里有人打 `.ra` / `.r` → **小祥**接过来 → 问海豹算 → **小祥**把结果说出来
- *   · 海豹只提供 **骰点规则库 + log**，不发言
- *   ·「骰娘模式」= 小祥把连转述也一起关掉 ⇒ 全程静默（这正是用户要的）
+ * ## ⚠️ 已证伪：「同号接 IM 会死循环 / 会抢连接」是错的（2026-10-06 读源码）
  *
- * ## 好处（不只是绕开冲突）
- *   · 零 IM 依赖：海豹起没起、用不用得上 QQ，小祥都照常干活
- *   · 她还是"那个什么都会一点的小祥"，不是变成海豹 —— 人格连续
- *   · 海豹那套 COC / DND 规则**照旧全用**，只是经由 API 而不是群里直接打指令
+ * 当初写的三条硬约束，逐条核过源码，**没有一条成立**：
+ *
+ *   ① ❌「后连的顶掉先连的」—— NapCat 的 WS 服务端**本来就能挂多个客户端**。
+ *      `napcat.mjs:95223` 起 `wsClients = []` / `wsClientWithEvent = []`，
+ *      连接时 `push` 进去（:95367），事件**广播给数组里所有客户端**
+ *      （:95232 `wsClientWithEvent.map(...)`），断开时按 `indexOf` + `splice`
+ *      精确移除那一个（:95352）。⇒ 多客户端是被显式支持的，不是竞态。
+ *      （`AGENTS.md` 里「NapCat 的 WebSocket 服务端只允许一个客户端」是同一条错误。）
+ *
+ *   ② ❌「自反馈死循环」—— **海豹自己就会丢弃自己账号发的话**。
+ *      `sealdice-core-src/dice/platform_adapter_gocq.go:1064`：
+ *      ```go
+ *      if msgQQ.MessageType == "group" || msgQQ.MessageType == "private" {
+ *          if msg.Sender.UserID == ep.UserID {
+ *              // 以免私聊时自己发的信息被记录
+ *              return
+ *          }
+ *      ```
+ *      `ep.UserID` 是海豹登录的那个号（:532 由登录信息刷新），两边都经
+ *      `FormatDiceIDQQ()` 归一成 `QQ:<uin>`，格式一致 ⇒ 同号时**必然相等**。
+ *      ⇒ 同号方案下，小祥发的每条消息在海豹那里直接 `return`，
+ *        不会触发任何指令、不会回话。而小祥那侧也早就按 `selfId` 过滤掉了
+ *        海豹发的话（`bot.js` 的 `decide()` 与 `onRaw` 多处）。
+ *        **回路在两端各被切一刀，根本不成环。**
+ *
+ *   ③ ⚠️「重复处理」—— 这条**是真的**，也是唯一还需要设计决策的地方。
+ *      群里有人打 `.ra`，海豹自己算并回一次；若小祥同时在转述，就会**两条结果**。
+ *      对策见下面的 `relayEnabled()`（`sealdice.relay` 开关）：
+ *      海豹接了 IM 就把小祥的转述关掉，只留一条；海豹没接才由小祥兜底。
+ *
+ * ⇒ 结论：**同号接 IM 是可行的**，用户 2026-10-06 拍板走同号（没有小号）。
+ *    「方案甲」保留不是因为它安全，而是因为**转述要能配昵称**（见 `setName`）
+ *    —— 这仍是 API 路径独有的好处，代价是海豹那边所有群友共用一张卡。
+ *
+ * ## 职责划分（现状）
+ *   · 海豹**不接 IM**（`relay` 开着）：群里 `.ra` → 小祥转述给海豹 → 小祥说出来
+ *   · 海豹**接了同号 IM**（`relay` 关掉）：海豹自己收发，小祥**全程不碰骰点**
+ *   · 两种形态下海豹都照旧提供 COC / DND 规则库 + log
  *
  * ## 海豹侧接口（全部实测通，2026-09-30）
  *   · `POST /sd-api/dice/exec`   `{id, message, messageType}` → 算一条指令，返回 `"ok"`
@@ -45,6 +69,63 @@ const cfg = () => config.sealdice ?? {};
 export function enabled() {
   const c = cfg();
   return c.enable !== false && !!c.baseUrl && !!c.token;
+}
+
+/**
+ * 小祥要不要**替海豹转述**骰点（唯一判定入口，调用点只认这个）。
+ *
+ * ⚠️ 这是 2026-10-06 加的，用来解决「重复处理」—— 群里有人打 `.ra` 时，
+ *   海豹自己算并回一次；若小祥同时转述，就变成**两条结果**。
+ *
+ *   `sealdice.relay` 三种取值：
+ *   · `true`（**默认**）= 海豹**不接 IM**，一律由小祥转述（原来的方案甲）
+ *   · `false`          = 海豹**已接同一个 QQ**、自己收发 ⇒ 小祥全程闭嘴
+ *   · `'fallback'`     = 海豹接了 IM，但**离线时由小祥兜底**（在线自动让位）
+ *
+ * ⚠️ **默认 true 是刻意的**：海豹要是没接 IM 而这里关了，群里打 `.ra`
+ *   就会彻底没人理 —— 那是更糟的故障。
+ *
+ * @param {'group'|'private'} [type] 探在线时要用的消息类型
+ * @returns {Promise<boolean>} 该不该由小祥转述这一条
+ */
+export async function shouldRelay(type = 'group') {
+  const mode = cfg().relay;
+  if (mode === false) {
+    // ⚠️ 海豹自己收发。仍然**消费掉**这条指令（bot.js 那侧照样 return true），
+    //    别让它掉进 decide() 让小祥对骰点结果发表评论 —— 那样更吵。
+    return false;
+  }
+  if (mode === 'fallback') {
+    // ⚠️ 海豹在线就让它自己回；探不通（挂了/没起）才由小祥兜底。
+    if (await sealdiceOnline()) return false;
+    log.debug('[海豹] 在线探针不通 ⇒ 由小祥兜底转述（relay: fallback）');
+    return true;
+  }
+  return true;
+}
+
+/**
+ * 海豹现在在线吗？（只探在线，不探功能）
+ *
+ * ⚠️ 打的是 `/sd-api/preInfo` —— 那是**唯一免 token** 的接口。
+ *   拿不到就当离线。宁可多转述一次，也别让群里的骰点没人应。
+ *
+ * @returns {Promise<boolean>} 探通了就是 true
+ */
+async function sealdiceOnline() {
+  const c = cfg();
+  const base = String(c.baseUrl ?? '').replace(/\/+$/, '');
+  if (!base) return false;
+  const ms = Math.max(500, Number(c.timeoutMs) || 4000);
+  const opt = { method: 'GET', headers: { token: String(c.token ?? '') } };
+  if (typeof AbortSignal?.timeout === 'function') opt.signal = AbortSignal.timeout(ms);
+  try {
+    const res = await fetch(`${base}/sd-api/preInfo`, opt);
+    return res.ok;
+  } catch (e) {
+    log.debug(`海豹在线探针失败（按离线处理）：${e.message}`);
+    return false;
+  }
 }
 
 /**
@@ -132,8 +213,20 @@ async function callRaw(path, method = 'GET', body = null) {
  *    直接甩给调用方（那表现是"她说不出话"，但原因在海豹那边，很难查）。
  *
  * ⚠️ 另外：**`id` 参数其实被海豹完全忽略** —— 它内部把 group 写死成
- *    `UI-Group:2001`（同一个文件那几行）。所以按 scopeId 过滤结果永远为空。
- *    这里照实传，只是为了将来海豹真接了 IM 才对。
+ *    `UI-Group:2001`（`api/api_bind.go` 的 `DiceExec` 同一个文件那几行）。
+ *    所以按 scopeId 过滤结果永远为空。这里照实传，只是为了将来海豹真接了 IM 才对。
+ *
+ * ⚠️⚠️⚠️ **为什么每次都要先 `.nn` 改昵称**（2026-10-06 实测 + 读 `sealdice-core-src`）：
+ *    `DiceExec` 把发件人**写死**成 `SenderBase{Nickname:"User", UserID:"UI:1002"}`，
+ *    body 里**没有任何字段能传昵称**（只有 id/message/messageType/messageSplitLen）。
+ *    ⇒ 直接转发的话，海豹那边永远是 `<User>`，输出一律是「<User>的"敏捷5"检定结果为…」。
+ *    而海豹的 `.nn <昵称>`（改昵称）在 UI 测试模式下**是可用的**：
+ *      `.nn 阿祥` → `<User>(UI:1002)的昵称被设定为<阿祥>`，随后 `.ra` 就变成 `<阿祥>的…`。
+ *    ⇒ 所以调用方要在转发前先 `setName()`，让结果里出现的是**真的那个人的昵称**，
+ *      而不是占位符 `<User>`。这正是用户 2026-10-06 报的「只会回预设/占位符」。
+ *    ⚠️ 由此带来的**已知限制**：`UserID` 仍是固定的 `UI:1002`，所以海豹那边
+ *      **所有群友共用一张卡**（`.st` 属性、`.li` 列表都是同一份）。
+ *      要真正每人一张卡，只能让海豹自己接 IM —— 那是架构问题，见文件头「方案甲」。
  *
  * @param {string} message 例如 `.ra 3d6` / `.r d100` —— **要带前导点和命令名**
  * @param {string} [scopeId] 目前海豹会忽略它
@@ -148,7 +241,12 @@ export async function roll(message, scopeId = 'UI-Group:2001', messageType = 'gr
   let ok = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await new Promise((r) => setTimeout(r, gap * attempt));
-    const res = await callRaw('/dice/exec', 'POST', { id: String(scopeId), message: text, messageType });
+    // ⚠️ messageSplitLen: 不传 ⇒ 海豹按 QQ 风格分段（实测 `.st` 回 3 段
+    //    「[1/3]…[3/3]」）。**我们要的是完整的一段**，不然调用方只取最后一条就会
+    //    拿到 `[ 3 / 3 ]` 那一截（这是 2026-10-06 用户报「别的指令都不对」的第二个原因）。
+    //    0 = 无限分段。海豹的取值校验在 `isValidUITestReplySplitLen`。
+    const body = { id: String(scopeId), message: text, messageType, messageSplitLen: 0 };
+    const res = await callRaw('/dice/exec', 'POST', body);
     if (res.ok) {
       ok = res.body === 'ok' || res.body?.result === true;
       if (!ok) log.debug(`海豹 exec 回了 ${JSON.stringify(res.body)}（不是 "ok"）`);
@@ -161,6 +259,42 @@ export async function roll(message, scopeId = 'UI-Group:2001', messageType = 'gr
     return false;
   }
   return ok;
+}
+
+/**
+ * 告诉海豹「接下来这条是**这个人**发的」。
+ *
+ * ⚠️⚠️ 为什么需要这个（2026-10-06 实测）：海豹的 `/dice/exec` 把发件人写死成
+ *    `Nickname:"User"` / `UserID:"UI:1002"`（源码 `api/api_bind.go` 的 `DiceExec`），
+ *    API **不接受**昵称字段。所以不先改名的话，海豹所有输出都是 `<User>` 占位符。
+ *    `.nn <昵称>` 是海豹自己的「改昵称」指令，在 UI 测试模式下可用。
+ *
+ * ⚠️ **为什么用 `setName` 而不是「干脆不改」**：海豹很多指令的结果里带说话人
+ *    （`.ra` → `<名字>的"敏捷5"检定结果为…`、`.st show` → `<名字>的个人属性为…`）。
+ *    不改就是满屏 `<User>`，用户 2026-10-06 明确说「回复正常的东西而不是占位符」。
+ *
+ * ⚠️ 顺序上**必须先改名再 exec 指令**，所以这里返回的是「改名成功没」，
+ *    由 `ask()` 决定要不要继续 —— 改名失败不该让整条骰点丢掉。
+ *
+ * @param {string} nickname 昵称（**别带空格和尖括号**，海豹指令按空格切参数）
+ * @returns {Promise<boolean>} 有没有改成（改不了就当没改，让后面的指令照发）
+ */
+export async function setName(nickname, messageType = 'group') {
+  if (!enabled()) return false;
+  // ⚠️ 海豹指令按空格切参数；尖括号是它的「显示名」包裹符，自己带上会被吃掉。
+  const name = String(nickname ?? '').trim().replace(/[\s<>]/g, '').slice(0, 24);
+  if (!name) return false;
+  // ⚠️ 海豹对 group 模式有 500ms 限流（`DiceExec` 的 `lastGroupExecTime`），
+  //    连着两条必须隔开，否则第二条回 400「过于频繁」。这里睡够再发指令。
+  await sleep(cfg().nameGapMs || 520);
+  const ok = await roll(`.nn ${name}`, '', messageType);
+  if (!ok) log.debug(`海豹：改昵称为「${name}」失败，后续输出可能还是 <User>`);
+  return ok;
+}
+
+/** 小睡（内部用，别导出 —— 导出只会让调用点到处 spread 一堆 setTimeout） */
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
 }
 
 /**
@@ -201,35 +335,106 @@ export async function takeResult(scopeId = '') {
  * ⚠️ 超时后**不报错也不说话**（返回空串）—— 宁可漏答，也不要卡住消息处理。
  *
  * @param {string} message
- * @param {{scopeId?:string, messageType?:'group'|'private', timeoutMs?:number}} [opts]
+ * @param {{scopeId?:string, messageType?:'group'|'private', timeoutMs?:number,
+ *          nickname?:string}} [opts]
+ *   ⚠️ `nickname`（2026-10-06 加）：海豹那边发件人写死成 `User`，给昵称才会先 `.nn` 改掉。
  * @returns {Promise<string>} 结果文本；没算出来返回空串
  */
 export async function ask(message, opts = {}) {
   const scopeId = opts.scopeId ?? '';
-  // ⚠️ 先读一次「现在有几条」—— 之后按数量判断有没有新增。
-  const before = await recentLength();
-  if (!await roll(message, scopeId, opts.messageType ?? 'group')) return '';
+  const type = opts.messageType ?? 'group';
+  // ⚠️⚠️⚠️ **串行化**：海豹的「UI 测试」适配器只有**一个**作用域
+  //    （`DiceExec` 里写死的 `UI-Group:2001` / `UserID:"UI:1002"`），
+  //    而且 `/dice/recentMessage` 是**读后即清**（源码 `DiceRecentMessage`
+  //    结尾 `defer pa.RecentMessage = []{}`）。
+  //    ⇒ 两个人同时掷骰，A 的结果会被 B 读走；名字也会互相覆盖。
+  //    ⇒ 这里排队，一条一条来。多等一会儿总比回错人的话好。
+  return enqueue(() => askNow(message, { ...opts, scopeId, messageType: type }));
+}
+
+/** 极简串行队列（`ask` 的并发闸）—— 不引 p-queue，整个项目没有这个依赖 */
+let chain = Promise.resolve('');
+function enqueue(fn) {
+  const next = chain.then(fn, fn);
+  // ⚠️ 兜底：队列本身**永不 reject**，否则一次失败会把后面全卡住。
+  chain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+async function askNow(message, opts = {}) {
+  const scopeId = opts.scopeId ?? '';
+  const type = opts.messageType ?? 'group';
+
+  // ⚠️⚠️ **先「清场」**：读一次 recentMessage 就是把它清空
+  //    （上面 `DiceRecentMessage` 的 defer）。所以这里读一次不是为了看内容，
+  //    是为了**丢掉上一条指令的残留结果**，免得当成这条的答案发出去。
+  await rawRecent();
+
+  // ① 先报上名字：海豹那边发件人写死成 `User`，不 `.nn` 的话输出全是 `<User>` 占位符
+  //    ⚠️ 只在**给了昵称**时才做 —— 没名字就别多花一次网络往返 + 500ms 限流。
+  if (opts.nickname) {
+    await setName(opts.nickname, type);
+    // ⚠️⚠️ 改昵称自己也会产生一条 recentMessage（`<User>(UI:1002)的昵称被设定为<X>`），
+    //    不清掉就会跟着指令结果一起发到群里 ⇒ 每次掷骰多一句废话。
+    //    ⚠️⚠️ 但**光靠「读完即清」不够**：`dice/exec` 是异步的（立刻回 `ok`，
+    //    结果过一会儿才进列表），所以刚 `setName` 完就清**通常清不到** ——
+    //    实测那条 ack 还是漏进了 `.help ra` 的结果里。
+    //    ⇒ 双保险：① 先睡一小会儿让 ack 落进列表再清；② 清完再滤一遍正文
+    //      （`resultTexts()` 里按 `昵称被设定为` 过滤），任一条路生效就行。
+    await sleep(cfg().ackWaitMs || 400);
+    await rawRecent();
+  }
+
+  // ② 送指令
+  if (!await roll(message, scopeId, type)) return '';
+
+  // ③ 轮询到出现结果为止
+  //    ⚠️ 判据是「**读到了东西**」而不是「条数变多」—— 因为读操作本身会清空列表，
+  //    条数永远是 0→n→0，用长度差判断必然时序错位（这正是旧实现拿到
+  //    「上一个人的结果」的原因）。
   const wait = Math.max(150, Number(opts.timeoutMs) || Number(cfg().answerWaitMs) || 1500);
   const step = 250;
   for (let waited = 0; waited <= wait; waited += step) {
-    if (waited) await new Promise((r) => setTimeout(r, step));
+    if (waited) await sleep(step);
     const list = await rawRecent();
-    if (list.length > before) {
-      const last = list[list.length - 1];
-      const text = String(last?.message ?? '').trim();
-      if (text) return text;
-    }
+    // ⚠️ 取**全部**条目，不是只取最后一条：海豹一条指令可能回好几段
+    //    （实测 `.help ra` 回 `[1/2]` `[2/2]`；`messageSplitLen=0` 只关掉
+    //    「按长度切段」，关不掉指令自己分多条回复的情况）。
+    //    只取最后一条 = 群里只看到最后一段（用户 2026-10-06 报的就是这个）。
+    const text = resultTexts(list);
+    if (text) return text;
   }
-  // ⚠️ 到点还没出现「新增」：兜底取最后一条。
-  //    实测踩过：列表**从空开始**时那一次，条数判断会失手（before=0，
-  //    但 exec 的结果落在别处 / 或被限流重试后时序错位）⇒ 结果明明在，
-  //    我们却说"没算出来"。取最后一条比空手而归好。
-  //    ⚠️ 代价：理论上可能拿到**上一条**的结果 —— 但那也是同一局的骰子，
-  //    比完全不回答强，而且这属于兜底路径、极少走到。
-  const tail = (await rawRecent()).slice(-1)[0];
-  const text = String(tail?.message ?? '').trim();
-  if (text) log.debug(`海豹：没等到新增条目，兜底取了最后一条（「${message}」）`);
-  return text;
+  // ⚠️ 到点还没结果：**宁可不说**。
+  //    旧实现在这里会「兜底取最后一条」—— 但列表已被清空，取到的是空/别人的，
+  //    只会把噪音发到群里。空串 ⇒ 调用点静默（这本来就是「骰娘模式」要的）。
+  log.debug(`海豹：等到 ${wait}ms 仍没结果，放弃（「${message}」）`);
+  return '';
+}
+
+/**
+ * 把 `recentMessage` 的原始列表拼成**能直接发群里**的文本。
+ *
+ * ⚠️ 两条处理规则，都是实测踩出来的：
+ *   ① **全要**，不只取最后一条 —— 海豹一条指令能回好几段（`.help ra` 回 `[1/2] [2/2]`）。
+ *   ② **滤掉「改昵称」的 ack** —— `<X>(UI:1002)的昵称被设定为<Y>` 是我们自己的
+ *      `.nn` 引起的，**不该出现在群里**。`askNow()` 里已经尽力在改完名字后清场，
+ *      但 `dice/exec` 是异步的（立刻回 `ok`，结果稍后才进列表）⇒ 竞态仍在，
+ *      这里再兜一道底。宁可漏滤也不能误发。
+ *
+ * @param {Array} list `/dice/recentMessage` 的返回
+ * @returns {string} 拼好的正文；全是噪音时返回空串
+ */
+function resultTexts(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((x) => String(x?.message ?? '').trim())
+    // ⚠️ 只滤「整条就是 ack」的，不做 includes —— 海豹正常回复里也可能提到「昵称」。
+    //   实测原文：`<User>(UI:1002)的昵称被设定为<阿祥>` ⇒ 必须吃到结尾那个 `>`。
+    .filter((s) => s && !/昵称被设定为<[^>]*>$/.test(s))
+    .join('\n')
+    .trim();
 }
 
 /** ⚠️ 取「结果之前已有几条」用的原始列表（不加工） */

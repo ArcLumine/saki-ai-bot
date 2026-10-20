@@ -37,9 +37,11 @@
  * | 性格不断细化 | 压缩提示词里**硬性要求**；代码再加一道**条数不许减少**的校验（减少了就拒绝写入） |
  * | 好感度不能修改 | 好感度**根本不在这里** —— 它在 `src/affinity.js` + `state/affinity.json`，这个模块**一个字都不碰**（连提示词里都不提它） |
  */
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { config, ROOT, KNOWLEDGE_DIR } from './config.js';
+// ⚠️ 2026-10-04：四个都要（本地要 `readdirSync` 列目录，上游要 `rmSync` 删文件；
+//    `dirname` 建目录、`basename` 拼日志里的文件名）。
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
+import { config, ROOT, KNOWLEDGE_DIR, knowledgePrivateDir, stateDir } from './config.js';
 import { log } from './log.js';
 import { reloadKnowledge } from './knowledge.js';
 import { groupsOf } from './names.js';
@@ -56,7 +58,8 @@ async function collect(messages) {
 }
 
 /** 观察记忆一律住 `knowledge/observe/`（2026-09-28：从"学到的知识"里拆出来） */
-const FILE = join(KNOWLEDGE_DIR, 'observe', '_shared.md');
+const KDIR = knowledgePrivateDir();
+const FILE = join(KDIR, 'observe', '_shared.md');
 const BEGIN = '<!-- AUTO-OBSERVE:BEGIN -->';
 const END = '<!-- AUTO-OBSERVE:END -->';
 
@@ -79,7 +82,7 @@ const stats = { runs: 0, added: 0, lastRunAt: 0, lastError: '', compressRuns: 0,
  */
 const STATE_FILE = process.env.QQBOT_OBSERVE_FILE
   ? join(ROOT, process.env.QQBOT_OBSERVE_FILE)
-  : join(ROOT, 'state', 'observe.json');
+  : join(stateDir(), 'observe.json');
 
 function loadState() {
   try {
@@ -93,7 +96,7 @@ function loadState() {
 
 function saveState() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
     writeFileSync(tmp, JSON.stringify({ lastCompressAt: stats.lastCompressAt }, null, 2), 'utf8');
     renameSync(tmp, STATE_FILE);
@@ -204,12 +207,22 @@ function targetFileFor(groupId, fromPrivate = false) {
     log.warn(`[观察] 认不出这是哪个群的观察（fromPrivate=${!!fromPrivate}）→ 落 _shared.md（不会被任何群读到）`);
     return FILE;
   }
-  if (gid.startsWith('dm:')) return join(KNOWLEDGE_DIR, 'observe', `dm-${gid.slice(3)}.md`);
-  return join(KNOWLEDGE_DIR, 'observe', `${gid}.md`);
+  if (gid.startsWith('dm:')) return join(KDIR, 'observe', `dm-${gid.slice(3)}.md`);
+  return join(KDIR, 'observe', `${gid}.md`);
 }
 
 /** 把文件里的自动区替换成新内容；没有标记区就建骨架再写 */
 function patchFile(body, file = FILE) {
+  // ⚠️⚠️ 2026-10-05 加：**写之前先备份**。
+  //    起因：我自己的测试把用户**两个群的资料库**写坏又删掉了，翻提示词快照、旧备份目录
+  //    都救不回来（最后只能走 OneDrive 回收站）—— 而 `backupKnowledge` **早就在这个文件里
+  //    import 了、却一次都没调用过** ✗（`knowledge/_backup/` 里只有 server-basic / learned，
+  //    一份 groups 都没有）。观察是**自动后台写**的，没备份等于"改坏了就没了"。
+  try {
+    backupKnowledge(file);
+  } catch (e) {
+    log.debug(`[观察] 写前备份失败（继续写）：${e.message}`);
+  }
   let raw = '';
   try {
     raw = readFileSync(file, 'utf8');
@@ -219,7 +232,7 @@ function patchFile(body, file = FILE) {
     //    的分支全没了（路径现在由 scope 唯一决定，骨架也就只有一种，写不错）。
     const isDm = /[\\/]observe[\\/]dm-/.test(file);
     try {
-      mkdirSync(join(KNOWLEDGE_DIR, 'observe'), { recursive: true });
+      mkdirSync(join(KDIR, 'observe'), { recursive: true });
     } catch { /* 建不出来就等写盘那步自己报错 */ }
     // ⚠️ 2026-09-28（用户要求）：这条安全规则原来写在 group-memory.md 的手写区里，
     //    那个文件已经删掉了。规则本身不能跟着文件一起丢 —— 它是**给观察用的护栏**，
@@ -469,6 +482,11 @@ export async function summarize(opts = {}) {
 
       const merged = merge(existing, parsed);
       const ok = patchFile(merged, file);
+      // ⚠️⚠️ 2026-10-05 加（用户要求：「在机器人记群里内容的时候，加一个能撤回记住的机制，
+      //    只要 @机器人 然后以自然语言说出『忘记刚才那个』之类的话，就撤回记住的那条」）：
+      //    **写成功之后**把"改之前是什么样"存一份快照 —— 撤回就是把它写回去，
+      //    见下面的 `undoLast()`。⚠️ 必须在 `patchFile` **之后**（写失败就不该能撤）。
+      if (ok) pushUndo({ file, gid, before: existing, after: merged });
       if (!ok) {
         log.warn(`[观察] 群 ${gid || '(无群号)'} 写文件失败，这批留着下次再试`);
         for (const m of batch) done.delete(m);
@@ -610,7 +628,7 @@ function merge(existing, parsed) {
  */
 /** 从 `observe/` 里挑一份**有内容可压**的文件（调用方没给 scope 时用） */
 function anyObserveFileWithContent() {
-  const dir = join(KNOWLEDGE_DIR, 'observe');
+  const dir = join(KDIR, 'observe');
   let names = [];
   try {
     names = readdirSync(dir);
@@ -730,6 +748,216 @@ export async function compress(opts = {}) {
   } finally {
     running = false;
   }
+}
+
+// ── 撤回最近一次观察（2026-10-05 用户要求）──────────────────────
+//
+// 用户原话：「在机器人记群里内容的时候，加一个能撤回记住的机制，只要 @机器人
+//   然后以自然语言说出忘记刚才那个 之类的话，就撤回记住的那条，区别于 / 的命令」
+//
+// 拍板（两个来回问过的）：
+//   · 粒度 = **撤销最近一次总结**（不是"删一条"）——
+//     ⚠️ 因为 `patchFile` 是**整块替换**自动观察区，代码里压根没有"第 N 条"这种东西；
+//     存"改之前的整块"再写回去，才是可靠且可预期的做法。
+//   · 权限 = 只有服主 / 管理员 / 群管（见 `bot.js` 的 `tryForgetMemory`）。
+//
+// ⚠️ 快照必须**按群找**：一次 summarize 会给好几个群各写一次，
+//    "撤回"只该撤**当前这个群**那一次，别把别的群的记录也卷回来。
+const UNDO_FILE = process.env.QQBOT_OBSERVE_UNDO_FILE
+  ? join(ROOT, process.env.QQBOT_OBSERVE_UNDO_FILE)
+  : join(stateDir(), 'observe-undo.json');
+/** 留最近几次（够用就行，别把状态文件堆大） */
+const UNDO_KEEP = 10;
+
+function readUndo() {
+  try {
+    const a = JSON.parse(readFileSync(UNDO_FILE, 'utf8'));
+    return Array.isArray(a) ? a : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeUndo(list) {
+  try {
+    mkdirSync(dirname(UNDO_FILE), { recursive: true });
+    const tmp = `${UNDO_FILE}.tmp`;
+    writeFileSync(tmp, JSON.stringify(list.slice(-UNDO_KEEP), null, 2), 'utf8');
+    renameSync(tmp, UNDO_FILE);
+  } catch (e) {
+    log.warn(`[观察] 撤回快照写不进去：${e.message}`);
+  }
+}
+
+/** 记一份「改之前长什么样」。⚠️ 只在写成功之后调用 */
+function pushUndo({ file, gid, before, after, kind = 'observe', title = '', entries }) {
+  const list = readUndo();
+  list.push({
+    at: Date.now(),
+    // ⚠️ 2026-10-06 加（用户：「把撤回扩展到教学」）：**两类快照的还原方式不一样** ——
+    //    · `observe`（群记忆）→ 写的是**自动观察区**，还原时只换标记区之间
+    //    · `teach`（教学）→ 写的是 `server-basic.md` 那种**散文式全局知识库**，
+    //      没有标记区 ⇒ 必须**整文件写回**（见 `restoreFile`）
+    //    所以每条快照都得记下自己是哪一类，否则撤回时会用错还原方式、把文件写坏。
+    kind: String(kind ?? 'observe'),
+    // 教学的主题名 —— 撤回后要能告诉她"撤的是哪一条"（观察快照没这个，空串）
+    title: String(title ?? ''),
+    file: String(file ?? ''),
+    gid: String(gid ?? ''),
+    // ⚠️ `before` 允许是 `null`：表示**这个文件当时还不存在**（教学第一次给某个群
+    //    建库就会这样）。撤回时要把文件**删掉**，而不是写回一份骨架 ——
+    //    不然会凭空多出一个之前没有的文件。
+    before: before === null ? null : String(before ?? ''),
+    after: String(after ?? ''),
+    // ⚠️ 只用来告诉她"撤了几条" ⇒ 必须算**新增**的条数（`after - before`），
+    //    不是 `after` 里总共有几条 —— 第一版算的是总数，测试里报成 3（实际新增 2）。
+    //    改写的那些（差值 0）就报"那次记的内容删了"，不硬凑数字。
+    // ⚠️ 教学快照自己传 `entries`（它按 `## 标题` 组织，数不出 `- ` 行）。
+    entries:
+      entries !== undefined
+        ? Math.max(0, Number(entries) || 0)
+        : Math.max(
+            0,
+            (String(after ?? '').match(/^- /gm) ?? []).length -
+              (String(before ?? '').match(/^- /gm) ?? []).length,
+          ),
+  });
+  writeUndo(list);
+}
+
+/** 还能撤几次（测试 / 诊断用） */
+export function undoCount(groupId = '') {
+  const gid = String(groupId ?? '');
+  return readUndo().filter((s) => !gid || String(s.gid) === gid).length;
+}
+
+/**
+ * 把**整份文件**写回去 —— 撤回教学用（2026-10-06 加）。
+ *
+ * ⚠️⚠️ 为什么**不能复用 `patchFile`**：那个函数只认**自动观察区**
+ *    （`<!-- AUTO-OBSERVE:BEGIN -->`），文件里没有那对标记时它会**自己包一个**
+ *    再写进去 ⇒ `server-basic.md` 那种散文式知识库会被套上一层标记区，
+ *    内容也会被挪位。教学写的恰恰就是那几份 ⇒ 必须走这条**整文件还原**。
+ *
+ * @returns {boolean} 写成功没有
+ */
+function restoreFile(file, content) {
+  try {
+    backupKnowledge(file);
+  } catch (e) {
+    log.debug(`[观察] 还原前备份失败（继续写）：${e.message}`);
+  }
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, String(content ?? ''), 'utf8');
+    renameSync(tmp, file);
+    return true;
+  } catch (e) {
+    log.warn(`[观察] 还原 ${basename(file)} 失败：${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * 记一份「**教学**之前长什么样」—— 让「撤回」也能撤掉**教给她的知识**。
+ *
+ * ⚠️ 2026-10-06 加（用户原话：「把撤回扩展到教学」）。
+ *    以前只有**自动观察**（群记忆）能撤：教学写的是 `server-basic.md` /
+ *    `server-rules.md` / `server-world.md` / `server-people.md` 那几份**全局知识库**
+ *    （`learned.js` 的 `upsertIntoFile`），**压根没有退路** ——
+ *    教错一条只能去界面上手改，`/撤回` 还会回一句"没有什么可撤的诶"。
+ *
+ * ⚠️ 调用点在 `learned.js` 的 `learn()` —— **写成功之后**才记（写失败就不该能撤）。
+ * ⚠️ `gid` 记的是**教学发生的那次群聊**：教学写进的是全局库，但"撤回最近一次"
+ *    是按群聊会话算的，不然 A 群撤回会把 B 群刚教的东西抹掉。
+ *
+ * @param {{file:string, gid:string, before:string|null, after:string, title?:string, added?:boolean}} p
+ *   `before` = 写之前的**整份文件内容**；传 `null` 表示"这个文件当时还不存在"。
+ */
+export function pushTeachUndo({ file, gid, before, after, title = '', added = false }) {
+  pushUndo({
+    file,
+    gid,
+    before,
+    after,
+    kind: 'teach',
+    title,
+    // 教学一次只动**一条**（新增 1 条 / 覆盖 0 条），不像观察那样一写好几行
+    entries: added ? 1 : 0,
+  });
+}
+
+/**
+ * 撤回**这个群最近一次**写入 —— 群记忆（自动观察）和教学**共用同一条队列**，
+ * 所以"撤回"永远撤的是**最近发生的那一次**，不管它是哪种。
+ *
+ * @param {string} groupId 群号（'dm:<QQ>' 也认 —— 私聊记忆同一个机制）
+ * @returns {{ok:boolean, kind?:string, title?:string, reason?:string, at?:number, removed?:number, preview?:string[]}}
+ */
+export function undoLast(groupId = '') {
+  const gid = String(groupId ?? '');
+  const list = readUndo();
+  for (let i = list.length - 1; i >= 0; i--) {
+    const s = list[i];
+    if (gid && String(s.gid) !== gid) continue;
+    const kind = String(s.kind ?? 'observe');
+    // ⚠️ 两类快照**还原方式不同**（见 `restoreFile` 上面那段）：
+    //    · 'teach' → 整文件写回；`before === null` = 文件本来不存在 → 删掉它
+    //    · 'observe' → 只换自动观察区之间（老行为，没动）
+    let restored;
+    if (kind === 'teach') {
+      if (s.before === null) {
+        try {
+          rmSync(s.file, { force: true });
+          restored = true;
+        } catch (e) {
+          log.warn(`[观察] 撤教学时删文件失败：${e.message}`);
+          restored = false;
+        }
+      } else {
+        restored = restoreFile(s.file, s.before);
+      }
+    } else {
+      restored = patchFile(s.before, s.file);
+    }
+    if (!restored) {
+      return { ok: false, reason: '写不回去（文件被占用或者没有权限）' };
+    }
+    list.splice(i, 1);
+    writeUndo(list);
+    // ⚠️ 知识是**启动时读进内存**的 —— 不重载的话，撤回只改了磁盘，
+    //    她这次说话用的还是撤掉之前那份（用户会以为"撤了但没生效"）。
+    try {
+      reloadKnowledge();
+    } catch (e) {
+      log.warn(`[观察] 撤回后重载知识失败（重启才生效）：${e.message}`);
+    }
+    // ⚠️ 教学快照的 `after` 是**整份文件**，按 `- ` 行去筛会捞出一堆跟这次无关的旧条目
+    //    ⇒ 教学只报**主题名**（那个才是"撤了哪一条"）。
+    const preview =
+      kind === 'teach'
+        ? [String(s.title ?? '').trim()].filter(Boolean)
+        : String(s.after ?? '')
+            .split('\n')
+            .filter((l) => l.trim().startsWith('- '))
+            .slice(0, 3)
+            .map((l) => l.trim().replace(/^- /, '').slice(0, 40));
+    return {
+      ok: true,
+      kind,
+      title: String(s.title ?? ''),
+      at: Number(s.at ?? 0),
+      removed: Number(s.entries ?? 0) || 0,
+      preview,
+    };
+  }
+  return { ok: false, reason: gid ? '这个群还没有能撤的记录' : '没有能撤的记录' };
+}
+
+/** 测试用：手动塞一条撤回快照（生产路径只有 `summarize` 里那一处会调 `pushUndo`） */
+export function __pushUndoForTest(entry) {
+  pushUndo(entry);
 }
 
 export function reset() {

@@ -43,11 +43,21 @@ const originalLearned = readFileSync(LEARNED, 'utf8');
 // ── 假模型 ──
 const calls = { extract: 0, answer: 0 };
 const answerPrompts = [];
+// ⚠️⚠️ 2026-10-13 加（用户要求：「记住和忘记，应该在**命中关键词之后
+//    再用模型判定一遍**是否执行」）：`judgeMemoryCommand` 的那次判定走这里。
+//    默认「是」（正常教学照旧入库），【5】里临时改成「否」验证"命中但不执行"。
+let judgeYes = true;
+let judgeCalls = 0;
 
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     const parsed = JSON.parse(body || '{}');
     const sys = parsed.messages?.find((m) => m.role === 'system')?.content ?? '';
     const user = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '';
@@ -63,6 +73,16 @@ const llmServer = createServer((req, res) => {
     //    （bing/百度/DDG，12~15 秒）→ 【2】的 `waitFor` 被拖过超时 →
     //    「最高优先级」那 3 项偶发失败。
     //    （同一个坑在 `e2e.js` / `cs.js` 都踩过，这里也补齐。）
+    // ⚠️ 2026-09-30 加：**教学分类请求**（`learned.js` 会拿这条知识去问模型
+    //    "该进哪一份知识库"）。这里**固定回 `other`** —— 也就是"分不出来"，
+    //    于是走老路径写进 `learned.md`。这样本套件下面那些断言（读 learned.md 的）
+    //    才是确定的；否则模型分类一变、断言就跟着飘。
+    //    ⚠️ 必须排在其它分支前面（它也是非流式 JSON，别被后面的 SSE 分支吃掉）。
+    if (sys.includes('知识库分类')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '{"cat":"other"}' } }] }));
+      return;
+    }
     if (sys.includes('这句话要不要上网查')) {
       calls.presearch = (calls.presearch ?? 0) + 1;
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
@@ -83,6 +103,20 @@ const llmServer = createServer((req, res) => {
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'NONE' } }] })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
+      return;
+    }
+
+    // ⚠️⚠️ 2026-10-13 加：新增的「记住 / 忘记 **是不是真指令**」判定
+    //    （`bot.js` 的 `judgeMemoryCommand`）—— **非流式**轻调用，system 里带
+    //    「【记忆指令判定】」这个特征串。不认它的话会落到下面那条
+    //    「非流式 → 回一段固定文本」上，而那条判定要求**整条就是「是」** ⇒
+    //    所有教学都不执行（这套件会整片红）。
+    if (sys.includes('【记忆指令判定】')) {
+      judgeCalls++;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({ choices: [{ message: { role: 'assistant', content: judgeYes ? '是' : '否' } }] }),
+      );
       return;
     }
 
@@ -296,7 +330,11 @@ async function main() {
   await noop();
   const after2 = readFileSync(LEARNED, 'utf8');
   check(after2.includes('需要申请'), '新内容写进去了');
-  check(/修改记录[\s\S]*覆盖/.test(after2), '修改记录里标明了这是一次「覆盖」');
+  // ⚠️ 2026-09-30：变更日志从 learned.md **搬到 `logs/learned-changelog.md`** 了 ——
+  //    它是"谁在什么时候教了哪条"的流水账，实测涨到 6310 字（占整份一半），
+  //    却对回答一点用都没有，而 learned.md 是要进聊天提示词的。
+  const changelog = readFileSync(join(ROOT, 'logs', 'learned-changelog.md'), 'utf8');
+  check(/覆盖/.test(changelog), '变更日志里标明了这是一次「覆盖」');
 
   console.log('\n[5] 「你学到了什么」');
   sent.length = 0;
@@ -324,6 +362,27 @@ async function main() {
   if (newReplies) console.log(`     （这条的回复：${newReplies.replace(/\n/g, ' / ')}）`);
   check(readFileSync(LEARNED, 'utf8') === before7, '普通提问没有被写进学习档案');
   check(!newReplies.includes('记下了'), '也没有回「记下了」');
+
+  console.log('\n[8] ★★ 命中「记住」但模型判定"不是在教她" → **不许入库**');
+  // 现场（用户要求，2026-10-13）：「记住和忘记应该在**命中关键词之后
+  //   再用模型判定一遍**是否执行」。这条验的就是那一次判定：
+  //   假模型回「否」⇒ 教学不执行、不回「记下了」、档案一个字不动。
+  {
+    const before8 = readFileSync(LEARNED, 'utf8');
+    const extractBefore8 = calls.extract;
+    judgeYes = false;
+    sent.length = 0;
+    say(OWNER, '记住：我刚才说的那句是引用别人的，别当真', 'owner', 4012);
+    await sleep(3000);
+    judgeYes = true;
+    check(judgeCalls >= 1, '★ 命中关键词后**确实问了模型一次**（判定调用发生了）');
+    check(
+      readFileSync(LEARNED, 'utf8') === before8,
+      '★★ 判定为"不是教学" → 学习档案**一个字都没动**',
+    );
+    check(!sent.join('\n').includes('记下了'), '★ 也没有回「记下了」');
+    void extractBefore8;
+  }
 }
 
 async function cleanup() {

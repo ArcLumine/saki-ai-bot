@@ -191,7 +191,22 @@ const PROVIDERS = {
       //    官方 API 文档写明 **Seedream 5.0 pro / flash 不支持配置这个参数** ——
       //    传了会被拒。而官方教程里 5.0 lite 的例子也**根本不传它**
       //    （不传 = 默认就是单图），所以删掉最稳、且对全系列都成立。
-      response_format: 'url',
+      // ⚠️⚠️ 2026-09-30 修（用户报「刚刚为什么没拍照」→ 日志里连着两次
+      //    「生图失败（server）：生成图落盘失败：The operation was aborted due to timeout」）。
+      //
+      //    真凶就是这一行原来传的 `url`：它返回的是火山 TOS 上的临时地址
+      //    （`ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com`），
+      //    而那个域名在用户这台机器上**下不动**：
+      //      · 60 秒上限 → `TimeoutError`
+      //      · 放宽到 180 秒 → **10 秒就 `fetch failed`**（连接层面不通，不是慢）
+      //    ⇒ 图**生成是成功的**（实测 19.4 秒就出图），却卡在"把图下载下来"，
+      //      两次都失败，最后只能回「拍照失败」。
+      //
+      //    改成 `b64_json`：图**跟着响应直接回来**，根本不碰 TOS。
+      //    `pickImage()`（认 `b64_json`）和 `materialize()`（`if (picked.b64)` 直接落盘）
+      //    本来就支持这条路，只是之前没走。
+      //    实测：b64 三次都成功（18.1s / 19.4s / …），生成耗时和 url 模式没差别。
+      response_format: 'b64_json',
       watermark: !!s.watermark,
     }),
   },
@@ -272,18 +287,73 @@ const STYLE_FALLBACK = '真实照片，手机随手拍，没有滤镜也没有�
  * @param {boolean} p.withSelf  画面里有没有她 —— 决定用 `style.self` 还是 `style.scene`
  * @param {string} [p.time]     时间（一样一样按"事实在前、画风在后"排）
  * @param {string} [p.place]    地点
+ * @param {boolean} [p.hasRef]  这次**真的带了参考图**吗（默认跟 `withSelf` 一致）
+ * @param {Array<{name?:string}>} [p.others] ⚠️ 2026-10-07 加（合照）：
+ *        画面里**除了她还有谁** —— 顺序必须和传进 `generate()` 的参考图一致
+ *        （她自己永远是图1，`others[0]` 是图2、`others[1]` 是图3…）。
  */
-export function buildPrompt({ what, withSelf = true, time = '', place = '' } = {}) {
+export function buildPrompt({ what, withSelf = true, time = '', place = '', hasRef = null, others = [] } = {}) {
+  // 「合照」里除她之外的那几个人（每个人对应一张参考图）
+  const mates = (Array.isArray(others) ? others : []).filter(Boolean);
   const body = String(what ?? '')
     .trim()
     .replace(/[。.]+$/, ''); // 免得拼出"。。"
   if (!body) return '';
   const style = config.imagegen?.style ?? {};
-  const pick = String((withSelf ? style.self : style.scene) ?? '').trim() || STYLE_FALLBACK;
+  // ⚠️⚠️ 2026-10-07 加（合照）：**多人时不能再用单人自拍那段画风** ——
+  //    它里面写着「取景框里**只有她自己**，画面里看不到手机」，而合照明明有两个人
+  //    ⇒ 两句自相矛盾，模型会只画一个人（或者把两个人叠成一个人）✗
+  //    ⇒ 多人时改用 `imagegen.style.group`；没配就从 `self` 里把那句换掉当兜底
+  //      （界面上可以显式写 `imagegen.style.group` 覆盖，见 config.example.yml）。
+  const groupStyle =
+    String(style.group ?? '').trim() ||
+    String(style.self ?? '').replace(/这是自拍[^。]*。/, '这是合照：两个人并排站着看镜头。');
+  const pick =
+    String((withSelf ? (mates.length ? groupStyle : style.self) : style.scene) ?? '').trim() ||
+    STYLE_FALLBACK;
   // ⚠️ 顺序固定为「画面 → 时间地点 → 画风」：前面是"这次是什么"，后面是"长什么样"。
   //    反过来写模型会把画风当成主体描述的一部分。
-  const when = [String(time ?? '').trim(), String(place ?? '').trim()].filter(Boolean).join('，');
-  return [body + '。', when ? `${when}。` : '', pick].filter(Boolean).join('');
+  //
+  // ⚠️⚠️ 2026-10-03 加（用户报：她拍的照片「**很像中国**」，群里还因此吵起来）：
+  //    **她住东京**（硬设定，见 persona「她现在住哪」），可这里原来只传
+  //    「便利店 / 家 / 街上」这种**没有城市层级**的地点 ⇒ 生图模型按中文提示词
+  //    默认出**中国街道**（中国小区、中文招牌、电动车）✗
+  //    ⇒ 地点统一带上「**日本·东京**」这一层。她永远在东京，不需要配置。
+  //    （`place` 里已经写了东京/日本就不重复加。）
+  const placeText = String(place ?? '').trim();
+  const placeFull = placeText
+    ? /东京|日本/.test(placeText)
+      ? placeText
+      : `日本·东京，${placeText}`
+    : '日本·东京';
+  const when = [String(time ?? '').trim(), placeFull].filter(Boolean).join('，');
+
+  // ⚠️⚠️ 2026-10-02 加（用户报「为什么她刚发的照片是黑发」）：
+  //    **必须在提示词里显式指认参考图** —— 只说"是你本人"没用，
+  //    模型根本没见过"你"，那句话对它等于没说，它会**自己画一个人**。
+  //
+  //    现场：参考图 `personas/saki/ref.webp` 是**浅蓝紫色双马尾、金瞳**，
+  //    而 02:37 生成的那张自拍是**一头黑色散发** ✗ —— 画风、构图、手机感都对，
+  //    唯独**身份完全没带上**（用户一眼就看出来了）。
+  //
+  //    豆包 Seedream（以及这类图生图接口）的用法就是这样：`image` 字段只负责"给图"，
+  //    **提示词里得说「参考图里的那个女孩」它才知道要照谁画**（多图还要分图1图2）。
+  //
+  //    ⚠️ 措辞按 Seedream 的官方用法：**用「图1」指代参考图**（多图时就是图1/图2）。
+  //    ⚠️ 只写"保持一致"、不点名参考图也弱 —— 所以这里明确指**图1**，
+  //      并且把最容易跑偏的两样（发色、发型）单独点出来；
+  //      ⚠️ 不写死具体颜色（参考图是什么就照什么），换人设不用改代码。
+  //    ⚠️ 长度有硬约束：官方建议中文提示词 <300 字，`test/imagegen.js` 钉着这条
+  //      （第一版我写了 68 字，直接把提示词顶到 339 ⇒ 被套件抓住）。
+  const anchor =
+    withSelf && hasRef !== false
+      ? mates.length
+        ? `画面里 ${mates.length + 1} 个人：图1是主角，` +
+          mates.map((o, i) => `图${i + 2}是${String(o?.name ?? '').trim() || '她的同伴'}`).join('、') +
+          '。各自照自己参考图的发色发型五官画，别混。'
+        : '画面里的人是参考图1里的女孩，发色发型五官保持一致。'
+      : '';
+  return [body + '。', anchor, when ? `${when}。` : '', pick].filter(Boolean).join('');
 }
 
 // ── 缓存清理 ──────────────────────────────────────────
@@ -446,7 +516,12 @@ async function materialize(picked, s) {
     fs.writeFileSync(file, Buffer.from(picked.b64, 'base64'));
     return file;
   }
-  const r = await fetch(picked.url, { signal: AbortSignal.timeout(Math.min(s.timeoutMs, 60000)) });
+  // ⚠️ 2026-09-30：这里原来把上限硬砍成 60 秒（`Math.min(s.timeoutMs, 60000)`），
+  //    而 4K 图有好几 MB，网络稍抖就超时（现场就是这么挂的）。
+  //    放宽成跟着 `timeoutMs`（默认 180 秒）。
+  //    ⚠️ 但这只是**兜底路径**（有的服务商只给 url）—— 方舟那边已经改走 b64，
+  //      根本不会走到这儿。
+  const r = await fetch(picked.url, { signal: AbortSignal.timeout(s.timeoutMs) });
   if (!r.ok) throw new Error(`下载生成图 HTTP ${r.status}`);
   const ct = String(r.headers.get('content-type') ?? '');
   const ext = ct.includes('jpeg') ? '.jpg' : ct.includes('webp') ? '.webp' : '.png';

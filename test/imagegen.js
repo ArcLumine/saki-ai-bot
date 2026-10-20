@@ -240,7 +240,19 @@ console.log('\n【2b】★ 提示词**两层**：现算的（画面/时间/地�
   const self = imagegen.buildPrompt({ what: '站在便利店门口自拍', withSelf: true, time: '晚上', place: '便利店门口' });
   const sceneOnly = imagegen.buildPrompt({ what: '一所学校的白色大门，雨后地面反光', withSelf: false });
   check(self.startsWith('站在便利店门口自拍。'), '画面排在最前面', self.slice(0, 16));
-  check(/晚上，便利店门口。/.test(self), '★ 时间地点接在画面后面（这两样是**现算的**一层）');
+  // ⚠️⚠️ 2026-10-03 改（用户报：她拍的照片「**很像中国**」）：
+  //    地点统一带上「日本·东京」这一层（她住东京，见 persona「她现在住哪」）——
+  //    原来只传「便利店门口」这种没有城市层级的地点，生图模型就按中文提示词默认出中国街道 ✗
+  check(
+    /晚上，日本·东京，便利店门口。/.test(self),
+    '★★ 时间地点接在画面后面，而且**地点带上了"日本·东京"**（不然生图出中国街道）',
+  );
+  // 已经写了东京/日本就不重复加前缀
+  const dup = imagegen.buildPrompt({ what: 'x', withSelf: false, place: '东京的便利店门口' });
+  check(
+    !/日本·东京，东京/.test(dup) && /东京的便利店门口/.test(dup),
+    '★ `place` 里已经写了东京/日本 → 不重复加前缀',
+  );
   check(!/。。/.test(self) && !/。，/.test(self), '标点不会拼坏');
   check(imagegen.buildPrompt({ what: '', withSelf: true }) === '', '没有画面 → 空串（不许拿空提示词去烧钱）');
 
@@ -325,7 +337,15 @@ console.log('\n【3】火山方舟（ark）的请求形状');
     b.sequential_image_generation === undefined,
     '不传 `sequential_image_generation`（不传 = 默认单图，且 5.0 pro/flash 不认这个参数）',
   );
-  check(b.response_format === 'url', 'response_format=url');
+  // ⚠️⚠️ 2026-09-30 改：原来断言 `'url'`，现在**必须**是 `'b64_json'`。
+  //    原因（见 `src/imagegen.js` 那段注释）：传 `url` 拿到的是火山 TOS 上的临时地址，
+  //    而那个域名在用户这台机器上**下不动**（60 秒超时 / 180 秒直接 fetch failed），
+  //    于是图明明生成成功了，却卡在"下载"这一步，连着两次报「拍照失败」。
+  //    ⇒ 这条断言现在就是**盯这个回归的哨兵**：谁改回 `'url'`，谁就得先看那段注释。
+  check(
+    b.response_format === 'b64_json',
+    '★ response_format=b64_json（图跟响应直接回来，不走 TOS 下载那条连不上的路）',
+  );
 
   // ⚠️ 2026-09-22 加：分辨率档要**按模型夹** —— Seedream 5.0 pro/flash 最高只到 2K，
   //    给它们发 4K 会被平台拒。默认档是 4K（用户要求"发出来像真照片、800 万像素"），
@@ -539,10 +559,35 @@ console.log('\n【10】★ 接线断言（源码级 —— 这两个坑互相拉
   check(/place: picked\.place \|\| facts\.where/.test(src), '★★ 地点同理');
   check(/whereNow\(nowAt\)/.test(src), '★ 事实来源：`whereNow()`（她说的话优先，**和日程矛盾时以日程为准**）');
   check(
-    /const refs = withSelf \? persona\.refImages\(\) : \[\]/.test(src),
+    // ⚠️ 2026-10-07：合照之后这行变成了「有她时 = 自己的立绘 + 同伴的立绘」，
+    //    所以不能再钉死 `persona.refImages()` 那一种写法（一改就假红）。
+    //    **要守的语义是**：`withSelf === false` 时 refs 一定是空数组。
+    /const refs = withSelf \?[^\n]*: \[\]/.test(src),
     '★★ "拍景物"**不传参考图** —— 传了模型会硬塞一个人进去，而拍景物要的正是纯写实',
   );
   check(/expectRef: withSelf/.test(src), '★ 拍景物时**不报**"没有参考图"的假警告');
+
+  // ⚠️ 2026-10-07 加（用户要求「叫她们拍个合照」）：
+  const groupPrompt = imagegen.buildPrompt({
+    what: '教室里两个人的合照',
+    withSelf: true,
+    place: '教室',
+    others: [{ name: '爱音' }],
+  });
+  check(
+    groupPrompt.includes('图2') && groupPrompt.includes('爱音'),
+    '★★ 合照：提示词里点了"图2 是谁"（不点的话两张脸会混成一个人）',
+  );
+  check(
+    !/只有她自己/.test(groupPrompt),
+    '★★ 合照**不能再带「取景框里只有她自己」**那句 —— 和"两个人"自相矛盾，模型会只画一个',
+  );
+  check(
+    !imagegen.buildPrompt({ what: 'X', withSelf: true }).includes('图2'),
+    '★ 单人照不带"图2"（那条路一个字都不该动）',
+  );
+  // ⚠️ 官方指南：中文提示词建议不超过 300 字 —— 合照多了"图2是谁"那一段，最容易顶破
+  check(groupPrompt.length < 300, `③ 合照提示词 ${groupPrompt.length} 字（官方建议 <300）`);
   // ⚠️⚠️ 2026-09-23 实测（用户：「为什么我 @ 她让她看上一句话，她直接给我发照片了」）：
   //    他只是 @ 了一下、没打字（引子是"看看最近的消息，回他一句"），她**自己拍了一张**。
   //    而且先说了「这个点能拍出什么好看的来」**然后照样拍**，自相矛盾。
@@ -566,7 +611,9 @@ console.log('\n【10】★ 接线断言（源码级 —— 这两个坑互相拉
   // ⚠️⚠️ 2026-09-22 用户截图「发的还是表情格式」——
   //    照片被当**表情**发了（QQ 里是小图 + `[动画表情]`），真因是 `sendText` 的
   //    `asSticker` **默认 `true`**（那是给表情包设的），而拍照这条路没传它。
-  const sd = /sendText\(event, text, \{ reply = false, faceFile = null, asSticker = ([a-z]+) \}/.exec(src);
+  // ⚠️ 2026-10-09 改：`sendText` 的签名又加了参数（`force = false`，给"旁白闸"用）⇒
+  //    原来要求 `asSticker = xxx }` **紧接右花括号**，现在后面还有 ` force = false` ⇒ 得容错 ✓
+  const sd = /sendText\(event, text, \{ reply = false, faceFile = null, asSticker = ([a-z]+)[,}]/.exec(src);
   check(sd && sd[1] === 'false', '★★ `sendText` 的 `asSticker` 默认必须是 **false**（默认 true 那次让照片变成了表情）', sd?.[1]);
   check(
     /await this\.sendText\(event, '', \{ faceFile: r\.file, asSticker: false \}\)/.test(src),

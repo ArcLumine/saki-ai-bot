@@ -13,10 +13,12 @@ import { WebSocketServer } from 'ws';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { facePath } from '../src/faces.js';
+import { facePath, faceTags } from '../src/faces.js';
 import { isStickerSeg, extractText } from '../src/message.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const FACE_TAG = faceTags().find((tag) => faceTags().filter((candidate) => candidate === tag).length === 1 && facePath(tag));
+if (!FACE_TAG) throw new Error('表情回归需要一张标签唯一且文件存在的素材');
 const LLM_PORT = 39602;
 const WS_PORT = 39601;
 const TOKEN = 'face-token';
@@ -34,9 +36,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 假模型按问题返回不同的内容，用来验证各种情况
 let reply = '';
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     const parsed = JSON.parse(body || '{}');
     const user = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '';
     const sys = parsed.messages?.find((m) => m.role === 'system')?.content ?? '';
@@ -64,13 +71,46 @@ const llmServer = createServer((req, res) => {
       return;
     }
 
-    if (user.includes('崩溃')) reply = '行吧，又崩了。[表情:无语]';
+    // ⚠️⚠️ 2026-10-06 补：**预搜索**（system 里含「要不要上网查」）——
+    //    这个套件原来也漏认了它（和 `sensitivity` 同一个坑，同一天抓出来的）：
+    //    预搜索要的是 `{"search":false}`，漏认 → 解析不出来 → **退回规则** →
+    //    **每条消息真的联网搜**（10~15 秒）⇒【3】那条 20 秒的 `waitFor` **偶发超时**
+    //    （下面那句注释里写的"实测跑 4 次挂 1 次"就是它）。
+    //    ⚠️ 预搜索走 `collect(streamChat(...))` ⇒ **要 SSE、不要 JSON**。
+    if (sys.includes('要不要上网查')) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      res.write(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: '{"search":false,"why":"测试不搜"}' } }] })}\n\n`,
+      );
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+    // ⚠️ 知识录入 / 抽取：要的是 **JSON**。不认它的话每轮都要等满超时 —— 白拖慢回归
+    //    （`test/cs.js` / `test/sensitivity.js` 里都有这条，这里原来也漏了）。
+    if (sys.includes('知识录入') || sys.includes('知识抽取器')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({ hasKnowledge: false, natural: true, topic: '', fact: '' }),
+              },
+            },
+          ],
+        }),
+      );
+      return;
+    }
+
+    if (user.includes('崩溃')) reply = `行吧，又崩了。[表情:${FACE_TAG}]`;
     else if (user.includes('不存在')) reply = '试试这个 [表情:根本没有这张图] 看看';
     else if (user.includes('纯文本')) reply = '这条没有任何标记。';
     else if (user.includes('长文')) {
       // 故意让标记跨越 40 字的分条边界（config 里 maxChars=40）
-      reply = '这是一段很长的回答，用来测试分条的时候标记会不会被切成两半，标记在中间[表情:欢呼]然后后面还有更多内容继续写下去。';
-    } else reply = '好的。[表情:欢呼]';
+      reply = `这是一段很长的回答，用来测试分条的时候标记会不会被切成两半，标记在中间[表情:${FACE_TAG}]然后后面还有更多内容继续写下去。`;
+    } else reply = `好的。[表情:${FACE_TAG}]`;
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     // 一次只吐 1~2 个字符，最大化「标记被切开」的概率
@@ -195,7 +235,7 @@ async function main() {
   check(textOnly.length >= 1, '文字是单独一条发的');
 
   // 图片用 base64 发（NapCat 对 file:// 支持不稳），所以校验方式变了：
-  // 解码回来的内容必须和 face_wuyu 那张文件**逐字节相同**。
+  // 解码回来的内容必须和选中的素材**逐字节相同**。
   const sentImg = imgOnly[0]?.images[0] ?? '';
   check(sentImg.startsWith('base64://'), '图片用 base64:// 发送（不用 file://）');
 
@@ -210,7 +250,7 @@ async function main() {
   let imgNote = '';
   try {
     const got = Buffer.from(sentImg.replace(/^base64:\/\//, ''), 'base64');
-    const want = readFileSync(facePath('无语'));
+    const want = readFileSync(facePath(FACE_TAG));
     imgOk = got.equals(want);
     imgNote = imgOk
       ? `${got.length} 字节，与 face_wuyu 逐字节一致`
@@ -270,7 +310,7 @@ async function main() {
   // ⚠️⚠️ 2026-09-20 改：原来是 `>= 1`（**太松，放过了重复**）。
   //    用户截图报「**一次发了两个一模一样的表情包**」，真身是流式分条那里
   //    拿 `sentText.length`（**清洗后**的长度）去切原文 buffer → 尾巴被当成新一段又发一遍。
-  //    这段原文里**只有 1 个** `[表情:欢呼]` 标记，所以**发出的图必须正好 1 张**；
+  //    这段原文里**只有 1 个**表情标记，所以**发出的图必须正好 1 张**；
   //    多一张就是那个 bug 回来了。
   check(allImages().length === 1, `分条后发出了 1 张图（实际 ${allImages().length} 张）`);
   console.log(`     （分了 ${sent.length} 条发送）`);
@@ -312,4 +352,3 @@ main()
     console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
     process.exit(failures === 0 ? 0 : 1);
   });
-

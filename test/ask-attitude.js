@@ -6,6 +6,7 @@
  * 用独立探针端口，不碰 NapCat；状态、锁和账单也都在 logs 下隔离，无需停真机器人。
  */
 import { spawn } from 'node:child_process';
+import { configWithOnebot } from './_config-base.mjs';
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import yaml from 'js-yaml';

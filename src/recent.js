@@ -17,12 +17,12 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { config, ROOT, CONFIG_FILE } from './config.js';
+import { config, ROOT, CONFIG_FILE, stateDir } from './config.js';
 import { log } from './log.js';
 import * as persona from './persona.js';
 // ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)` —— 见该文件头
-// ⚠️ 2026-10-04：「谁说的」统一格式 `昵称(QQ号)` —— 见该文件头
 import { whoTag } from './who.js';
+import { castRoleOf } from './knowledge.js';
 
 /** group_id -> [{ name, userId, text, at, atMe, time }] */
 const store = new Map();
@@ -31,7 +31,7 @@ const store = new Map();
 // 落盘（2026-09-17 加，见顶部注释）
 // ─────────────────────────────────────────────────────────────
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 
 /**
  * 状态文件落在哪 —— 沿用 `tic.js` / `meal.js` 那套三步优先：
@@ -101,9 +101,15 @@ export function reload() {
     const next = new Map();
     for (const [k, list] of Object.entries(j?.groups ?? {})) {
       if (!Array.isArray(list)) continue;
+      // ⚠️ 2026-10-03：**按桶判上限**。私聊（`dm:`）那份比群宽（默认 72 小时 vs 12 小时），
+      //    这里原来一律用群那份 ⇒ **重启一次就把"前天"的私聊裁掉了**，
+      //    而这个功能的意义恰恰是"前一天说的话她得记得" ✗
+      const maxAge = /^dm:/.test(String(k))
+        ? bufferMaxAge({ message_type: 'private' })
+        : bufferMaxAge();
       const keep = list
         .filter((x) => x && typeof x.text === 'string')
-        // ⚠️ 只恢复 12 小时以内的 —— 再多就成"假长期记忆"了（那该由群记忆负责）
+        // ⚠️ 只恢复这段窗口以内的 —— 再多就成"假长期记忆"了（那该由群记忆负责）
         .filter((x) => now - (Number(x.time) || 0) < maxAge)
         .slice(-BUFFER_MAX);
       if (keep.length) next.set(String(k), keep);
@@ -270,12 +276,28 @@ const MAX_MSG_CHARS = 200;
 const BUFFER_MAX = 300;
 
 /**
+ * 上下文存哪个桶：群 → 群号；私聊 → `dm:<QQ号>`。
+ * ⚠️ 两种**各存各的** —— 私聊的上下文绝不能让群里看到（跟 dm 记忆同一条规矩）。
+ */
+export function contextKey(event) {
+  if (event?.message_type === 'private') return `dm:${String(event.user_id ?? '')}`;
+  return String(event?.group_id ?? '');
+}
+
+/**
  * 缓冲区的时间上限 —— 只是兜底，别让它当窗口用。
  * ⚠️ 原来这里直接用 `config.context.maxAgeMs`（默认 30 分钟），
  *    那才是把「足球门」删掉的元凶。现在取一个**很宽**的值（默认 12 小时），
  *    真正决定"看多少"的是条数。
+ * ⚠️⚠️ 2026-10-03：**私聊再放宽到 72 小时** —— 用户报的场景是「前一天说睡了、
+ *    第二天问睡了多久」，12 小时会把"昨晚"整个删掉，那这个功能就白做了。
  */
-function bufferMaxAge() {
+function bufferMaxAge(event = null) {
+  if (event?.message_type === 'private') {
+    const dm = Number(config.context?.dm?.bufferMaxAgeMs);
+    if (Number.isFinite(dm) && dm > 0) return dm;
+    return 72 * 60 * 60 * 1000;
+  }
   const wide = Number(config.context?.bufferMaxAgeMs);
   if (Number.isFinite(wide) && wide > 0) return wide;
   return 12 * 60 * 60 * 1000;
@@ -288,12 +310,19 @@ function bufferMaxAge() {
  */
 export function remember(event, parsed = {}) {
   if (!config.context?.enable) return;
-  if (event.message_type !== 'group') return;
+  // ⚠️⚠️ 2026-10-03 **放开私聊**（用户原话：「前一天和她说睡觉了，后一天问她睡了多久，
+  //    也不能计算出来」）。
+  //    根因有两层：① 这里一句 `!== 'group' return` 把私聊整个挡在缓冲区外面，
+  //    而 `recentContextFor()` 那边也直接返回空 ⇒ **私聊压根没有上下文**，
+  //    她连"他昨天说过什么"都不知道；② 就算有，时间标注也不够用（见 `humanWhen`）。
+  //    ⇒ 现在私聊也记，存在 `dm:<QQ号>` 这个 key 下（和群各存各的，绝不会串）。
   // ⚠️ 这里原来还有一道 `limit <= 0` 的闸门 —— `limit` 是**给模型的窗口条数**，
   //    不是缓冲区大小。用它当"要不要记"的开关是错位的（窗口调小就不记上文了）。
   //    缓冲区只受 `context.enable` 控制。
+  const mt = event?.message_type;
+  if (mt !== 'group' && mt !== 'private') return;
 
-  const key = String(event.group_id);
+  const key = contextKey(event);
   const list = store.get(key) ?? [];
 
   let text = String(parsed.text ?? '').slice(0, MAX_MSG_CHARS);
@@ -369,12 +398,31 @@ export function remember(event, parsed = {}) {
     //    现在把 `file` 存下来，`handle` 里发现「当前消息在指代前面的东西」时
     //    可以把这几张图**补做识别**（见 `recentImages` + bot.js 里那段）。
     imageFiles: Array.isArray(parsed.imageFiles) ? parsed.imageFiles.slice(0, 4) : [],
+    // ⚠️⚠️ 2026-09-26 加：**这一条 @ 了谁**（人名，不是 QQ 号）。
+    //
+    //    用户截图：有人引用她的话、再 `@她 @一个小阿萨 他说的` ——
+    //    她答「哪个他，就这么一句他说的，名字呢（」✗。
+    //    查 `state/recent.json`，存进去的只有「他说的」：**@ 段被整个丢掉了**，
+    //    她确实无从知道"他"是谁。⚠️ 名字只能自己反查 ——
+    //    SnowLuma 的 at 段（→事件方向）只给 `qq`、**不给 `name`**。
+    //
+    //    ⚠️⚠️ **为什么不直接把 `@名字` 拼进 `text`**（我第一版就是这么干的，
+    //       被回归打了回来）：`text` **身兼两职** ——
+    //         ① 进上下文给她看；② `contextText()` 靠**文本相等**剔除当前这一条。
+    //       而 @ 的号**不一定是她自己**，那些 at 段就会变成正文里凭空多出来的
+    //       `@某人` ⇒ 下游的关键词 / 表情标记匹配全被打乱 ✗。
+    //       （回归实测：`face`「文本正常」「分条后发出了 1 张图（实际 0 张）」、
+    //         `follow-up` 等正文超时。）
+    //    ⇒ 所以**单独存一个字段**，只在 `contextText()` 往外拼的时候才可见。
+    atNames: Array.isArray(parsed.atNames)
+      ? parsed.atNames.map(String).filter(Boolean).slice(0, 3)
+      : [],
   });
 
   // ⚠️ 缓冲区**按条数**留（用户 2026-09-13：「只要是多少条范围内都得看进来」）。
   //    时间上限只做很宽兜底 —— 原来这里是 `config.context.maxAgeMs`（默认 30 分钟），
   //    那条「足球门」就是被它删掉的。
-  const maxAge = bufferMaxAge();
+  const maxAge = bufferMaxAge(event);
   const now = Date.now();
   const trimmed = list.filter((m) => now - m.time < maxAge).slice(-BUFFER_MAX);
   store.set(key, trimmed);
@@ -406,7 +454,13 @@ export function recentImages(groupId, opts = {}) {
     if (now - m.time > maxAge) continue;
     if (m.messageId && exclude.includes(m.messageId)) continue;
     for (const f of m.imageFiles ?? []) {
-      if (f && !out.some((x) => x.file === f)) out.push({ file: f, name: m.name });
+      // ⚠️ 2026-10-02：**把"什么时候发的"一起带出去**（`time`）。
+      //    用户问：「我补充的消息是在图片后几条消息之后的，这样能不能进图片补充？」
+      //    现实是：图只按"最近 N 张"带进上下文，**不记录"哪句话在说哪张图"** ——
+      //    所以他过几条才补一句「这是**昨晚的**照片」时，她只能靠猜是哪张，猜不中就当成现在 ✗
+      //    ⇒ 带上时间，让提示词里能写「<主人> 5 分钟前发的这张图」——
+      //      那句"昨晚的"就对得上号了（详见 `bot.js` 里拼"来源"那两处）。
+      if (f && !out.some((x) => x.file === f)) out.push({ file: f, name: m.name, time: m.time });
     }
     if (out.length >= (opts.limit ?? 2)) break;
   }
@@ -467,12 +521,52 @@ export function fillReplyInfo(groupId, messageId, info) {
 
 export function rememberBot(event, text, messageId = '') {
   if (!config.context?.enable) return;
-  if (event.message_type !== 'group') return;
+  // ⚠️ 2026-10-03：同 `remember()` —— **私聊也要记她自己说的话**
+  //    （不然她说过的"早点睡吧"、答应过的事，第二天自己都不记得）
+  const mt = event?.message_type;
+  if (mt !== 'group' && mt !== 'private') return;
+  // ⚠️⚠️ 2026-10-16 加（用户：「**这种指令相关的消息不要进上下文**，比如按这个来」）——
+  //    判据是用户选的：「**上游是主人**」。
+  //    群里主人跟她说了话（多半是给活干），她那句回执（「行，就按这个来，等我一下」）
+  //    就是**执行回执**，不是聊天内容 ⇒ 不该进上下文 ✗
+  //    ⚠️ 实测代价（<主人> 截图，群 200000007）：她在群里回了这么一句，
+  //       旁边的爱音把它当台词接，追问「**等我一下是等谁啊**」✗
+  //    ⚠️ 消息**照常发出去**（群友看得见）—— 只是**不写进上下文** ✓
+  //    ⚠️ 只管**群里**：私聊主人时她的回复照旧记
+  //       （不然她就不记得跟主人聊过什么、答应过什么了 ✗）
+  // ⚠️⚠️ 2026-10-16 加（用户：「**这种指令相关的消息不要进上下文**，比如按这个来」）——
+  //    判据是用户选的「**上游是主人**」。
+  //    ⚠️⚠️ 但**光这一条不够宽**（`quest` 套件当场抓到的误伤）：
+  //      `sendChatLike`（剧情 / 日常事件 / 主动发言）**伪造的 event** 里 `user_id`
+  //      可能就正好是主人（测试里 `ownerQQ` 还跟 `selfId` 撞成同一个占位符）
+  //      ⇒ 把她**主动说的话**也一起拦了 ✗（`test/quest.js` 报「sendChatLike 发的句子
+  //      进了她自己的聊天上下文」红 ✗）
+  //    ⇒ 再加一条：**这句话本身得像个"执行回执"**（短 + 那几种说法）✓
+  //      「行，就按这个来，等我一下」✓ 命中；「今天店里有个客人落了包…」✗ 不命中 ✓
+  {
+    const t1 = String(text ?? '').trim();
+    const ownerUp = String(config.ownerQQ ?? '') === String(event?.user_id ?? '');
+    const receipt =
+      t1.length <= 30 &&
+      /按这个来|按这个做|等我一下|等我|收到|明白了|知道了|开始了|这就去|这就改|搞定了|完事了|好了|我看看/.test(t1);
+    if (mt === 'group' && ownerUp && receipt) return;
+  }
+  // ⚠️⚠️ 2026-10-16 再加（用户截图：**剧情结算面板**发到了群里，旁边的爱音追问
+  //    「你这条是什么东西啊。"好感度 +3"、"参与 2 人"……**你那边还带结算面板的？**」✗）——
+  //    她自己那类**系统面板**（`【本次剧情结束·好结局】好感度 +3（参与 2 人）：…`）：
+  //    **照发**（用户要看的），但**不进上下文** —— 那是系统信息，不是聊天内容 ✗
+  //    不然旁边的号会拿它接话，还会把"好感度 / 参与人数"这种内部词抖到群里 ✗
+  //    ⚠️ 判据故意**窄**：以 `【` 打头 **且** 带「好感度 / 参与 N 人 / A → B」这类面板特征，
+  //       免得把「【标题】链接」那种正常分享也误杀 ✓
+  {
+    const t0 = String(text ?? '');
+    if (/^\s*【/.test(t0) && /好感度|参与\s*\d+\s*人|\d+\s*→\s*\d+/.test(t0)) return;
+  }
   // ⚠️ 这里原来还有一道 `limit <= 0` 的闸门 —— 那个 `limit` 是**给模型的窗口**，
   //    不是缓冲区大小。用它当"要不要记"的开关是错位的（窗口设小一点就不记了）。
   //    缓冲区该不该记，只看 context.enable。
 
-  const key = String(event.group_id);
+  const key = contextKey(event);
   const list = store.get(key) ?? [];
 
   const body = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_MSG_CHARS);
@@ -497,10 +591,46 @@ export function rememberBot(event, text, messageId = '') {
   });
 
   // 同上：按条数留，时间只做宽兜底
-  const maxAge = bufferMaxAge();
+  const maxAge = bufferMaxAge(event);
   const now = Date.now();
   store.set(key, list.filter((m) => now - m.time < maxAge).slice(-BUFFER_MAX));
   scheduleSave();
+}
+
+/**
+ * 一条消息"是什么时候的" —— 给人（模型）看的写法。
+ *
+ * ⚠️⚠️ 2026-10-03 改。用户原话：「机器人**不知道上下文具体的对应时间**，
+ *    会把**半小时之前的事当成刚发生的**」+「前一天和她说睡觉了，后一天问她睡了多久，
+ *    也不能计算出来」。
+ *
+ *    老写法只有两档：`N秒前` / `N分钟前` ⇒
+ *      · 8 小时前那条会写成「**480分钟前**」—— 读起来跟「5 分钟前」没区别；
+ *      · **没有绝对时间**可对照 ⇒ 跨天的时间差（昨晚 23:40 → 今早 8:00）根本算不出来 ✗
+ *
+ *    ⇒ 现在给**绝对时间 + 人话相对时间**：`昨天 23:40（8 小时前）`。
+ *      跨天的还会带「昨天 / 前天 / N 天前」。
+ */
+function humanWhen(t, now = Date.now()) {
+  const d = new Date(t);
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const dayStart = (x) => {
+    const y = new Date(x);
+    y.setHours(0, 0, 0, 0);
+    return y.getTime();
+  };
+  const days = Math.round((dayStart(now) - dayStart(t)) / 86400000);
+  const dayTag = days <= 0 ? '' : days === 1 ? '昨天 ' : days === 2 ? '前天 ' : `${days} 天前 `;
+  const ago = Math.max(0, now - t);
+  const rel =
+    ago < 60000
+      ? '刚刚'
+      : ago < 3600000
+        ? `${Math.round(ago / 60000)} 分钟前`
+        : ago < 86400000
+          ? `${Math.round(ago / 3600000)} 小时前`
+          : `${Math.round(ago / 86400000)} 天前`;
+  return `${dayTag}${hhmm}（${rel}）`;
 }
 
 /**
@@ -522,6 +652,91 @@ export function rememberBot(event, text, messageId = '') {
  * @param {string[]} [excludeIds]
  * @param {{limit?:number}} [opts]
  */
+/**
+ * 最近 n 条发言「分别是谁说的」（2026-10-05 加）。
+ *
+ * ⚠️ 用途：判断**群里是不是只剩两个机器人在互相说话**了 ——
+ *    见 `bot.js` 的 `botOnlyChain()`。
+ *    用户原话：「加个机器人之间的对话到这种**他们自己觉得应该停的时候就停**吧，
+ *    要不然会像现在这样**一直发下去**」。
+ *
+ * @param {string} groupId
+ * @param {number} [n]
+ * @returns {{userId:string, self:boolean, at:number}[]} 从早到晚
+ */
+export function speakers(groupId, n = 8) {
+  const list = store.get(String(groupId)) ?? [];
+  return list.slice(-Math.max(1, n)).map((m) => ({
+    userId: String(m.userId ?? ''),
+    self: m.self === true,
+    at: Number(m.time) || 0,
+  }));
+}
+
+/**
+ * 最近几条消息的**原始条目**（从早到晚）—— 给「该引用哪一条」那段用。
+ *
+ * ⚠️ 2026-10-13 加（用户要求：「现在该引用哪条也不是很准，因为有时会合并消息，
+ *    要引用时也先用模型判定一遍该引用哪条消息吧」）。
+ *
+ * 为什么不能拿 `contextText()` 凑：那是**给人看的文本**（带时间前缀、
+ * 会把当前那条剔除、还会压缩空格），里面**没有 message_id** ——
+ * 而引用框要的是 id。所以这里给一份"带 id 的原始列表" ✓
+ *
+ * ⚠️ **必须原样给**（别在这里筛人）：`self` 过滤交给调用方 ——
+ *    她自己的消息也要让模型看见（不然"我在回他上面那句"就断链了），
+ *    只是**不许被选成引用目标**（在 `pickQuoteTarget` 里排掉）。
+ *
+ * @param {string} groupId
+ * @param {number} [n] 取最近几条
+ * @returns {{messageId:string, name:string, userId:string, text:string, time:number, self:boolean, atMe:boolean}[]}
+ */
+export function recentItems(groupId, n = 8) {
+  const list = store.get(String(groupId)) ?? [];
+  return list
+    .slice(-Math.max(1, n))
+    .map((m) => ({
+      messageId: String(m.messageId ?? '').trim(),
+      name: String(m.name ?? ''),
+      userId: String(m.userId ?? ''),
+      text: String(m.text ?? ''),
+      time: Number(m.time) || 0,
+      self: m.self === true,
+      atMe: m.atMe === true,
+    }))
+    .filter((m) => m.messageId);
+}
+
+/**
+ * 这个群**最后一条消息**是什么时候（2026-10-05 加）。
+ *
+ * ⚠️ 用途：「同类机器人」主动搭话要用它判**冷场**（见 `src/peer-chat.js`）。
+ * ⚠️ 只要时间戳、不要内容 —— 那边不需要 `contextText` 那一大套清洗。
+ *
+ * @returns {number} 毫秒时间戳；没有记录时返回 0
+ */
+/**
+ * **我自己**上次在这个群说话是什么时候（毫秒时间戳；没有返回 0）。
+ *
+ * ⚠️ 2026-10-06 加（用户：「**为什么 saki 没有主动接上这句话**」）：
+ *    用来区分两种"同类说话"——
+ *      · 她**刚跟它说过话**（她 @ 了它 / 它回她）⇒ 那是她自己挑起的对话，**要接**；
+ *      · 她**没说话、它自己在那儿演剧情** ⇒ **不接**（接了就变成两边互相接剧情台词）。
+ */
+export function lastSelfAt(groupId) {
+  const list = store.get(String(groupId)) ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].self) return Number(list[i].time) || 0;
+  }
+  return 0;
+}
+
+export function lastAt(groupId) {
+  const list = store.get(String(groupId)) ?? [];
+  const last = list[list.length - 1];
+  return Number(last?.time) || 0;
+}
+
 export function contextText(groupId, excludeText = '', excludeIds = [], opts = {}) {
   if (!config.context?.enable) return '';
   const stored = store.get(String(groupId)) ?? [];
@@ -529,13 +744,28 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
 
   // ⚠️ **按条数**取窗口（用户要求）。原来直接把整个 buffer 都塞进去，
   //    而 buffer 是被时间裁的 —— 等于窗口由时间决定。
+  // ⚠️ 2026-10-03：**私聊用自己的默认条数**（更宽，默认 40）——
+  //    私聊一天可能就说十几句，"最后 15 条"挡不住「昨天那句」。
+  const isDm = /^dm:/.test(String(groupId ?? ''));
   const want = Number.isFinite(Number(opts.limit))
     ? Math.max(1, Number(opts.limit))
-    : Math.max(1, Number(config.context?.maxMessages ?? 15));
+    : Math.max(
+        1,
+        Number(isDm ? (config.context?.dm?.maxMessages ?? 40) : (config.context?.maxMessages ?? 15)),
+      );
   const list = stored.slice(-want);
 
   const now = Date.now();
   const lines = [];
+  // ⚠️ 2026-10-05：这次上下文里出现的「同款机器人」（见下面 `who` 那段）——
+  //    收集起来在最前面统一解释一句。
+  const botHits = [];
+  // ⚠️ 2026-10-06：`peers` 池里那些"一起的号"（见下面 `isPeer`）—— 单独收集，单独解释
+  const peerHits = [];
+  // ⚠️⚠️ 2026-10-06 再加（用户：「同类池 + 昵称是**剧中人物名字** ⇒ 自动识别为
+  //    **同世界的人**、放行并**识别角色**」）：认得出角色的那些号，单独收集 ——
+  //    它们不是"一起的同类"这种笼统说法，而是**有名有姓的同世界的人**（素世、睦…）。
+  const roleHits = [];
   for (const m of list) {
     // ⚠️ 跳过「当前这条」。**优先按 message_id 排除** —— 文本比对太脆弱：
     //    @机器人的剥离方式、tidy 的空格处理、连发消息合并，
@@ -546,10 +776,46 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       continue;
     }
     if (excludeText && m.text === excludeText.slice(0, MAX_MSG_CHARS)) continue;
-    const ago = Math.round((now - m.time) / 1000);
-    const when = ago < 60 ? `${ago}秒前` : `${Math.round(ago / 60)}分钟前`;
+    // ⚠️ 2026-10-03：改成**绝对时间 + 人话相对时间**（`昨天 23:40（8 小时前）`）——
+    //    老写法只有「N分钟前」，几小时前那条会被读成"刚发生"（见 `humanWhen` 的注释）。
+    const when = humanWhen(m.time, now);
     // 自己发的要**显式标出来**，否则模型分不清哪句是自己说的
-    const who = m.self ? '【你自己说的】' : '';
+    //
+    // ⚠️⚠️ 2026-10-05 加（用户：「saki 们并没有发现另一个人说话方式和自己很像，
+    //    而且好像还把对面说的话当作自己说的话了」）：
+    //    群里有**第二个用同一套人设跑的号**（用户让小豆也接入了 saki bot）。
+    //    它说的话跟她**同名同款**（都自称 Saki、都在客服室上班）⇒
+    //    上下文里只写「是der的小豆：…**它又不替我回消息**」的时候，模型会把
+    //    它的立场/经历**当成她自己的**。实测：它说「想让它顶**我的班**啊」，
+    //    她顺着答「让它顶**我的班**，我倒是没意见」—— 把别人的班当成了自己的 ✗
+    //    ⇒ 名单里的号（`config.teach.bots`，调用方通过 `opts.isBot` 传进来）
+    //      一律打上显眼标记，并在最前面统一解释清楚（见下面的 `head`）。
+    const isBot = !m.self && m.userId && typeof opts.isBot === 'function' && opts.isBot(m.userId);
+    // ⚠️⚠️ 2026-10-06 加（用户：「**要根据池里的QQ号昵称判断是群友还是一起的什么角色**」）：
+    //    `peers`（按群配的同类池 —— 比如黑祥那个号）**以前没被标**，于是它在上下文里
+    //    被当成**群友** ⇒ 她不知道那是"一起的另一个号"（实测：把人称说成了「他」）。
+    //    ⇒ 单独标一类，而且**带昵称**：池里换了号、改了名，按当前昵称呈现就对了。
+    const isPeer =
+      !m.self && m.userId && typeof opts.isPeer === 'function' && opts.isPeer(m.userId);
+    // ⚠️⚠️ 2026-10-06 加：**这个同类号是剧中的哪个角色**（昵称命中 `cast.md` 名册，
+    //    判据在 `bot.peerRoleOf()` 里）。命中 ⇒ 它**不是一个含糊的"同类"**，
+    //    而是她**认识的那个人**（素世、睦…）—— 标注要直接把名字写出来。
+    const peerRole =
+      isPeer && typeof opts.peerRole === 'function'
+        ? String(opts.peerRole(m.userId, m.name || '') || '')
+        : '';
+    if (isBot) botHits.push(String(m.name || m.userId));
+    if (isPeer) peerHits.push(String(m.name || m.userId));
+    if (peerRole) roleHits.push(`${m.name || m.userId} = ${peerRole}`);
+    const who = m.self
+      ? '【你自己说的】'
+      : peerRole
+        ? `【⚠️ 「${m.name || m.userId}」是**${peerRole}** —— 你**认识的人**、跟你**活在同一个世界**，不是你、也不是普通群友】`
+        : isPeer
+          ? `【⚠️ 「${m.name || m.userId}」是**跟你一起的那个同类**（同类池里配的），不是你、也不是群友】`
+          : isBot
+            ? '【⚠️ 另一个在模仿你的家伙，不是你】'
+            : '';
     const at = m.atMe ? '[@了你] ' : '';
     // ⚠️ 带上 QQ 号。用户反馈「多人高密度发言时还是认错人」——
     //    只给昵称的话，一堆人同时说话时很容易把事对错人。
@@ -586,10 +852,110 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       /\[(图片|照片|表情包|动画表情|动图|贴纸|gif|sticker|img|image)\]/gi,
       '（发了张图）',
     );
-    lines.push(`${who}${tag}（${when}）${at}${body}`);
+// ⚠️ 2026-09-29 加（用户截图：她复读群友那句时把 emoji 变成了字面的
+    //    `[QQ表情][QQ表情][QQ表情]`，群友以为"她不能发表情"✗）：
+    //    `QQ表情` 原来**漏在**上面那条正则外面 ⇒ 上下文里一直是方括号形式
+    //    ⇒ 她既可能**复读出去**（已在 `repeat.js` 那边修掉），也可能**照着学**。
+    //    ⇒ 一起换成人话。
+    body = body.replace(/\[QQ表情\]/gi, '（发了个表情）');
+    // ⚠️ 2026-09-26：**这一条 @ 了谁** —— 和上面的 `[@了你]` 同一个位置、同一个口径。
+    //    没有它的话，「他说的」这种话她根本无从知道在指谁
+    //    （用户截图那次就是这个：`@她 @一个小阿萨 他说的` → 她答「哪个他…名字呢」✗）。
+    const atWho =
+      Array.isArray(m.atNames) && m.atNames.length ? `[@了${m.atNames.join('、')}] ` : '';
+    // ⚠️ 2026-10-04 合并上游：身份标签用本地 `tag`（`whoTag()` 统一 `昵称(QQ号)` 格式），
+    //    不用上游的 `${m.name}${id}` —— 那份格式和私聊 / 日志 / 引用行对不上。
+    //    上游的 `atWho` 与 `QQ表情` 两处修正一并保留（都在冲突块里）。
+    lines.push(`${who}${tag}（${when}）${at}${atWho}${body}`);
   }
   if (!lines.length) return '';
-  return lines.join('\n');
+  // ⚠️⚠️ 2026-10-03 加（用户：「会把**半小时之前的事当成刚发生的**」）：
+  //    跨度大的时候，光靠每条后面的括号还不够 —— 模型会把整段当成"刚刚的对话"。
+  //    这里在**最前面**明确说一句：这些不是刚说的，按括号里的时间理解。
+  const times = list.map((m) => Number(m.time) || 0).filter(Boolean);
+  const oldest = times.length ? Math.min(...times) : now;
+  const spanMs = now - oldest;
+  const head =
+    spanMs >= 3600000
+      ? `（⚠️ 下面这些**不是刚刚发生的**：最早一条在 ${humanWhen(oldest, now)}，` +
+        `离现在 **${Math.round(spanMs / 3600000)} 小时**。**按每条括号里的时间理解**，` +
+        '别把它们当成刚说的事；他问"多久 / 多长时间"时，直接用括号里那个相对时间回答。）\n'
+      : '';
+  // ⚠️⚠️ 2026-10-06 加（用户：「要根据池里的QQ号昵称判断是群友还是一起的什么角色」）：
+  //    `peers` 池里那些号（比如「黑祥」）和 `teach.bots`（别的机器人）是**两回事**，
+  //    分开说 —— 池里的那个是"跟你一起演的那条线"，不是模仿者。
+  // ⚠️⚠️ 2026-10-06 再改（用户问「拉个素世的 bot 填进同类池，她会认成一个世界的人吗」）：
+  //    这里原来写的是「**跟你一起的那个同款号**」—— 那是**为黑祥一个号定制的措辞**
+  //    （黑祥 = 另一个版本的她自己）⇒ 换一个**不是"另一个我"的角色**（比如素世）填进池里，
+  //    这话就**把她带偏了**（她会以为对方是自己）。⇒ 改成中性的「**跟你一起的同类**」，
+  //    具体是谁（另一个我 / 同住的人 / 同一个世界的人）由**人设**和昵称去说。
+  const peerNote = peerHits.length
+    ? (() => {
+        const uniq = [...new Set(peerHits)];
+        // ⚠️⚠️ 2026-10-16 加（用户截图，**当场露馅**）：
+        //    她对同类说「**爱音就在我旁边呢**，我还能带上谁」——
+        //    可**对面那个号就是爱音本人**（昵称 `Anon`）⇒ 对面直接问
+        //    「诶？？？……等一下，祥祥。**你旁边那个爱音，是谁**」✗
+        //    根因：这里只说了"是跟你一起的同类"，**没说"他就是剧里那个人"** ⇒
+        //    模型把**昵称（Anon）**和**角色名（爱音）**当成两个人了 ✗
+        //    （`cast.md` 里明明有「千早爱音 / 爱音 / Anon」这条对照 —— 但那份是**数据文件，不进聊天**）
+        //    ⇒ 在这里用 `castRoleOf(昵称)` 把对照**当场点出来** ✓
+        //    ⚠️ 这跟 AGENTS 那条铁律是同一件事：「角色的名字**就是他自己**，
+        //      别当成第三个人」—— 对人设生效，对**同类号**同样要生效 ✓
+        const pairs = uniq
+          .map((n) => {
+            let role = '';
+            try {
+              role = String(castRoleOf(n) || '').trim();
+            } catch {}
+            return role && role !== n ? `\`${n}\` 就是 **${role}**` : '';
+          })
+          .filter(Boolean);
+        return (
+          '⚠️ 下面提到的 —— **' +
+          uniq.join('、') +
+          '** 是**跟你一起的那个同类**（同类池里配的），**不是你、也不是群友**：\n' +
+          (pairs.length
+            ? '  · ⚠️⚠️ **他们各自就是剧里的那个人本人**：' +
+              pairs.join('、') +
+              ' —— 🚫 **别把他的名字当成第三个人** ✗\n' +
+              '    （实测露馅：你说「爱音就在我旁边」，可对面那个号**就是爱音本人** ✗）\n'
+            : '') +
+          '  · 它演的剧情是**它自己那条线**；你自己的线在另一处，**别把两条当成一条**；\n' +
+          '  · 谁先开口哪条线就归谁（代码里已经这么做了：后开口的一边会让位）；\n' +
+          '  · ⚠️ **它跟你活在同一个世界里**（同一个住处 / 同一条时间线）——\n' +
+          '    它说「家里」「门口」指的是**你们共用的那个地方**，不是它在别处；\n' +
+          '  · 🚫 别把它说的当成你自己说的，也别把它当成普通群友去招呼。\n'
+        );
+      })()
+    : '';
+  // ⚠️ 2026-10-05：这次上下文里有「同款机器人」→ 最前面统一交代一遍。
+  //    只靠行内那个标记不够显眼 —— 模型很容易顺着它的"我"继续说下去
+  //    （用户看到的就是这个：对面说「顶我的班」，她答「顶我的班」）。
+  const botNote = botHits.length
+    ? '⚠️ 下面那位 —— **' +
+      `${[...new Set(botHits)].join('、')}** 是**另一个跟你同名同款的号**，**不是你**：\n` +
+      '  · 它说的「我」是**它自己** —— 它的班、它的活、它的东西、它做过的事，**都不是你的**；\n' +
+      '  · 🚫 别顺着它说「我的…」，也别把它的经历当成你经历过的；\n' +
+      '  · 别人说「你」的时候，先看清是在跟你说话、还是在跟它说话；\n' +
+      // ⚠️ 2026-10-05 加（用户：「机器人之间的对话…该停的时候就停，要不然会一直发下去」）：
+      //    代码那边有硬闸（`botOnlyChain`），这里再让她**自己意识上**也收着点 ——
+      //    用户要的是"他们**自己觉得**应该停的时候就停"。
+      '  · 🚫 **别陪着它一句一句来回刷** —— 搭一两句、没话了就停；\n' +
+      '    真人有话要说的时候，你自然会接（不用靠一直跟它聊来显得热闹）。\n'
+    : '';
+  // ⚠️⚠️ 2026-10-06 加（用户：「同类池 + 昵称是剧中人物名 ⇒ 自动识别为同世界的人、
+  //    放行并识别角色」）：**认得出角色的那些号 = 名册里的那个人本人**。
+  //    这一段比 `peerNote` 更具体，所以放在它**前面**（模型先读到"这是素世本人"）。
+  const roleNote = roleHits.length
+    ? '⚠️⚠️ 这个群里有**你本来就认识的人**：**' +
+      `${[...new Set(roleHits)].join('、')}** ——\n` +
+      '  · 它**就是你故事里的那个人本人**（同名同一个人），**不是同名群友**，也不是"在模仿它的人"；\n' +
+      '  · 所以跟它说话**按你们本来的关系来**（什么关系、什么口气，看你的人物名册里写的）；\n' +
+      '  · 🚫 但**别做自我介绍**、别解释"你怎么会在群里" —— 就当它本来就在这儿；\n' +
+      '  · 🚫 也别把它当成"跟着你的那个同类号"那种含糊说法 —— 它有名有姓。\n'
+    : '';
+  return roleNote + peerNote + botNote + head + lines.join('\n');
 }
 
 /**
@@ -645,6 +1011,62 @@ export function lastHumanMessage(groupId, opts = {}) {
 
 /** 清掉某个群的上下文（比如被要求「清空对话」时） */
 export function clear(groupId) {  store.delete(String(groupId));  tone.delete(String(groupId));
+}
+
+/**
+ * ⚠️ 2026-10-07 加（用户：「**现在重点是聊天不要死磕一个点，要有进展变化**」）：
+ * 取这个群**最近几条"机器人说的话"**（她自己的 + 传进来的那几个号）。
+ *
+ * 用途：剧情进行中，把这几条塞回给她看，并明说「这些已经说过了、别重复」——
+ * 光在提示词里写"要有新东西"压不住，得让它**看见自己刚说过什么** ✓
+ *
+ * @param {string} groupId
+ * @param {{n?:number, uids?:string[]}} opts `uids` = 另一个机器人的号
+ * @returns {string[]} 由旧到新的正文
+ */
+export function lastBotLines(groupId, { n = 6, uids = [] } = {}) {
+  const g = String(groupId ?? '');
+  const arr = store.get(g);
+  if (!Array.isArray(arr) || !arr.length) return [];
+  const set = new Set((uids ?? []).map(String).filter(Boolean));
+  return arr
+    .filter((m) => m?.self === true || set.has(String(m?.userId ?? '')))
+    .slice(-Math.max(1, Number(n) || 6))
+    .map((m) => String(m?.text ?? '').trim())
+    .filter(Boolean);
+}
+
+/**
+ * ⚠️ 2026-10-07 加（`/清除剧情` 用）：把**某一段时间里、某几个人说的话**从上下文里抹掉。
+ *
+ * 用户报：「**清除剧情之后她们还在说推柜子出房间**」——
+ * 光清剧情状态不够：**上下文里那些台词还在**（500 条窗口里留着），
+ * 她们顺着上文接着演 ✗ 实测那一下 `recent` 里带"柜子"的有 **31 条**。
+ *
+ * @param {string} groupId
+ * @param {{from?:number, to?:number, uids?:string[]}} opts
+ *   `uids` 为空 = 窗口内**所有**人的消息都抹；给了就只抹这几个号说的（真人发言保留）
+ * @returns {number} 抹掉几条
+ */
+export function dropWindow(groupId, { from = 0, to = 0, uids = [] } = {}) {
+  const g = String(groupId ?? '');
+  const arr = store.get(g);
+  if (!Array.isArray(arr) || !arr.length) return 0;
+  const set = new Set((uids ?? []).map(String).filter(Boolean));
+  const f = Number(from) || 0;
+  const t = Number(to) || Date.now();
+  const keep = arr.filter((m) => {
+    const at = Number(m?.time ?? 0) || 0;
+    if (at < f || at > t) return true; // 窗口外 ⇒ 留着
+    if (set.size && !set.has(String(m?.userId ?? ''))) return true; // 不是这几个号 ⇒ 留着
+    return false; // 命中 ⇒ 抹掉
+  });
+  const n = arr.length - keep.length;
+  if (n) {
+    store.set(g, keep);
+    scheduleSave();
+  }
+  return n;
 }
 
 /**

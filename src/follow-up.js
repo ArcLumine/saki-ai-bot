@@ -15,12 +15,12 @@
  * 真人的"补充"有个很明确的特征：
  *   · **偶尔**发生（十次里两三次），不是每次
  *   · 只补主回复遗漏的**关键事实或条件**，不是临时多加一句反应
- *   · **一条就够**；连着补多条就是刷屏
+ *   · **最多两条**；超过就容易刷屏
  *
  * 所以这里的策略是**双重节制**：
  *   ① **概率闸**：不是每次都问模型（省调用，也保证"偶尔"）
  *   ② **模型闸**：问了它，它也可以说「没有要补的」（`无`）
- *   ③ **硬上限**：一次回复内最多追补 `maxPerReply`（默认 1）
+ *   ③ **硬上限**：一次回复内最多追补 `maxPerReply`（默认 2）
  *   ④ **绝对不能**：主回复以**问句**结尾时不许追补
  *      （刚问完人就自问自答，很怪）
  *
@@ -39,18 +39,18 @@ import * as persona from './persona.js';
 //    `chat.followUp` 是另一件事（**对话延续**：别人又说话了要不要接着聊）。
 const cfg = () => config.selfFollowUp ?? {};
 
-/** 默认上限：一次主回复最多追补一条 */
-export const MAX_PER_REPLY = 1;
+/** 默认上限：一次主回复最多追补两条 */
+export const MAX_PER_REPLY = 2;
 
 /**
  * 第 2 条及以后的追补还要不要再试一次的概率（默认 0.5）。
  *
  * ⚠️ 为什么还要再砍一刀：概率闸（`shouldConsider`）只管"要不要问"，
- *    而模型被问了之后**倾向于硬编一句**。真连着补五条就是刷屏，
+ *    而模型被问了之后**倾向于硬编一句**。连续补太多条就是刷屏，
  *    所以过了第一关之后，每多补一条，继续补的意愿就该减半。
  *
  * ⚠️ 可用 `selfFollowUp.continueProbability` 覆盖 —— **测试要用**。
- *    否则"上限 5 条"这条断言就是 flaky 的（有时补 1 条有时补 3 条），
+ *    否则上限测试会是 flaky 的（有时补 1 条有时补多条），
  *    而偶发失败的测试比没有测试更糟：会让人去查不存在的 bug。
  *    （第一版把这道随机留在 `bot.js` 里直接调 `Math.random()`，
  *      跑回归就挂了 3 项 —— 正好踩在这个坑上。）
@@ -190,7 +190,7 @@ export function status() {
   return {
     enable: cfg().enable !== false,
     probability: Number(cfg().probability ?? 0.35),
-    maxPerReply: Math.min(1, Number(cfg().maxPerReply ?? MAX_PER_REPLY)),
+    maxPerReply: Math.min(2, Number(cfg().maxPerReply ?? MAX_PER_REPLY)),
     continueProbability: Number(cfg().continueProbability ?? CONTINUE_P),
     betweenMs: cfg().betweenMs ?? [400, 1200],
   };

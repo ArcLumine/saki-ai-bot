@@ -7,6 +7,19 @@ config.yml
 config.local.yml
 config.probe.yml
 config.*-probe.yml
+# ⚠️ 2026-10-20 加：**备份文件一律不进版本库**（通配，不再一条条列）
+#    「动配置/数据之前先留个底」是这个项目的硬规矩（见 AGENTS），所以这种文件只会越来越多；
+#    而上面那几条 `config.yml` 是按**整名**匹配的，挡不住 `.bak-多号拆分-…` 这种后缀。
+#    ⚠️ 它们同样是明文 apiKey / token（实测那份 `config.yml.bak-多号拆分-20261016-030248`）。
+#    ✅ 已核对：仓库里**没有任何已跟踪的 .bak**，通配不会误伤
+#       （已跟踪文件本来也不受 .gitignore 影响）。
+*.bak
+*.bak-*
+
+# ── 每个 QQ 号自己那份配置（多号功能，2026-10-07 加）─────
+#    ⚠️ 里面有 onebot 的 accessToken（明文）+ 真实群号，绝不许提交
+#    没有这个目录也没关系：项目会退回"单号"模式
+accounts/
 
 # ── 运行期数据（聊天记录 / 群友信息 / 状态）─────────────
 logs/
@@ -16,6 +29,15 @@ state/
 #    模板已挪到 example/（2026-09-27），即 example/*.example.md
 knowledge/group-memory.md
 knowledge/hzymtr-server.md
+#    ★ 2026-10-04：服务器库拆成四份（`server-basic/rules/world/people.md`，见 TODO 第18节）。
+#       这四份是**教学功能运行时写出来的**（`learned.js` 按主题分类后落盘），不是仓库里的文件。
+#       和 `global.md` / `groups/` 一样是活数据（含服务器地址、管理员名录）⇒ 一律不进仓库。
+#       ⚠️ 漏掉这条的后果：教一次服务器知识，`git status` 就冒出四个新文件，
+#          `git add -A` 一把带走 —— 里面可能有真实地址和管理员 QQ。
+knowledge/server-basic.md
+knowledge/server-rules.md
+knowledge/server-world.md
+knowledge/server-people.md
 #    ★ 2026-09-27（B 方案）：`knowledge/learned.md` 那个全局单文件已废，改成分片：
 #       global.md（服主教的·全局）+ groups/<群号>.md + dm/<QQ号>.md（后两个本来就在下面）
 #       —— 三者都是活数据，一律不进仓库。

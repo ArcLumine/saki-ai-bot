@@ -4,10 +4,13 @@
  * ## 用户需求
  *   「群里发 .ra 之类小祥能答」+「小祥和海豹最后要落到同一个账号收发消息」
  *
- * ## 方案为什么是「海豹不接 IM」
- *   小祥和海豹若都连同一个 NapCat（同一个 QQ 账号），会有**自反馈死循环**：
- *   小祥发的消息 → 海豹当成"群友消息" → 再转回给小祥 ⇒ 她在跟自己对话。
- *   那是架构问题，调参解决不了。所以海豹只做**骰点引擎 + log**，由小祥主动调它的 API。
+ * ## 方案：默认「海豹不接 IM」，但同号接 IM 也是可行的（2026-10-06 更正）
+ *   小祥主动调海豹的 HTTP API（`relay: true`）⇒ 海豹只做骰点引擎 + log。
+ *   ⚠️ 当初「海豹绝不能接 IM，否则自反馈死循环 / 抢连接」的理由**经读源码已证伪**：
+ *     · NapCat 的 WS 服务端支持多客户端（`napcat.mjs:95223`）
+ *     · 海豹自己会丢弃同号发来的消息（`platform_adapter_gocq.go:1064`）
+ *   ⇒ 用户 2026-10-06 拍板走**同号**（没有小号）。唯一真实的副作用是
+ *     **「重复处理」**（两条骰点结果），由 `sealdice.relay` 开关解决。
  *
  * ## 为什么用假海豹服务而不是真海豹
  *   真海豹能测（实测过 `dice/exec` 通），但**不能进 `run-all`**：
@@ -51,6 +54,8 @@ const srv = createServer((req, res) => {
       return;
     }
     if (u === '/sd-api/js/status') { res.end(JSON.stringify({ result: true, status: true })); return; }
+    // ⚠️ `relay: fallback` 的在线探针打的就是这个（唯一免 token 的接口）
+    if (u === '/sd-api/preInfo') { res.end(JSON.stringify({ result: true })); return; }
     res.statusCode = 404;
     res.end('{}');
   });
@@ -149,27 +154,148 @@ console.log('\n【4】★ 跑团记录（用户要求独立分支，不塞 obser
   );
 }
 
-console.log('\n【5】★★ 方案约束：不接 IM（自反馈死循环那条）');
+console.log('\n【5】★★ 方案约束：同号接 IM 的三条「硬约束」已证伪 + 防重复转述');
 {
-  // ⚠️ 这是本方案最核心的决策，必须钉住 —— 否则哪天有人改成"海豹接 QQ"就炸了
+  // ⚠️⚠️ 2026-10-06 **整段重写**。原来这里钉的是「不接 IM，因为自反馈死循环」。
+  //    那条理由**经读源码证伪**，继续钉它等于把错的结论写死成"不变式"。
+  //    真正的三个依据（ NapCat 多客户端 / 海豹丢弃自己的消息 / 重复处理）如下。
   const js = readFileSync(join(ROOT, 'src', 'sealdice.js'), 'utf8');
-  check(/自反馈死循环/.test(js), '★★ 模块注释里写明了「自反馈死循环」这个约束');
+  check(/已证伪/.test(js), '★★ 模块注释里标出了「已证伪」并给了源码依据');
+  // ⚠️ 证伪的两条必须**带出处**，否则下次有人又会凭印象写回去
+  check(
+    /platform_adapter_gocq\.go:1064/.test(js) && /napcat\.mjs:95223/.test(js),
+    '★★ 证伪结论引用了具体源码位置（gocq.go:1064 / napcat.mjs:95223）',
+  );
+  check(
+    !/缘由是一条架构级的硬约束/.test(js),
+    '★★ 旧的那句「架构级硬约束 / 调参解决不了」已被移除',
+  );
+
   const botjs = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
-  // ⚠️ 2026-09-30 修正：这条断言本来写的是「bot.js 完全没接 sealdice」，
-  //   方案推进后**过时了** —— 现在 bot.js 确实要用 `sealdice.ask()` 转述骰点。
-  //   真正要守的不变式是「**不把海豹接进 OneBot**」（那才是死循环的根源），
-  //   所以改成查 onebot 那一段，而不是查有没有提到 sealdice。
+  // ⚠️ 仍然要守的不变式：**不把海豹塞进 onebot 配置段**（那是另一回事 ——
+  //   海豹走 HTTP API，不占 OneBot 连接）。这条断言继续有效。
   const ob = botjs.slice(botjs.indexOf('onebot'), botjs.indexOf('onebot') + 800);
-  check(!/sealdice/i.test(ob), '★★ **OneBot 那一段没混入 sealdice**（海豹不碰 IM，防自反馈死循环）');
+  check(!/sealdice/i.test(ob), '★★ **OneBot 那一段没混入 sealdice**（海豹走 HTTP，不占 OneBot 连接）');
   check(
     !/onebot[\s\S]{0,400}sealdice|sealdice[\s\S]{0,400}onebot/i.test(ob),
     '★★ 海豹和 onebot 配置不相邻（防止有人把两者塞进同一段）',
   );
+
+  // ⚠️ 防「两条结果」：海豹自己接 IM 时小祥必须闭嘴，但仍要**消费掉**那条指令
+  const h = botjs.slice(botjs.indexOf('async handleDiceMode'), botjs.indexOf('async handleDiceMode') + 3000);
+  check(
+    /sealdice\.shouldRelay\(/.test(h),
+    '★★ handleDiceMode 里用 shouldRelay() 判「这条要不要由我转述」',
+  );
+  check(
+    /shouldRelay[\s\S]{0,400}?return true/.test(h),
+    '★★ 不转述时**照样 return true**（消费掉指令，别掉进 decide() 让她评论骰点）',
+  );
+
   const ex = readFileSync(join(ROOT, 'config.example.yml'), 'utf8');
   check(/token: ''/.test(ex), '★★ 模板里 token 是空的 ⇒ 照模板配的人不会被意外启用');
+  check(/^\s*relay:\s*true\s*$/m.test(ex), '★★ 模板里 relay 默认 true（不改变现有行为）');
 }
 
-console.log('\n【6】★★ 触发词在界面上可改（用户要求）');
+console.log('\n【6】★★ relay 开关：海豹接了同号 IM 时不许重复回（2026-10-06）');
+{
+  // ⚠️ 这是「重复处理」那条**唯一真实**的副作用的对策，必须钉住行为本身，
+  //    不能只靠注释。上游 12 行断言只验了「代码里写了 shouldRelay」，
+  //    这里验的是**三种模式各自返回什么**。
+  const savedRelay = config.sealdice.relay;
+
+  // ① 默认 / true = 海豹不接 IM ⇒ 小祥转述
+  config.sealdice.relay = true;
+  check((await S.shouldRelay('group')) === true, '★★ relay=true ⇒ 由小祥转述（海豹不接 IM）');
+
+  // ② false = 海豹自己收发 ⇒ 小祥闭嘴。⚠️ 这一条是防「两条结果」的核心。
+  config.sealdice.relay = false;
+  check(
+    (await S.shouldRelay('group')) === false,
+    '★★ relay=false ⇒ **小祥不转述**（否则海豹自己回一次 + 小祥回一次 = 两条）',
+  );
+  // ⚠️ 关键：不转述时**绝不能打海豹**。探一下有没有发网络请求。
+  hits = [];
+  await S.shouldRelay('group');
+  check(hits.length === 0, '★★ relay=false 时一次网络请求都不发（不做在线探针，白跑一趟）');
+
+  // ③ fallback = 海豹接了 IM，但离线时小祥兜底
+  config.sealdice.relay = 'fallback';
+  // 假海豹在线（上面加了 /sd-api/preInfo）⇒ 让位给海豹
+  check((await S.shouldRelay('group')) === false, '★★ fallback + 海豹在线 ⇒ 让位，小祥不转述');
+  hits = [];
+  await S.shouldRelay('group');
+  check(
+    hits.some((h) => h.url === '/sd-api/preInfo'),
+    '★ fallback 是靠打 /sd-api/preInfo 探在线的',
+  );
+  // ⚠️ 海豹探不通 ⇒ 兜底转述（宁可多转述，也别让群里的骰点没人应）
+  const savedUrl2 = config.sealdice.baseUrl;
+  config.sealdice.baseUrl = 'http://127.0.0.1:1';
+  check((await S.shouldRelay('group')) === true, '★★ fallback + 海豹探不通 ⇒ 小祥兜底转述');
+  config.sealdice.baseUrl = savedUrl2;
+
+  // ⚠️ 没配这个键（老部署）必须还是转述，否则升级即回归
+  delete config.sealdice.relay;
+  check((await S.shouldRelay('group')) === true, '★★ 没配 relay（老配置）⇒ 仍转述，不回归');
+  config.sealdice.relay = savedRelay;
+
+  check(typeof S.shouldRelay === 'function', '★ 导出 shouldRelay()（bot.js 的唯一判定入口）');
+}
+
+console.log('\n【6.5】★★ relay 做进了 WebUI（2026-10-06）');
+{
+  const wj = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
+  const wh = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+
+  // ⚠️ 「存得进去、显示不出来」的坑踩过一次（webui.js 自己注释里写了）：
+  //    configForUi（读）和 saveConfig（写）**必须成对**。缺一个就是那种诡异 bug。
+  const ui = wj.slice(wj.indexOf('function configForUi'), wj.indexOf('function saveConfig'));
+  const sv = wj.slice(wj.indexOf('function saveConfig'), wj.indexOf('function saveConfig') + 6000);
+  check(/sealdice:\s*\{/.test(ui), '★★ configForUi 里有 sealdice 段（界面读得到）');
+  check(/relay/.test(ui), '★★ configForUi 回填 relay');
+  check(/raw\.sealdice\.relay/.test(sv), '★★ saveConfig 里写 sealdice.relay（界面存得进去）');
+
+  // ⚠️⚠️ **token 绝不能进界面**：`/api/config` 是明文 JSON，
+  //    把本机密钥吐出去等于泄密。两处都要守住。
+  //
+  // ⚠️⚠️ 这两条断言**必须先剥掉注释行**再查 —— 否则它们会匹配到注释里
+  //    自己写的「绝不能带 token」「别写 put('sealdice', …)」这些字，
+  //    测出一个假的失败。（真踩过：第一次写没剥，红了，去掉才发现代码本来就是干净的。）
+  //    代码里没有，但注释里有 —— 那正是要守住的东西，所以只查代码。
+  const stripComments = (s) =>
+    s.split(/\r?\n/).filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n');
+  const uiCode = stripComments(ui);
+  const svCode = stripComments(sv);
+  check(!/token/.test(uiCode), '★★ configForUi **不含 token**（密钥不进 /api/config）');
+  check(
+    !/put\(\s*'sealdice'/.test(svCode),
+    '★★⚠️ saveConfig 不用 `put(\'sealdice\', …)`（那等于让请求体覆盖 token）',
+  );
+  // ⚠️ 反向也钉一下：sealdice 段确实被写了（别为了躲上一条把功能删了）
+  check(
+    /raw\.sealdice\.relay/.test(svCode),
+    '★★ 但 sealdice.relay 确实被写进去了（白名单式，不是没写）',
+  );
+  check(/=== false \? false/.test(svCode), '★★ 写入前归一化到三态（非法值不落 yaml）');
+
+  // ⚠️ 三个选项都要在，且 fallback 是推荐项
+  check(/id="sd-relay"/.test(wh), '★ 界面有 relay 的 select');
+  check(/value="true"/.test(wh) && /value="false"/.test(wh) && /value="fallback"/.test(wh),
+    '★★ 三个选项都在（true / false / fallback）');
+  check(/saveSealdiceRelay/.test(wh) && /renderSealdiceRelay/.test(wh),
+    '★ 保存 / 放弃修改两个按钮的函数都在');
+  check(/dataset\.tab === 'groups'[\s\S]{0,200}renderSealdiceRelay/.test(wh),
+    '★★ 进 groups 页时会调 renderSealdiceRelay（漏了就显示不出当前值）');
+  // ⚠️ 独立一张卡：共用 save 会变成「改触发词顺带改了海豹开关」
+  check(
+    (wh.match(/onclick="saveDiceMode\(\)"/g) || []).length === 1
+      && (wh.match(/onclick="saveSealdiceRelay\(\)"/g) || []).length === 1,
+    '★★ 骰娘卡和海豹卡各自独立保存（不会顺带改对方）',
+  );
+}
+
+console.log('\n【7】★★ 触发词在界面上可改（用户要求）');
 {
   // ⚠️ webui.js 自己的注释写着这个坑：「原来这里漏了 chat ⇒ 界面永远读不到值，
   //    用户以为保存没生效」。所以三处必须同步，漏一处就有那种诡异 bug。
@@ -200,8 +326,11 @@ console.log('\n【6】★★ 触发词在界面上可改（用户要求）');
     '★★ 界面填分钟、保存乘 60000 存毫秒（别搞反）');
   check(/\(Number\(d\.durationMs\) \|\| 0\) \/ 60000/.test(wh), '★★ 回填时除 60000 还原成分钟');
   // ⚠️ 切换 tab 时要调 —— 漏了就是「进页面标签是空的」
+  // ⚠️⚠️ 这里用 `[\s\S]{0,200}` 而不是 `[^\n]*`：2026-10-06 那行被拆成多行
+  //    （加了 renderSealdiceRelay 之后单行太长了），`[^\n]*` 会匹配不到。
+  //    别为了让这条断言过就把代码拼回一行 —— 那是把新调用挤出检查范围。
   check(
-    /b\.dataset\.tab === 'groups'[^\n]*renderDiceMode\(\)/.test(wh),
+    /b\.dataset\.tab === 'groups'[\s\S]{0,200}renderDiceMode\(\)/.test(wh),
     '★★ 切到 groups 页时会加载它（漏了标签是空的）',
   );
   // ⚠️ 密钥不能进界面。⚠️ 要**排除注释行**再查 —— 否则注释里那句
@@ -212,6 +341,68 @@ console.log('\n【6】★★ 触发词在界面上可改（用户要求）');
     .join('\n');
   check(!/sealdice[.\-_]?token/i.test(htmlCode), '★★ 界面**没有** sealdice token 的输入框');
   check(/id="dm-enter"|dm-enter/.test(htmlCode), '★ 但触发词那部分是有的（确认没误删整张卡）');
+
+  // ⚠️⚠️ 2026-10-06 加：**真的把 renderDiceMode() 跑一遍**。
+  //
+  //  为什么非要执行、不能只查字符串：上面那些断言查的是「代码里写了 dm-enter」，
+  //  而「触发词输入框不出现」这个 bug **照样能全过** —— 因为 renderDiceMode
+  //  一进去就抛 `hintSplit is not defined`（它是 personaRenderFields 的局部 const），
+  //  错误被自己的 catch 吞掉、只 flash 一行，**`dm-tagger` 一直是空的**。
+  //  ⇒ 页面不炸、静态断言全绿、只有真人用的时候才发现。
+  //  ⇒ 所以这条必须**执行**：给它最小 DOM + 假 api，看 dm-tagger 到底填没填上。
+  const scriptBody = wh.slice(wh.indexOf('<script>') + 8, wh.lastIndexOf('</script>'));
+  const grabFn = (name) => {
+    const i = scriptBody.indexOf('async function ' + name);
+    if (i < 0) return '';
+    let d = 0;
+    for (let k = scriptBody.indexOf('{', i); k < scriptBody.length; k++) {
+      if (scriptBody[k] === '{') d++;
+      else if (scriptBody[k] === '}') { d--; if (!d) return scriptBody.slice(i, k + 1); }
+    }
+    return '';
+  };
+  // ⚠️ 这里用**括号配对**找 `hintSplit` 的结尾，**别用 `indexOf('};')`** ——
+  //    它会先匹配到函数体里那句 `return { ph: '', tip: '' };`，切出一段残缺的代码。
+  //    （真踩过：切出来的东西报 `Unexpected token ')'`。）
+  const pa = scriptBody.indexOf('const escHtml =');
+  const pb = scriptBody.indexOf('const hintSplit =');
+  let depth = 0;
+  let pe = -1;
+  for (let k = scriptBody.indexOf('{', pb); k < scriptBody.length; k++) {
+    if (scriptBody[k] === '{') depth++;
+    else if (scriptBody[k] === '}') {
+      depth--;
+      if (depth === 0) { pe = k; break; }
+    }
+  }
+  const prelude = scriptBody.slice(pa, pe + 1);
+  const store = {};
+  const $stub = (id) => store[id] ?? (store[id] = { id, innerHTML: '', value: '', checked: false, textContent: '', style: {} });
+  globalThis.document = {
+    getElementById: $stub,
+    createElement: () => ({ innerHTML: '', value: '', style: {}, setAttribute() {}, classList: { add() {}, remove() {} }, appendChild() {} }),
+  };
+  let flashText = '';
+  const apiStub = async () => ({
+    ok: true,
+    config: { diceMode: { enable: true, durationMs: 0, enterKeys: ['骰娘'], exitKeys: ['散场'], skipDiceKeys: [] } },
+  });
+  try {
+    const run = new Function('$', 'flash', 'api', 'tagsSync', `${prelude}\n${grabFn('renderDiceMode')}\nreturn renderDiceMode;`);
+    // ⚠️ 这里传 `$stub`，不是 `$` —— 写 `run($, …)` 会因为 `$` 没定义而抛
+    //    `$ is not defined`（真踩过，症状跟被测的 bug 一模一样，极易误判成"没修好"）。
+    await run($stub, (el, ok, t) => { flashText += `[${ok ? 'ok' : 'err'}] ${t} `; }, apiStub, () => {})();
+    check(!/err/.test(flashText), '★★★ renderDiceMode 不抛错（能被 catch 吞掉的那种也不行）', flashText);
+    const box = store['dm-tagger']?.innerHTML ?? '';
+    check(box.length > 0, '★★★ `dm-tagger` 真被填上了（触发词输入框会出现）', `长度 ${box.length}`);
+    check(
+      box.includes('dm-enter') && box.includes('dm-exit') && box.includes('dm-skip'),
+      '★★★ 进去/退出/排除三个触发词输入框都在',
+    );
+    check(box.includes('骰娘'), '★★ 配置里的触发词被回填进去了（不是空框）');
+  } catch (e) {
+    check(false, '★★★ 真跑一遍 renderDiceMode', e.message);
+  }
 }
 
 srv.close();

@@ -18,7 +18,7 @@
  * ⇒ 修法：切换时**必须 `setGlobalDispatcher`**（选直连就装一个干净的 `Agent` 顶掉 env-proxy）。
  *
  * ⚠️ 真机验证（当时手工跑的，这里没法自动化）：把环境设成
- *    `NODE_USE_ENV_PROXY=1` + `HTTPS_PROXY=http://127.0.0.1`（7890 没人听），
+ *    `NODE_USE_ENV_PROXY=1` + `HTTPS_PROXY=http://127.0.0.1:7890`（7890 没人听），
  *    再 `import` 本模块 ⇒ 启动那句探测会把出口定成直连，
  *    之后 **`llmFetch` 和普通 `fetch` 都能拿到 401**（＝请求真的到得了上游）。
  *
@@ -42,7 +42,11 @@ console.log('\n【1】★★ 切换必须是**全局**的（否则生图/搜索�
 {
   check(/setGlobalDispatcher/.test(src), '★ 用了 `setGlobalDispatcher`（改全局 dispatcher）');
   check(
-    /import \{ Agent, ProxyAgent, setGlobalDispatcher \} from 'undici'/.test(src),
+    // ⚠️ 2026-10-10 修（这条断言过时了，不是代码坏）：import 里后来多了
+    //    `fetch as undiciFetch` —— **外部 undici 的 fetch 才认 undici 的 dispatcher**，
+    //    内置 fetch 不认 ⇒ 走代理必须用它（那次"代理一直没生效"的根因）。
+    //    ⇒ 正则改成"这几个名字在就行、顺序不限"，别把新增的 import 判成失败 ✓
+    /import \{[^}]*\bAgent\b[^}]*\bsetGlobalDispatcher\b[^}]*\} from 'undici'/.test(src),
     '★ `Agent` 和 `setGlobalDispatcher` 都从 undici 引进来了',
   );
   check(/function applyEgress\(/.test(src), '有 `applyEgress()`（改出口的唯一入口）');
@@ -86,9 +90,9 @@ console.log('\n【5】★ 可选推理档位：默认不影响旧模型，Groq �
   check(/export function reasoningField\(\)/.test(configSrc), 'config.js 导出 reasoningField()');
   check(/return \['low', 'medium', 'high'\]\.includes\(mode\) \? \{ reasoning_effort: mode \} : \{\}/.test(configSrc),
     '★ 只接受 low / medium / high，其它值一律不发');
-  check((src.match(/\.\.\.reasoningField\(\)/g) || []).length === 4,
+  check((src.match(/reasoningField\(\)/g) || []).length === 4,
     'llm.js 的流式正文、过渡话、润色、自检四处都接上了',
-    String((src.match(/\.\.\.reasoningField\(\)/g) || []).length));
+    String((src.match(/reasoningField\(\)/g) || []).length));
   check(/reasoningEffort: ''/.test(configSrc), '默认值是空串 —— DeepSeek 日常请求不会凭空多字段');
   const botSrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(/promptMaxChars: 0/.test(configSrc), '测试提示词压缩默认关闭 —— 生产路径完全不变');

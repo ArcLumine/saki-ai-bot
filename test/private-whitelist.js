@@ -18,7 +18,7 @@ mkdirSync(join(ROOT, 'logs'), { recursive: true });
 
 const CFG_REL = 'logs/__test-private-wl.yml';
 const WL_USER = '10000009';
-const OUT_USER = '10000010';
+const OUT_USER = '10000008';
 writeFileSync(
   join(ROOT, CFG_REL),
   [

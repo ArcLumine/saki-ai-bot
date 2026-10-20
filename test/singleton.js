@@ -37,13 +37,22 @@ const check = (ok, label, extra = '') => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// 从 `config.test.yml` 派生：只把 OneBot 地址换到死端口（`webui.enable` 本来就是 false）
+// 用独立的最小配置，避免读取本机配置或连接真实服务。
 writeFileSync(
   join(ROOT, CFG),
-  readFileSync(join(ROOT, 'config.test.yml'), 'utf8').replace(
-    /url: ws:\/\/127\.0\.0\.1:\d+/,
-    `url: ws://127.0.0.1:${DEAD_PORT}`,
-  ),
+  [
+    'onebot:',
+    '  mode: forward',
+    `  url: ws://127.0.0.1:${DEAD_PORT}`,
+    '  accessToken: "singleton-test-token"',
+    'llm:',
+    '  baseURL: http://127.0.0.1:1/v1',
+    '  apiKey: "singleton-test-key"',
+    '  model: test-model',
+    'webui:',
+    '  enable: false',
+    '',
+  ].join('\n'),
   'utf8',
 );
 rmSync(LOCK, { force: true });

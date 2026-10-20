@@ -426,14 +426,112 @@ function cookieHeader() {
   return biliCookie;
 }
 
+/** 从聊天文字中提取 B 站视频 BV / av 号，保留首次出现顺序。 */
+export function pickVideoIds(text) {
+  const s = String(text ?? '');
+  const ids = [];
+  for (const m of s.matchAll(/\bBV[0-9A-Za-z]{10}\b/g)) ids.push(m[0]);
+  for (const m of s.matchAll(/\bav(\d{6,})\b/gi)) ids.push(`av${m[1]}`);
+  return [...new Set(ids)];
+}
+
+const BV_CACHE_TTL = 6 * 60 * 60 * 1000;
+const BV_FAILURE_TTL = 10 * 60 * 1000;
+const BV_CACHE_MAX = 256;
+const bvCache = new Map();
+const bvPending = new Map();
+
+function cacheVideoInfo(id, info, now = Date.now()) {
+  bvCache.delete(id);
+  bvCache.set(id, { info, expiresAt: now + (info ? BV_CACHE_TTL : BV_FAILURE_TTL) });
+  while (bvCache.size > BV_CACHE_MAX) bvCache.delete(bvCache.keys().next().value);
+}
+
+/**
+ * 按视频号读取标题、UP 主与简介，给聊天上下文补充视频内容。
+ *
+ * ⚠️ 链接只在首次遇到时联网；成功与失败都缓存，避免同一条链接反复打接口。
+ */
+export async function videoInfo(videoId) {
+  const raw = String(videoId ?? '').trim();
+  const bvMatch = raw.match(/^BV([0-9A-Za-z]{10})$/i);
+  const avMatch = raw.match(/^av(\d{6,})$/i);
+  if (!bvMatch && !avMatch) return null;
+
+  const id = bvMatch ? `BV${bvMatch[1]}` : `av${avMatch[1]}`;
+  const cached = bvCache.get(id);
+  if (cached && cached.expiresAt > Date.now()) return cached.info;
+  if (cached) bvCache.delete(id);
+  if (bvPending.has(id)) return bvPending.get(id);
+
+  const query = bvMatch ? `bvid=${encodeURIComponent(id)}` : `aid=${avMatch[1]}`;
+  const request = (async () => {
+    try {
+      const r = await fetch(`https://api.bilibili.com/x/web-interface/view?${query}`, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+          Referer: 'https://www.bilibili.com/',
+          Cookie: cookieHeader(),
+        },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      if (j?.code !== 0) throw new Error(`code=${j?.code}`);
+      const d = j.data ?? {};
+      const clean = (value, max) =>
+        String(value ?? '')
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/[\u0000-\u001f\u007f]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, max);
+      const info = {
+        bvid: id,
+        title: clean(d.title, 120),
+        up: clean(d.owner?.name, 80),
+        desc: clean(d.desc, 200),
+        play: Number(d.stat?.view) || 0,
+      };
+      if (!info.title) throw new Error('缺少视频标题');
+      cacheVideoInfo(id, info);
+      return info;
+    } catch (e) {
+      log.debug(`[B站] 取视频信息失败（${id}）：${e.message}`);
+      cacheVideoInfo(id, null);
+      return null;
+    } finally {
+      bvPending.delete(id);
+    }
+  })();
+  bvPending.set(id, request);
+  return request;
+}
+
 /** 打一次搜索接口（原始结果，不做筛选） */
+/**
+ * B 站搜索接口认的排序值（2026-10-15 加）。
+ *
+ * ⚠️⚠️ 起因（用户截图报：「**b站上能直接搜到**」）：
+ *   网页搜「安岛」出来的**全是**《安达与岛村》相关内容，而我们这边搜「安岛」
+ *   出来的是「32男1女被困孤岛」「乌尔比安用三技能上岛」那类**热门但不相关**的 ✗
+ *   真因：这里原来写的是 `order === 'pubdate' ? 'pubdate' : 'click'` ——
+ *   **除了 pubdate 一律塌成 `click`（按播放量排）** ⇒ 短关键词（「安岛」「MYGO」）
+ *   回来的就是"按点击量泛化出来的全网热门"，跟关键词基本无关 ✗
+ *   网页默认是**综合排序** = `totalrank`（按相关性）⇒ 同一个词搜出来完全不同 ✓
+ *   ⚠️ 而"要挑热门那条"是调用方**自己按 play 排**的（见 `bili-share.js` 的 `pickReal`）
+ *      ⇒ 搜索排序用 `click` 属于"多此一举还把相关性搞丢"，别再拿它换热度 ✗
+ */
+const SEARCH_ORDERS = ['totalrank', 'click', 'pubdate', 'dm', 'stow', 'scores'];
+
 async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pageSize = 30 }) {
   const kw = String(keyword ?? '').trim();
   if (!kw) throw new Error('没给关键词');
   const url =
     'https://api.bilibili.com/x/web-interface/search/type?search_type=video' +
     `&page_size=${Math.max(1, Math.min(50, pageSize))}` +
-    `&keyword=${encodeURIComponent(kw)}&order=${order === 'pubdate' ? 'pubdate' : 'click'}` +
+    `&keyword=${encodeURIComponent(kw)}&order=${SEARCH_ORDERS.includes(order) ? order : 'click'}` +
     (tids ? `&tids=${tids}` : '') +
     (pubtime ? `&pubtime=${pubtime}` : '');
   const r = await fetch(url, {
@@ -454,6 +552,15 @@ async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pag
       up: String(v.author ?? '').trim(),
       play: Number(v.play) || 0,
       date: Number(v.pubdate) || 0,
+      // ⚠️ 2026-10-15 加（用户：「bot 要知道**视频大概讲了什么**」）——
+      //    搜索接口的返回项**自带 `description`**（就是简介），
+      //    里面同样会带 `<em class="keyword">` 高亮标签 ⇒ 走 `cleanSearchTitle` 同一套清洗 ✓
+      //    ⚠️ 别去额外打 `web-interface/view` —— 白多一次请求、还容易吃风控 ✗
+      bvid: String(v.bvid ?? '').trim(),
+      desc: cleanSearchTitle(v.description ?? v.desc ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 200),
       url: String(v.arcurl ?? (v.bvid ? `https://www.bilibili.com/video/${v.bvid}` : '')),
     }))
     .filter((v) => v.title);
@@ -481,7 +588,10 @@ export async function searchVideos(keyword, { limit = 8, order = 'click', tids =
  *   ② 加分区过滤（`tids=17` 单机游戏）干净很多，但条数会变少
  *      （实测 30 条里只剩 6 条）→ 筛完不够 4 条就**放开分区再拿一遍**。
  */
-export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, deny = null } = {}) {
+export async function topicVideos(
+  keyword,
+  { limit = 8, tids = 0, match = null, deny = null, order = 'totalrank' } = {},
+) {
   const kw = String(keyword ?? '').trim();
   const hit =
     typeof match === 'function'
@@ -492,7 +602,14 @@ export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, 
   // ⚠️ `deny`：**蹭字的标题**（实测「我的世界」会搜出《这是我的世界》AI剧集、
   //    《世界上的另一个我》这种，光靠 match 拦不住，得点名排掉）
   const grab = async (useTids) =>
-    (await biliSearch({ keyword: kw, order: 'click', tids: useTids ? tids : 0 })).filter(
+    // ⚠️ 2026-10-15：`order` 用 **`totalrank`（综合排序 = 按相关性）**，
+    //    不是 `click`（按播放量）—— 后者会把「安岛」搜成「困孤岛」那类泛化热门 ✗
+    //    （见 `SEARCH_ORDERS` 上面那段注释）
+    (await biliSearch({
+      keyword: kw,
+      order: SEARCH_ORDERS.includes(order) ? order : 'totalrank',
+      tids: useTids ? tids : 0,
+    })).filter(
       (v) => hit(v.title) && !(deny && deny.test(v.title)),
     );
   let list = tids ? await grab(true) : await grab(false);
@@ -715,4 +832,6 @@ export function __clearCache() {
   lastTry = 0;
   hotCache = null;
   throttles.clear();
+  bvCache.clear();
+  bvPending.clear();
 }

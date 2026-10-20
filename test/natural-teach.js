@@ -44,9 +44,14 @@ const originalLearned = readFileSync(LEARNED, 'utf8');
 // 假模型：判断这句话有没有知识
 let detectCalls = 0;
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     const parsed = JSON.parse(body || '{}');
     const sys = parsed.messages?.find((m) => m.role === 'system')?.content ?? '';
     const user = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '';
@@ -55,6 +60,16 @@ const llmServer = createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: JSON.stringify(obj) } }] }));
     };
+
+    // ⚠️⚠️ 2026-10-13 加：新增的「记住 / 忘记 **是不是真指令**」判定
+    //    （`bot.js` 的 `judgeMemoryCommand`）—— 非流式轻调用，system 带固定标记
+    //    「【记忆指令判定】」。不认它的话会落到「普通回答」那条上，
+    //    而那条判定要求**整条就是「是」** ⇒ 【5】「记住：xxx」不再入库 ✗
+    if (sys.includes('【记忆指令判定】')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '是' } }] }));
+      return;
+    }
 
     // 知识判断请求
     if (sys.includes('知识录入') || sys.includes('知识抽取器')) {

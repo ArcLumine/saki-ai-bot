@@ -29,11 +29,11 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { ROOT, config, CONFIG_FILE } from './config.js';
+import { ROOT, config, CONFIG_FILE, stateDir } from './config.js';
 import * as persona from './persona.js';
 import { log } from './log.js';
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 
 /**
  * ⚠️⚠️ 状态文件落在哪 —— 必须保证**测试不污染真实记录**。
@@ -198,11 +198,15 @@ export function headOf(text) {
  *    反例：「…看到的都…」只出现一次 → **不抓** ✅
  *
  * @param {string} text
+ * @param {string} [exclude] ⚠️ 2026-10-02 加：**上下文里已经出现过的文本**
+ *        （别人刚说的话 + 识图描述）。在里面出现过的 n-gram **不算口癖** ——
+ *        那是她在**复述题面**，不是在顺嘴说套话。判据与原因见 `note()`。
  * @returns {string[]} 最多 3 条，长的优先
  */
-export function clausesOf(text) {
+export function clausesOf(text, exclude = '') {
   const raw = String(text ?? '');
   if (!raw) return [];
+  const ex = String(exclude ?? '');
   // 按句末标点切句（逗号不算 —— 它切得太碎，会把一个词切两半）
   const sentences = raw
     .split(/[。！？!?；;\n…]+/)
@@ -224,6 +228,12 @@ export function clausesOf(text) {
   const hits = [...inSentences.entries()]
     .filter(([, c]) => c >= 2)
     .map(([g]) => g)
+    // ⚠️⚠️ 2026-10-02 加：**上下文里已经有的不算口癖**。
+    //    真实踩过（几何题）：她在解题回复里反复写「DF 平分∠CDE」（那是题目的
+    //    已知条件），同一回复跨句重复 ⇒ 被判成套话 ⇒ 提示词里出现
+    //    「🚫 这次别再用这个说法了」，**等于在叫她别说题目的条件** ✗
+    //    （日志里连着好几条 `[口癖] 注入抑制提示：DF平分∠C…`）
+    .filter((g) => !(ex && ex.includes(g)))
     .sort((a, b) => b.length - a.length);
 
   const out = [];
@@ -270,6 +280,30 @@ export function startTicsOf(text) {
   return [...out];
 }
 
+/** 对「倒」类语气词做保守降频，只改确认过的语气位置。 */
+export function softenDao(text, rng = Math.random) {
+  let t = String(text ?? '');
+  if (!t.includes('倒')) return t;
+  const v = Number(cfg().daoReplaceChance);
+  const chance = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.9;
+  t = t.replace(/倒不如/g, '不如').replace(/反倒是/g, '反而是').replace(/反倒/g, '反而');
+  t = t.replace(/([我你他她])倒(是)?觉得/g, '$1觉得');
+  t = t.replace(/倒是/g, (m) => (rng() < chance ? '' : m));
+  t = t.replace(/倒(?=(也|还|挺|先|想|像|不|蛮|颇|算|真|有点|有意思))/g, () =>
+    rng() < chance ? '' : '倒',
+  );
+  return t;
+}
+
+/** 把抽象对象前硬套的「那一套 / 那一截」改成自然表达。 */
+export function detype(text) {
+  let t = String(text ?? '');
+  if (!t.includes('套') && !t.includes('截')) return t;
+  t = t.replace(/([这那])一套/g, '$1个');
+  t = t.replace(/([这那])一截/g, '$1块');
+  return t;
+}
+
 /** 句末口癖命中：回复里任何一句话真正以它收尾才算。 */
 export function endTicsOf(text) {
   const out = new Set();
@@ -298,8 +332,13 @@ export function wordsOf(text) {
  *
  * @param {string|number} groupId
  * @param {string} text
+ * @param {{exclude?:string}} [opts] ⚠️ 2026-10-02 加 `exclude`：
+ *        **别人刚说的话 + 识图描述** —— 里面出现过的词**不是她的口癖**，是复述题面。
+ *        现场（`logs/bot.log` 02:01:0x 一连几条）：`[口癖] 注入抑制提示：DF平分∠C…`
+ *        —— 那是几何题的已知条件（「DF 平分∠CDE」），她解题时必须反复引用，
+ *        却被判成套话 ⇒ 提示词里出现「🚫 别再用这个说法」（= 叫她别说题目条件）✗✗
  */
-export function note(groupId, text) {
+export function note(groupId, text, opts = {}) {
   // ⚠️ 私聊没有 `group_id`。第一版没挡，于是私聊的回复被记进了
   //    `"undefined"` 这个组（回归里真的出现过一条 `<undefined> → Hell`）。
   //    私聊不该走这套 —— 那是 1v1，不存在"群里老这么开口"的问题。
@@ -308,12 +347,15 @@ export function note(groupId, text) {
   const now = Date.now();
   const fresh = [];
 
+  // ⚠️ 2026-10-02：`exclude` = 别人刚说的话 + 识图描述。见上面的 JSDoc。
+  const ex = String(opts.exclude ?? '');
+
   // ① 开场白（老机制，管"每次都这么开口"）
   const head = headOf(text);
-  if (head) fresh.push({ g: head, kind: 'head', at: now });
+  if (head && !(ex && ex.includes(head))) fresh.push({ g: head, kind: 'head', at: now });
 
   // ② 句中重复的短串（2026-09-14 加，管「哪看到的」这种）
-  for (const g of clausesOf(text)) fresh.push({ g, kind: 'clause', at: now });
+  for (const g of clausesOf(text, ex)) fresh.push({ g, kind: 'clause', at: now });
 
   // ③ 人设里的句首 / 句末口癖：分别记录，不用「见到就拦」。
   for (const g of startTicsOf(text)) fresh.push({ g, kind: 'start', at: now });

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 一级日常事件（`src/life.js`）回归。
  *
  * ## 这个套件盯的四件事（都是用户明确要求的）
@@ -46,9 +46,14 @@ const check = (ok, label, extra = '') => {
 let nextReply = '行吧，那个拼好饭又没了，我下次写你名字。';
 const seen = [];
 const server = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     let j = {};
     try {
       j = JSON.parse(body);
@@ -294,7 +299,7 @@ console.log('\n【8】★ compose：把同类往事喂给模型（群友的话�
   const text = await life.compose(p);
   check(typeof text === 'string' && text.length > 0, '拿到了润色结果', text);
   const call = seen[seen.length - 1];
-  check(call.stream === false, '★ `phrase()` 是非流式的（假模型答对了格式）');
+  check(call?.stream === false, '★ `phrase()` 是非流式的（假模型答对了格式）');
   check(/外卖/.test(call.user), '★ 喂进去的 user 里带了同类往事');
   check(/有关联的往事/.test(call.user), '★ 明确标了"你记得，要前后呼应"');
   check(/改个地址/.test(call.user), '★ 具体内容也在（能写出"改了地址又被偷"）');
@@ -477,11 +482,78 @@ console.log('\n【★】2026-09-18：剧情在跑时不许插日常 + 别自己�
     '★ 这道闸排在"掷骰开新剧情"**之前**（先看有没有在跑的，再决定开不开新的）',
   );
   // ★ 用户截图：「为什么感觉这个事件有点怪」（围裙 / 粉笔灰）
+  //   ⚠️⚠️ 2026-10-01 放宽（用户又说：「随机事件现在还是太单调了……应该完全随机由模型生成，
+  //      而不是由模板限定太多」）⇒ 现在是「**细节可以自由补，但身份 / 场所的类别不能改**」，
+  //      而且**按人设走**（不再写死"客服室"—— 黑祥那个包根本没有打工）。
   check(
-    /别自己往上加职业 \/ 场景的细节/.test(srcLife),
-    '★★ 提示词钉了"别自己加职业/场景细节"（围裙、粉笔灰那种）',
+    /别自己发明身份 \/ 场所/.test(srcLife),
+    '★★ 提示词钉了"别自己发明身份 / 场所"（围裙、粉笔灰那种照旧不许）',
   );
-  check(/不是后厨、食堂那类地方/.test(srcLife), '★ 并点明她的打工地点是**客服室**');
+  check(
+    /以你的人设设定为准/.test(srcLife),
+    '★ 身份 / 场所按人设走（不写死客服室，换包也对）',
+  );
+  // ★★ 2026-10-01 新增（用户：单调 + 「谁也没喊谁」老是出现）
+  check(/只是个方向，不是逐字剧本/.test(srcLife), '★★ 事件降级成"方向"，不再逐字复述模板');
+  check(/别再写同一类事/.test(srcLife), '★★ 把"最近发过的"摆出来，禁止重复同类事和同样句式');
+  check(/这次随机到的方向/.test(srcLife), '★ 每次随一个方向（在哪 / 细节 / 落点）逼出多样性');
+}
+
+console.log('\n【★】2026-10-13：日常事件不许发第三人称原文 + 发失败的那条 45 分钟内不再抽');
+{
+  const srcIndex = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+  const srcLife = readFileSync(join(ROOT, 'src', 'life.js'), 'utf8');
+
+  // ① 用户截图：群里冒出一句旁白「天台上有别人在，她端着饭换了个地方」
+  //    真因 = 润色失败时拿**事件库原文**顶上，而事件库是第三人称的语义描述。
+  check(
+    !/\|\|\s*plan\.template\.text/.test(srcIndex),
+    '★★ 删掉了 `|| plan.template.text` 兜底（润色失败不再拿事件库原文顶上）',
+  );
+  check(
+    /const text = await life\.compose\(plan\);[\s\S]{0,400}?if \(!text\) \{[\s\S]{0,400}?continue;/.test(
+      srcIndex,
+    ),
+    '★★ 润色没出文本 → **这条不发**（continue，照旧不记账、今天顺延重排）',
+  );
+  check(
+    /原文是第三人称旁白，不能直发/.test(srcIndex),
+    '★ 为什么不能直发写在代码里了（事件库是用来润色的，不是台词）',
+  );
+  // ② 同一条 15 分钟内在同一个群出现两遍：回执超时 ≠ 没发到
+  check(
+    /life\.noteFailed\(g, plan\.template\.text/.test(srcIndex),
+    '★★ 发失败（含回执超时）→ 登记 `life.noteFailed`（重排不再抽同一条）',
+  );
+  check(/FAIL_COOLDOWN_MS = 45 \* 60 \* 1000/.test(srcLife), '★ 冷藏窗口 = 45 分钟');
+
+  // ② 行为：冷藏之后重排必须换一条；过了窗口还能再抽（不是永久拉黑）
+  reset();
+  arm(at(12, 30), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(12, 30) });
+  const first = life.plan(at(12, 30), seqRng([0]));
+  check(first.fire === true, '先正常抽一条中午的事件', first.reason ?? '');
+  const text = first.template?.text ?? '';
+  check(!!text, '抽到的事件文本非空', text);
+
+  life.noteFailed('', text, at(12, 31));
+  check(
+    readFileSync(join(ROOT, LIFE_REL), 'utf8').includes(text.slice(0, 10)),
+    '★ 冷藏名单**落盘**（重启也不丢）',
+  );
+  arm(at(12, 36), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(12, 36) });
+  const second = life.plan(at(12, 36), seqRng([0]));
+  check(
+    second.fire === true && second.template?.text !== text,
+    '★★ 5 分钟后重排 → **不再是同一条**（防"超时其实发到了"的重复）',
+    second.template?.text ?? '',
+  );
+  arm(at(13, 20), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(13, 20) });
+  const third = life.plan(at(13, 20), seqRng([0]));
+  check(
+    third.template?.text === text,
+    '★ 过了 45 分钟 → 又能抽到它（只是冷藏，不是永久拉黑）',
+    third.template?.text ?? '',
+  );
 }
 
 try {

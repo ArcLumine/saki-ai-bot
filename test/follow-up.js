@@ -85,6 +85,13 @@ writeFileSync(
     '  maxPerReply: 5',
     '  continueProbability: 0.5',
     '  betweenMs: [400, 1200]',
+    // ⚠️⚠️ 2026-10-07 加：`maybeFollowUp()` 现在**受收紧度管**（收紧度 > 2 就不追补）——
+    //    这个套件测的是"追补本身能不能正常工作"，所以把它放在**最放得开那一档**（0）。
+    //    （用户报「主动搭话频率很高」时，追补正是主力，所以那条闸默认关掉才对 ✓）
+    'groupParams:',
+    '  "20002":',
+    '    chat:',
+    '      strictness: 0',
     '',
   ].join('\n'),
   'utf8',
@@ -174,20 +181,25 @@ const fu = await import('../src/follow-up.js');
 const llmCalls = [];
 
 const isFollowUpCall = (c) =>
-  (c.messages?.find((m) => m.role === 'system')?.content ?? '').includes('想补充的冲动');
+  (c.messages?.find((m) => m.role === 'system')?.content ?? '').includes('遗漏审计');
 
 /**
  * 假模型：必须**认得追补那次的请求**并给出固定的补充话。
  *
- * ⚠️ 追补走的系统提示词里有「想补充的冲动」，这是**唯一**能把它和主回复
+ * ⚠️ 追补走的系统提示词里有「遗漏审计」，这是**唯一**能把它和主回复
  *    区分开的字样（主回复走 `buildSystemPrompt`）。认错的话追补请求会被
  *    当成正文 → 返回 `MAIN_REPLY` → 测试看起来"追补了"，其实补的是正文，
  *    等于什么都没验到。
  */
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     let parsed = {};
     try {
       parsed = JSON.parse(body);
@@ -306,8 +318,7 @@ async function partB() {
   // ⚠️ 必须先写好配置，**再**起子进程。
   //    `probability: 1` + `continueProbability: 1` —— 【B】要验的是**接线和上限**，
   //    概率闸在【A】里穷举过了；留随机的话这里就是 flaky 的。
-  //    `maxPerReply: 2` 让"上限"这条能在几秒内验完
-  //    （真跑满 5 条要多等 4 次模型调用 + 4 段间隔）。
+  //    `maxPerReply: 2` 让"上限"这条能在几秒内验完。
   writeFileSync(
     CFG_B,
     [
@@ -344,6 +355,12 @@ async function partB() {
       '  maxPerReply: 2',
       '  continueProbability: 1',
       '  betweenMs: [50, 120]',
+      // ⚠️⚠️ 2026-10-07 加：追补现在**受收紧度管**（> 2 就不补）——
+      //    这个套件测"追补能不能工作"，所以要放最松那档（见上面 CFG_A 同一处注释）。
+      'groupParams:',
+      '  "20002":',
+      '    chat:',
+      '      strictness: 0',
       '',
     ].join('\n'),
     'utf8',
@@ -447,6 +464,33 @@ async function cleanup() {
 }
 
 async function main() {
+  // ⚠️ 2026-10-07 定：**同类机器人接着聊不要固定上限**。
+  //    演变过程（别再改回去）：
+  //      ① 一开始同类被**整个排除**在 followUp 之外 ⇒ 她刚回过对方一句、
+  //         对方接着说，她也不接（用户截图报的：爱音追问照片那事，saki 不吭声）；
+  //      ② 改成"同类也走 followUp，但那条『直接接』卡链长上限（默认 2 轮）"
+  //         ⇒ **剧情聊到一半就被掐断**，用户一眼看出来；
+  //      ③ **现在**（用户原话：「**不要固定上限，她们自己想停就停**」）——
+  //         固定上限删掉，改由**她自己**判断说没说完。
+  //    ⚠️ 所以这条断言现在盯两件事：
+  //      · 固定上限**确实没了**（有的话就是退回了 ② 那个毛病）；
+  //      · 但"该收场了"的**提示词引导** + **硬闸**都还在 ——
+  //        这两道少一道，才会真的退回"两个机器人无限互刷"。
+  {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+    const src = readFileSync(join(root, 'src', 'bot.js'), 'utf8');
+    check(
+      !/peerChat\?\.maxChain/.test(src),
+      '★★ 同类接着聊**没有固定链长上限**（她们自己想停就停，不会被代码掐断）',
+    );
+    check(
+      /botOnlyChain\(/.test(src) && /botChainHard\(/.test(src),
+      '★ 但"该收场了"的提示词引导 + 硬闸都还在（不会退回无限互刷）',
+    );
+  }
   await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
   await partB();

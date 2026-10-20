@@ -15,6 +15,7 @@
  * 用法: node test/sensitivity.js
  */
 import { createServer } from 'node:http';
+import { configWithOnebot } from './_config-base.mjs';
 import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
@@ -47,9 +48,14 @@ async function setup(level, basePort, groupId = GROUP) {
   const sent = [];
 
   const llm = createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
+    const __bodyChunks = [];
+    req.on('data', (c) => __bodyChunks.push(c));
     req.on('end', () => {
+      // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+      //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+      //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+      //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+      const body = Buffer.concat(__bodyChunks).toString('utf8');
       const p = JSON.parse(body || '{}');
       const sys = p.messages?.find((m) => m.role === 'system')?.content ?? '';
       const user = [...(p.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '';
@@ -90,6 +96,27 @@ async function setup(level, basePort, groupId = GROUP) {
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '{"speak":true,"why":"测试","length":"short"}' } }] }));
       return;
     }
+      // ⚠️⚠️ 2026-10-06 补：**预搜索**（system 里含「这句话要不要上网查」）——
+      //    这个套件原来**漏认了它**（别的 7 个套件都认：behavior / attitude / cs /
+      //    e2e / follow-up / punctuation / teach，判据和回复都照抄它们）。
+      //
+      //    漏认的后果（这次回归红了才查到）：
+      //      预搜索要的是 `{"search":false,...}`，假模型却回了一句「收到。」⇒
+      //      `search-presearch.js` 解析不出来 ⇒ **退回规则** ⇒
+      //      **每条闲聊都真的联网搜**（日志证据：`搜索「今天天气不错啊大家觉得呢0…」
+      //      → 4 条结果`）⇒ 每条多花 10~15 秒 ⇒【3】那条"5 次 × 等 10 秒"的窗口
+      //      **偶发超时**（并发 2 那次挂「无关闲聊也会接」、单独重跑 82.7 秒全绿）。
+      //
+      //    ⚠️ 判据用**准确字样**，而且预搜索走 `collect(streamChat(...))` ⇒ **要 SSE**。
+      if (sys.includes('要不要上网查')) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: '{"search":false,"why":"测试不搜"}' } }] })}\n\n`,
+        );
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       for (const ch of '收到。') {
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: ch } }] })}\n\n`);
@@ -135,7 +162,7 @@ async function setup(level, basePort, groupId = GROUP) {
   await new Promise((r) => llm.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
-  const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+  const base = configWithOnebot();
   const cfgText = base
     .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${WS_PORT}`)
     .replace(/accessToken:\s*"?[^"\r\n]*"?/, `accessToken: "${TOKEN}"`)
@@ -155,6 +182,29 @@ async function setup(level, basePort, groupId = GROUP) {
   parsed.trigger.allowGroups = [GROUP, GROUP2];
   parsed.trigger.allowPrivateUsers = ['10000001'];
   parsed.trigger.groupRespondTo = {};
+  parsed.trigger.requireAtInGroup = true;
+  parsed.trigger.cooldownMs = 0;
+  parsed.chat = {
+    ...(parsed.chat ?? {}),
+    enable: true,
+    question: {
+      ...(parsed.chat?.question ?? {}),
+      enable: true,
+      probability: 1,
+      cooldownMs: 0,
+    },
+    mention: {
+      ...(parsed.chat?.mention ?? {}),
+      enable: true,
+      names: ['小祥'],
+      probability: 1,
+      cooldownMs: 0,
+    },
+    followUp: { ...(parsed.chat?.followUp ?? {}), enable: true, idleMs: 180000, sameUserMs: 240000 },
+  };
+  parsed.groupParams = {
+    [GROUP]: { chat: { answerServer: level < 3 } },
+  };
   writeFileSync(CFG, yaml.dump(parsed, { lineWidth: 120, noRefs: true }), 'utf8');
   if (!String(parsed.onebot?.url).includes(String(WS_PORT))) throw new Error('onebot.url 没换掉');
   if (!String(parsed.llm?.baseURL).includes(String(LLM_PORT))) throw new Error('llm.baseURL 没换掉');
@@ -319,7 +369,15 @@ async function main() {
     let replied = false;
     for (let i = 0; i < 5 && !replied; i++) {
       await env.send(`今天天气不错啊大家觉得呢${i}`);
-      replied = await env.waitReply(6000);
+      // ⚠️ 2026-10-03：等待放宽到 10 秒 —— 去掉掷骰之后，**每条无关闲聊都要真问一次
+      //    speak-judge**（以前多数靠概率直接跳过、压根不调用），链路变长了。
+      replied = await env.waitReply(10000);
+    }
+    if (!replied) {
+      // ⚠️ 和 [2b] 一样：不接的时候必须能看见机器人自己的日志，
+      //    否则只能猜是冷却、判断、还是通道问题。
+      console.log('    [调试] 没接，机器人日志尾部：');
+      for (const l of env.log.slice(-10)) console.log('      ' + l);
     }
     check(replied, '无关闲聊也会接（灵敏度 1 的特征）');
   });

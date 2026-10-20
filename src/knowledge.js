@@ -4,7 +4,7 @@
  */
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, KNOWLEDGE_DIR, config, personaId, personaDir } from './config.js';
+import { ROOT, KNOWLEDGE_DIR, knowledgePrivateDir, config, personaId, personaDir } from './config.js';
 import { log } from './log.js';
 import { learnedText, listEntries, stripLearned } from './learned.js';
 import { animeWorks, fillOwnerTerms } from './persona.js';
@@ -16,6 +16,19 @@ import * as names from './names.js';
 
 /** ⚠️ 走 `config.js` 的 `KNOWLEDGE_DIR`（测试可以用 `QQBOT_KNOWLEDGE_DIR` 整份搬走） */
 const DIR = KNOWLEDGE_DIR;
+/**
+ * ⚠️ 2026-10-07 加：**这个号私有**的那部分知识目录。
+ *
+ * 用户拍板的分法（「其他配置全部分 QQ 控制」）——
+ *   · **按号分**：群记忆、学习档案、群资料库（`groups/`）、私聊记忆（`dm/`）
+ *     —— 它们是"**这个号**在群里攒下来的经历"，两个号混在一起就是串味；
+ *   · **共用**：`owner.md`（同一个主人）、`server-*.md`（同一台服务器）、
+ *     `holidays.md`、`anime/`、`memes.md`、`friends.md`、`relationship.md`。
+ *
+ * ⚠️ **主号 / 单号时 `KDIR === DIR`**（`knowledgePrivateDir()` 的约定）⇒
+ *    下面所有"扫两个目录"的代码都退化成"扫一个"，老路径一个字都不变。
+ */
+const KDIR = knowledgePrivateDir();
 /** 学习档案单独处理（优先级更高），不参与下面的通用拼接 */
 const LEARNED = 'learned.md';
 /**
@@ -37,6 +50,8 @@ const GLOBAL = 'global.md';
  *       "全局知识"列表**天然看不见它**（不递归），不会混进去。
  */
 const GROUP_DIR = join(DIR, 'groups');
+/** ⚠️ 这个号私有的群资料库（主号时和上面是同一个目录，下面用 `KDIR !== DIR` 跳过重复扫） */
+const KGROUP_DIR = join(KDIR, 'groups');
 
 /**
  * 动画库（`knowledge/anime/<库名>.md`）—— 2026-09-21 从"一个共用 `anime.md`"改过来。
@@ -85,6 +100,8 @@ const ANIME_DIR = join(DIR, 'anime');
  *    所以**真实的私聊内容不会进公开仓库**（这条比什么都重要）。
  */
 const DM_DIR = join(DIR, 'dm');
+/** ⚠️ 这个号私有的私聊记忆 */
+const KDM_DIR = join(KDIR, 'dm');
 /** 群号 → { name, content }（`name` 是给人看的相对路径 `groups/<群号>.md`） */
 let groupFiles = new Map();
 
@@ -353,12 +370,17 @@ function load() {
         collected.push({ name: `_shared/${n}`, file: join(sdir, n), from: 'persona' });
       }
     }
-    for (const n of readdirSync(DIR)) {
-      if (!n.toLowerCase().endsWith('.md')) continue;
-      if (n.toLowerCase() === LEARNED) continue; // 学习档案单独处理（老布局遗留）
-      if (n.toLowerCase() === GLOBAL) continue; // 全局层学习档案同样单独处理（防注入两遍）
-      if (collected.some((c) => c.name.toLowerCase() === n.toLowerCase())) continue;
-      collected.push({ name: n, file: join(DIR, n), from: 'knowledge' });
+    // ⚠️ 多 QQ 号：**这个号私有的 md 排在前面** —— 里面那行去重是"先到先得"，
+    //    所以同名文件（比如两个号各有一份 group-memory.md）以**私有那份**为准。
+    const roots = KDIR !== DIR && existsSync(KDIR) ? [KDIR, DIR] : [DIR];
+    for (const root of roots) {
+      for (const n of readdirSync(root)) {
+        if (!n.toLowerCase().endsWith('.md')) continue;
+        if (n.toLowerCase() === LEARNED) continue; // 学习档案单独处理
+        if (n.toLowerCase() === GLOBAL) continue; // 按作用域选择的学习档案不走通用注入
+        if (collected.some((c) => c.name.toLowerCase() === n.toLowerCase())) continue;
+        collected.push({ name: n, file: join(root, n), from: 'knowledge' });
+      }
     }
     // ── 敏感词库：**这里不再收**（2026-09-29）──────────────────────────────
     // ⚠️ 它搬去了 `safety/sensitive/`（用户要求把"敏感"和"safety"合成一个安全模块，
@@ -430,6 +452,11 @@ function load() {
     };
     scanDir(GROUP_DIR, (id) => id, (n) => `groups/${n}`);
     const dmCount = scanDir(DM_DIR, (id) => `dm:${id}`, (n) => `dm/${n}`);
+    // ⚠️ 多 QQ 号：这个号私有的群资料 / 私聊记忆**后扫** ⇒ 同名覆盖共用的那份
+    if (KDIR !== DIR) {
+      scanDir(KGROUP_DIR, (id) => id, (n) => `groups/${n}`);
+      scanDir(KDM_DIR, (id) => `dm:${id}`, (n) => `dm/${n}`);
+    }
     groupFiles = gmap;
     // ⚠️ 2026-09-28：观察记忆扫**另一个目录**、进**另一张表**。
     //    文件名约定：群 → `<群号>.md`；私聊 → `dm-<QQ号>.md`（`dm-` 前缀还原成 `dm:<QQ>`）。
@@ -511,6 +538,12 @@ load();
  */
 export function reloadKnowledge() {
   load();
+  // ⚠️ 2026-10-15 加：**CP 名那份名单也要跟着失效**。
+  //    `cpNamesFor()` 把结果缓存在 `_cpCache` 里（每条消息的判定都读它，不缓存就白算）——
+  //    而缓存**不会自己失效** ⇒ 用户改了 `anime/<库>.md` 里那张 CP 表、界面上点了保存，
+  //    判定里用的还是旧名单（要重启才认）✗
+  //    ⇒ 热重载时一起清掉 ✓（不然就是"我明明改了，她怎么还是不认识"那种坑）
+  _cpCache = null;
   return { files: files.length, names: files.map((f) => f.name) };
 }
 
@@ -644,6 +677,53 @@ export function castBands() {
     }
   }
   return bands;
+}
+
+/**
+ * **按昵称认人**：这个昵称命中名册里的哪个角色？（2026-10-06 用户要求）
+ *
+ * 用户原话：「到时候会把 QQ 昵称改成**素世**，只要满足**同类池** + 同时是**剧中人物名字**
+ *   就自动识别为**同世界的人**、就**放行**并**识别角色**，一起聊天」。
+ *
+ * ⚠️ 判据是**昵称**（不是 QQ 号）—— 他改的是号的昵称，代码里不必写死任何号 ✓
+ * ⚠️⚠️ **单字的别名只许完全相等**：`cast.md` 自己就写着「`灯` 不能当别名 ——
+ *    会撞上『路灯』『台灯』」⇒ 这里必须照办，否则一个叫「灯下黑」的群友会被认成高松灯 ✗
+ * ⚠️ 两个字符以上的别名用**包含**（「素世的bot」「长崎素世」都认得出来）✓
+ *
+ * @param {string} nickname 群名片 / 昵称
+ * @returns {string} 命中的角色名（主名，如「长崎素世」）；没命中返回空串
+ */
+export function castRoleOf(nickname) {
+  const n = loose(nickname);
+  if (!n) return '';
+  // ⚠️ 先看**人**再看**乐队**：昵称「MyGO素世」两边都能命中 ⇒ 返回"人"更准
+  for (const b of castBands()) {
+    for (const m of b.members ?? []) {
+      // ⚠️ 2026-10-06：把**主名的最后一个字**也算上（「高松灯」→「灯」、「若叶睦」→「睦」）——
+      //    `cast.md` 的规矩是"别名要两个字以上"（防事件文本里「灯」撞「路灯」「台灯」），
+      //    但**昵称场景不一样**：昵称正好是「灯」时完全可以认（`hitKeys` 对单字走的是
+      //    **完全相等**，所以「路灯」「灯下黑」照样不会命中）。
+      //    ⚠️ 误伤面极小：只有"昵称是单字 **且** 那个号已经配进同类池"才会命中。
+      const keys = [...(m.keys ?? [])];
+      const last = String(m.name ?? '').trim().slice(-1);
+      if (last) keys.push(last);
+      if (hitKeys(n, keys)) return m.name;
+    }
+  }
+  for (const b of castBands()) {
+    if (hitKeys(n, b.keys)) return b.name;
+  }
+  return '';
+}
+
+/** 昵称命中一组名字/别名吗（两字以上用包含、单字必须完全相等） */
+function hitKeys(looseName, keys) {
+  for (const k of keys ?? []) {
+    const kk = loose(k);
+    if (!kk) continue;
+    if (kk.length >= 2 ? looseName.includes(kk) : looseName === kk) return true;
+  }
+  return false;
 }
 
 /** 把一档渲染成提示词里的一段；`only` 给了就只渲染那几个人 */
@@ -797,9 +877,55 @@ export function mentionsAnyTerm(text, fileName) {
   return mentionsAnyTermIn(f.content, text);
 }
 
+/**
+ * **和我有关的 CP 名**（2026-10-15 用户要求）。
+ *
+ * 用户原话：「刚才 saki 发了一个**爱素**的视频，按道理应该算提到了爱音，应该要回的」。
+ *
+ * 为什么需要：`anime/<库>.md` 里那张 CP 表是给**聊天**看的，判定模型不一定看得到 ——
+ *    而它不认识「爱素」这种圈内词（里面就是「爱音」），于是判成"普通分享链接，没点名" ✗
+ *    （实测日志：`20:39:07 [说话判断] 不说（普通分享链接，没点名）→ 这条不接`）
+ *
+ * ⚠️ 判据从**表本身**抠出来（表格行 `| **爱素** | 千早爱音 × 长崎素世 | … |`），
+ *    **不另外维护一份名单** —— 往 CP 表里加一行就自动生效 ✓
+ *
+ * @param {string[]} names 我这个角色的名字 / 别人怎么叫我（`charName()` + `callNames()`）
+ * @returns {string[]} 跟我有关的 CP 名（「爱素」「爱祥」…）
+ */
+export function cpNamesFor(names = []) {
+  const mine = (Array.isArray(names) ? names : [])
+    .map((x) => String(x ?? '').trim())
+    .filter((x) => x.length >= 2); // ⚠️ 单字（「爱」）不参与匹配，太容易撞普通词
+  if (!mine.length) return [];
+  const key = mine.join('|');
+  if (_cpCache?.key === key) return _cpCache.list;
+  const out = new Set();
+  for (const f of files.filter((x) => x.name.startsWith('anime/'))) {
+    for (const line of String(f.content).split('\n')) {
+      const m = /^\|\s*\*\*(.{2,20}?)\*\*\s*\|([^|]{2,60})\|/.exec(line.trim());
+      if (!m) continue;
+      if (!m[2].includes('×')) continue; // ⚠️ 只认「A × B」那种配对行
+      if (!mine.some((n) => m[2].includes(n))) continue;
+      out.add(m[1].trim());
+    }
+  }
+  const list = [...out];
+  _cpCache = { key, list };
+  return list;
+}
+let _cpCache = null;
+
 /** `mentionsAnyTerm` 的实际实现（按**内容**判，全局文件和群资料库共用） */
 function mentionsAnyTermIn(content, text) {
   const t = String(text ?? '');
+  // ⚠️⚠️ 2026-10-02：**大小写不敏感**（和 `whoIsBrief` 里 2026-09-19 那次修法对齐）。
+  //
+  //    踩了**第二次**同一个坑：用户打的是小写「**mei**的资料是什么」，
+  //    而资料里写的是「**MEI**」/「**MEIYIJIA**」 ⇒ 区分大小写的 `includes` 判不中
+  //    ⇒ `friends.md` 不进提示词 ⇒ 她又答"不知道" ✗
+  //    （第一次是 2026-09-19「还记得mei吗」那次，当时只修了 `whoIsBrief` 那一处，
+  //      而"选哪份文件"走的是这个函数 —— **两处要一起改**。）
+  const tl = t.toLowerCase();
   const terms = new Set();
   // 加粗的词（**邦邦**、**户山香澄 / 邦高祖**）
   for (const m of String(content).matchAll(/\*\*(.{2,24}?)\*\*/g)) terms.add(m[1].trim());
@@ -811,7 +937,7 @@ function mentionsAnyTermIn(content, text) {
       const p = part.replace(/[*`（）()【】\[\]]/g, '').trim();
       // 太短（1 个字）会误命中，太长不像一个词
       if (p.length < 2 || p.length > 16) continue;
-      if (t.includes(p)) return true;
+      if (tl.includes(p.toLowerCase())) return true;
     }
   }
   return false;
@@ -875,7 +1001,10 @@ function mentionsSomeone(text, content) {
  *    群友资料现在有两个来源，都在这里扫：`groupFiles`（这个群的资料库）
  *    和 `observeFiles`（这个群的观察区）—— 见 `whoIsBrief`。
  */
-const EXTRA_PEOPLE_FILES = ['owner.md', 'relationship.md'];
+// ⚠️ 2026-10-04：接入上游的 `friends.md`（熟人资料独立成一份，谁问都读 —— 见 webui 里的说明）。
+//    ⚠️ **不加** `group-memory.md`：那份本地 2026-09-28 已删（群友资料改由每群的 `observe/` 承担），
+//      留着等于对**永远不存在**的文件做词表匹配，永远 false。
+const EXTRA_PEOPLE_FILES = ['owner.md', 'relationship.md', 'friends.md'];
 function extraPeopleContent() {
   let out = '';
   for (const f of EXTRA_PEOPLE_FILES) {
@@ -905,6 +1034,35 @@ export function whoIsBrief(text, groupId = '') {
   if (of?.content) sources.push(of.content);
   const extra = extraPeopleContent();
   if (extra) sources.push(extra);
+  // ⚠️⚠️ 2026-09-26：「服务器库里的**人员名录**」也要算进来。
+  //
+  //    用户报：「最近机器人一直都不认得服务器的几个管理员了（举了好几个名字），
+  //    在群里问的时候会**直接说不认识**」。
+  //
+  //    ⚠️ 我把现场提示词 dump 出来逐行查过（55187 字）：管理员名录（含别名）
+  //       **确实已经在提示词里**了 —— 但它落在 **60%~70% 的中段**（第 1612~1779 行），
+  //       而问句在**最末尾** ⇒ 模型翻不到 ⇒ 答"没印象" ✗。
+  //       这正是**本函数注释开头那个"中段迷失"**（2026-09-17 报的是一模一样的问题）。
+  //
+  //    ⚠️ 一个能对上的旁证：**同一个人问，她答对；换个人问，她答错** ——
+  //       那位管理员**自己**问「某某 是谁」时她答对了，因为 `attitudeFor()` 把
+  //       「现在跟你说话的是：管理员（另一个 ID）」贴在了**最末尾**，
+  //       近处就有那个 ID，她才把中段那句"别名 = 本名"连起来；
+  //       换成 <主人> 问，末尾写的是"<主人> 本人"，中段就彻底翻不到了。
+  //       ⇒ **信息在不在是一回事，离提问有多近是另一回事。**
+  //
+  //    ⇒ 所以把名录里**含 QQ 号的那些表格行**单独拎一份贴到提示词靠后（和群资料同等待遇）。
+  //    ⚠️ 只挑**人员行**（`| … | 数字QQ | … |`），**不把整份 5.5K 塞进来** ——
+  //       否则服务器库里 `**手机**`、`**备份**`、`**Java 21**` 那些加粗词
+  //       会把一堆无关行也拎出来，而下面的表头写着"你手里有这个人的资料"，反而误导。
+  const srv = files.find((f) => f.name === 'server-people.md');
+  if (srv?.content) {
+    const roster = String(srv.content)
+      .split('\n')
+      .filter((l) => l.trim().startsWith('|') && /\d{5,12}/.test(l))
+      .join('\n');
+    if (roster) sources.push(roster);
+  }
   if (!sources.length) return '';
   const hits = [];
   for (const src of sources) {
@@ -921,7 +1079,13 @@ export function whoIsBrief(text, groupId = '') {
     // ⚠️ 只认**加粗的名字** —— 群资料/人资料里就是这么写的（`| **喵喵三三** | … |`、
     //    `- **MEI**（他现实里的朋友…）`）。
     //    不去猜"哪几个字是人名"，那样误命中率太高（「群里」「大家」都会被当成名字）。
-    for (const m of src.matchAll(/\*\*(.{2,12}?)\*\*/g)) {
+    // ⚠️ 2026-09-26：上限从 **12 放宽到 24**。服务器库里的别名 `**某某_Official.**`
+    //    是 **13 个字符**，12 的上限把它整个漏掉了 —— 实测问
+    //    「某某_Official.在b站上的成就怎么样」时，这份"就近摘要"是**空的** ✗。
+    //    放宽几乎无副作用：**越长的加粗词越不可能恰好出现在对方那句话里**，
+    //    而且下面那句 `l.includes(...)` 还要求命中的行以 `|` / `-` 开头。
+    //    （和 `mentionsAnyTermIn()` 的 `{2,24}` 对齐，别让两处口径不一致。）
+    for (const m of src.matchAll(/\*\*(.{2,24}?)\*\*/g)) {
       const name = m[1].trim();
       // ⚠️⚠️ 2026-09-19：**大小写不敏感**（用户打的是小写「mei」，资料里写的是
       //    「**MEI**」—— 区分大小写的 `includes` 直接判不中，这也是他这次问
@@ -935,17 +1099,216 @@ export function whoIsBrief(text, groupId = '') {
       if (line && !hits.includes(line)) hits.push(line.slice(0, 300));
     }
   }
-  if (!hits.length) return '';
-  return [
+  // ⚠️⚠️ 2026-10-01 加：**光拎表格行不够**。
+  //
+  //    某个人的**详细小节**（`### 名字`）里才有"他有什么特殊权限 / 他管什么"这类事实；
+  //    表格行里只有"谁是管理员、又叫什么"。
+  //    实测：问「某某可以夺取服务器吗」，「夺取服务器」那条就写在
+  //    `### 某某 / …` 小节里 —— 它既不在表格行、也不在任何末尾摘要里，
+  //    而提示词有 66K 字，模型在中段翻不到 ⇒ 她自己推理出「权限不都是你发的」✗。
+  //    ⇒ 把**问到的那个人的整节**也拎到末尾（限长 900 字，别把整份文件搬过来）。
+  //    ⚠️ 只扫 `server-*` 这几份：人设/群记忆里也有 `###`，混进来会误拎。
+  const secHits = [];
+  try {
+    const full = files
+      // ⚠️ 2026-10-02：**`friends.md`（熟人资料）也要扫** —— MEI 那几条细节
+      //    全在 `### MEI` 这一节的子条目里，光拎"命中那一行"是不够答的。
+      .filter((f) => /^server-/.test(f.name) || f.name === 'friends.md')
+      .map((f) => f.content ?? '')
+      .join('\n');
+    const tl = t.toLowerCase();
+    const heads = [];
+    const re = /^###\s+(.+)$/gm;
+    let m;
+    while ((m = re.exec(full)) !== null) {
+      heads.push({ title: m[1].trim(), start: m.index, end: m.index + m[0].length });
+    }
+    for (let i = 0; i < heads.length; i++) {
+      const h = heads[i];
+      // 标题里几个名字用 `/`、`、` 分开 —— 任何一个命中提问，就算问到了这个人
+      const names = h.title
+        .split(/[\/／、]/)
+        .map((x) => x.replace(/[*`（）()【】\[\]「」]/g, '').trim())
+        // ⚠️ 2026-10-01：这里放宽到**一个字也行** —— `### 茏 / 龟龟杜 / 梦茏` 里的
+        //    「茏」是单字，被 >=2 那道闸滤掉之后，问「茏是谁」他那一节**拎不出来**
+        //    （实测：其余五个人都拎到了，只有他 0 字）。
+        //    ⚠️ 只对**小节标题**放宽：标题是人工挑过的名字，比正文里的加粗词精确得多
+        //      （`mentionsAnyTermIn()` 那边仍保留 >=2，它扫的是全文加粗，误命中高）。
+        .filter((x) => x.length >= 1);
+      if (!names.some((n) => tl.includes(n.toLowerCase()))) continue;
+      const stop = heads[i + 1] ? heads[i + 1].start : full.length;
+      const body = full.slice(h.end, stop).trim();
+      if (body && !secHits.some((s) => s.includes(h.title))) {
+        secHits.push(`### ${h.title}\n${body}`.slice(0, 900));
+      }
+    }
+  } catch (e) {
+    log.debug(`就近拎"某人的整节"失败（忽略）：${e.message}`);
+  }
+
+  if (!hits.length && !secHits.length) return '';
+  return fillOwnerTerms([
     '## 📇 你手里正好有这个群几个人的资料（就在下面，**直接用**）',
     '',
-    '| 群友 | 特点 / 怎么打交道 |',
-    '| --- | --- |',
-    ...hits,
-    '',
+    ...(hits.length
+      ? ['| 群友 | 特点 / 怎么打交道 |', '| --- | --- |', ...hits, '']
+      : []),
+    // ⚠️ 他这个人**名下的整节**（含他的权限、地盘、特别之处）—— 直接照它答
+    ...(secHits.length ? ['### 这个人的完整档案（**照这里写的答**）', '', ...secHits, ''] : []),
     '⚠️ 他说到的人**就在上面** —— 照这些说，**别说"不熟""不知道"**。',
+    '⚠️ 上面写了什么就是什么（比如某个人**有某种特殊权限**）——',
+    '   **别用"权限都是<主人>发的""他怎么可能"这类常识去否定它**（真实踩过：',
+    '   上面明明写着他能夺取服务器，她还是答「权限不就是你发的」✗）。',
     '⚠️ 但**别把整条念出来**（那是档案，不是人话）：挑一两句像"认识这个人"的话就够。',
-  ].join('\n');
+    // ⚠️⚠️ 2026-09-26 加（用户截图：管理员**本人**问「某某 是谁」，
+    //    她答「我也不知道诶，别考我」—— 而那一行**就在上面**，她没去连）。
+    //
+    //    根因：这一行是**表格**（`| A | 12345 | 又叫 B |`），
+    //    「A 和 B 是同一个人」需要模型**自己推**。实测它**时对时错**
+    //    （同一个人问，前一小时答"就是你"、后一小时答"我也不知道诶"）
+    //    ⇒ **不能指望它跨格推理，把结论直接写给它。**
+    '⚠️⚠️ 上面一行里的**几个名字说的是同一个人**（「A ｜ 12345 ｜ 又叫 B」＝ A 和 B 是同一个人）。',
+    '   对方问其中**任何一个**名字，都照这一行**直接说他是谁、管什么** ——',
+    '   **不许答"不认识""没印象""别考我"**（真实踩过：那一行就在提示词里，她还是这么答 ✗）。',
+  ].join('\n'));
+}
+
+/**
+ * 按 QQ 号从服务器库的人员名录里查出他的**别的叫法**（2026-09-26 加）。
+ *
+ * ⚠️ 为什么需要：`attitudeFor()` 只把**群名片 / 昵称**贴到提示词**最末尾**，
+ *    那只是"他在这个群叫什么" —— **他的游戏 ID / B 站名一个都不在里面**。
+ *    于是管理员**本人**问「某某 是谁」时，末尾写的是
+ *    「现在跟你说话的是：管理员（另一个 ID）」，她**对不上号** ✗
+ *    （用户截图，2026-09-26）。⇒ 把别名一起写进那一行，**要推的东西就不存在了**。
+ *
+ * ⚠️ 抽的是名录行里的**加粗片段** —— 写数据时就那么标的
+ *    （`| 本名 | 10000008 | 又叫 **别名** |`）。
+ *    ⇒ **以后在数据里加别名，不用改代码。**
+ *
+ * @param {string|number} uid
+ * @param {string[]} [exclude] 已经显示过的名字（别重复列一遍）
+ * @returns {string[]} 别名数组；查不到返回空数组
+ */
+export function aliasesOf(uid, exclude = []) {
+  const u = String(uid ?? '').trim();
+  if (!u) return [];
+  const srv = files.find((f) => f.name === 'server-people.md');
+  if (!srv?.content) return [];
+  const line = String(srv.content)
+    .split('\n')
+    .find((l) => l.trim().startsWith('|') && l.includes(u));
+  if (!line) return [];
+  const skip = new Set([u, ...exclude.map((x) => String(x ?? '').trim())]);
+  const out = [];
+  // ⚠️⚠️ 只认**带引导词的**别名 ——「又叫 A」「也叫 A」「游戏 ID A」「B 站叫 A」。
+  //
+  //    第一版是"把这一行里所有加粗片段都当别名"，实测 <主人> 那行抽出了
+  //    `**建设申请都由他批**` ⇒ 提示词里出现「也叫 <主人> / 建设申请都由他批」✗。
+  //    根因：**加粗在人设里也用于强调**，不只是标名字 —— 光看"加粗"分不出这两者。
+  //
+  //    ⚠️ 所以在 `hzymtr-server.md` 里加别名时**要带引导词**（又叫 / 也叫 / 游戏 ID / B 站叫…），
+  //       否则这里认不出来。**宁可少认，不可认错**（认错会直接写进她的提示词）。
+  for (const m of line.matchAll(
+    /(?:又叫|也叫|别称|别名|俗称|网名|昵称|称呼|游戏\s*ID|MCID|ID|叫)\s*[:：]?\s*\*\*(.{2,24}?)\*\*/g,
+  )) {
+    const n = m[1].trim();
+    if (n && !skip.has(n) && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+/**
+ * 服务器知识该带**哪几份**（2026-09-30 按主题拆分之后）。
+ *
+ * ⚠️ 背景：这份库原来是一个 250 行的 `hzymtr-server.md`，**命中就整份带上**
+ *    （约 5,000 字）。用户说「太混乱了，而且占字数也多」⇒ 拆成四份：
+ *      · `server-basic.md`  进服 / 整合包 / 排障 / 链接指令（最大的一份）
+ *      · `server-rules.md`  规则 / 权限 / 建设审批 / 存档
+ *      · `server-world.md`  线路 / 车站 / 行政区 / 地名 / 集团
+ *      · `server-people.md` 管理架构与人员名录（谁是管理员、谁是谁、别名）
+ *    ⇒ 问"整合包怎么装"就**只带 basic**，不再顺手背上整份线路表和名录。
+ *
+ * ⚠️ 取舍：原来是「宁多勿漏」（一份整带）。拆开之后如果**一份都不带**，
+ *    她会对着真问题胡说 —— 那比多占几千字严重得多。所以：
+ *      · 一份都不命中但有服务器信号 → 兜底带 `server-basic`（最常见那类）
+ *      · 人名 / 地名命中是**强信号**（`mentionsAnyTerm`，+6 分），几乎必带
+ *      · 最多带**两份**（第二名要有 2 分以上的信号），避免又变回"整包"
+ *
+ * @param {string} text 对方说的话
+ * @returns {string[]} 文件名（1~2 个）
+ */
+function serverTopicsFor(text) {
+  const t = String(text ?? '');
+  const lc = t.toLowerCase();
+  const TOPICS = {
+    'server-basic': [
+      '服务器', '整合包', '启动器', '模组', '报错', '崩', '进不去', '进不了', '连不上', '超时',
+      '加速器', '登录', '进服', '开服', '端口', '延迟', '卡顿', '闪退', '掉线', 'java', 'forge',
+      'neoforge', 'fcl', 'pcl', 'hmcl', '光影', '资源包', '远程', '内存', '显卡', '配置', '任务',
+      // ⚠️ 2026-10-04 删掉三个**具体模组/整合包名**（`ftb / voxy / 地平线 / mtr`）——
+      //    那是上游那个服的东西，我们这儿一份都没装。留着只会让
+      //    「装了 voxy 之后卡」这种问题白背一份资料。
+      //    `沉浸车辆` 同样属于那个服的世界观设定，一并去掉。
+      '版本', '教程', '指令', '群文件', '群公告',
+      '下载', '链接', '网页', '怎么玩', '新手', '新人',
+    ],
+    'server-rules': [
+      '规则', '规定', '权限', '申请', '审批', '白名单', '存档', '踢人', '封禁', '禁言', '付费',
+      '购买', '爱发电', 'op', '腐竹', '不能做', '禁止', '允许', '建房', '能建', '能不能',
+      // ⚠️ 「建设」两边都算：world 里有"各地能怎么建"，rules 里有"要申请 / 要 OP" ——
+      //    只带一份就会出现"介绍了某个地方、却说不出建房要审批"（实测就是这么问的）。
+      '建设', '建',
+      '夺取', '服权',
+    ],
+    'server-world': [
+      // ⚠️⚠️ 2026-10-04：**这一组损失最大** —— 上游原本几乎全是它自己服的地名/线路名
+      //    （`大足 / 安岛 / 东心 / 中心市 / 首都 / 龙岗 / 某条环线` 之类）。
+      //    那些对我们毫无意义，留着只会误命中（"安岛"可能是人名、"东心"可能是别的词）。
+      //    ⇒ 只留**结构性**的词（凡是任何 MTR 服务器都有的概念）：
+      //      线路/车站/行政区/地名/命名/归属 这些**类别词**。
+      //    ⇒ 具体地名靠下面那句 `mentionsAnyTerm(t, 'server-world.md')` ——
+      //      我们自己填了哪些地名，它就从内容里提哪些，**不用写死**。
+      '线路', '地铁', '高铁', '铁路', '车站', '站台', '建设', '改造', '工程', '行政区',
+      '集团', '公司', '轮渡', '隧道', '桥', '地名', '别名',
+      '命名', '归属', '谁建的', '环线', '号线', '专线', '支线',
+    ],
+    'server-people': [
+      '管理员', '腐竹', '服主', '是谁', '谁啊', '哪个是', '身份', '名录', 'qq', '游戏 id',
+      '昵称', 'b 站',
+      // ⚠️ 问某个人"权力多大 / 能干什么"也算问到人 ——
+      //    原来这类问句一个词都不命中，people 不带 ⇒ 她答"这我哪知道"。
+      '权力', '权限', '多大', '能干什么', '能干嘛', '夺取',
+    ],
+  };
+  const scores = [];
+  // ⚠️⚠️ 2026-09-30：`mentionsAnyTerm` 扫的是**文件里所有加粗词 + 表格首列**，
+  //    误命中很多 —— 实测「新人应该怎么安装这个整合包？」会把 `server-people.md`
+  //    也拉进来（白背 2.5K 字）。所以：
+  //      · **人名**那份再要求"这句话本来就是在问人"（是谁 / 谁啊 / 管理员 / b站…）
+  //      · **地名/线路**那份不设这个条件 —— 线路名（「某条环线」）就是唯一线索，
+  //        少带它她会答"不知道"（那比多背 1.5K 严重）
+  const ASK_PERSON = /是谁|谁啊|哪个是|哪个人|什么身份|身份|管理员|腐竹|服主|认识|qq|b\s*站/i;
+  for (const [file, words] of Object.entries(TOPICS)) {
+    let n = 0;
+    for (const w of words) if (lc.includes(w)) n++;
+    if (file === 'server-people' && ASK_PERSON.test(t) && mentionsAnyTerm(t, 'server-people.md')) n += 4;
+    if (file === 'server-world' && mentionsAnyTerm(t, 'server-world.md')) n += 4;
+    scores.push({ file, n });
+  }
+  scores.sort((a, b) => b.n - a.n);
+  const hit = scores.filter((s) => s.n > 0);
+  // ⚠️ 一条信号都没有 → 返回**空**，由调用方决定要不要兜底
+  //    （兜底逻辑在 `selectFor` 里；这里返回 `server-basic` 的话，
+  //      "今天午饭吃什么"也会被当成服务器问题，那就白拆了）
+  if (!hit.length) return [];
+  const out = [hit[0].file];
+  // ⚠️ 第二份**只要有信号就带上**（原来是 `n >= 2`，太严）：
+  //    实测「某个地名有什么规定」把 world 和 rules 都命中成 1 分，
+  //    结果只带了 world ⇒ 建房规则那份没进去 ⇒ 她答"我手上没料"。
+  //    宁可多背 1.5~3K 字，也不能对着真问题说不知道。
+  if (hit[1]) out.push(hit[1].file);
+  return out;
 }
 
 export function selectFor(text, opts = {}) {
@@ -955,24 +1318,67 @@ export function selectFor(text, opts = {}) {
   const gid = String(opts.groupId ?? '').trim();
   const picked = [];
   const skipped = [];
-
-  // ── 服务器库（`hzymtr-server.md`）：问进服/排障/规则/存档时才读 ──
-  // ⚠️ 2026-09-25 修：HEAD 里这里只剩一句 `skipped.push()`、没有任何 picked 判据，
-  //    于是「连不上/超时/加速器/登录」**永远带不进**服务器库（test/knowledge-groups【7】从基线就 4 红）。
-  //    判据两条：①通用词（进服/排障/登录/加速器/超时…）②消息里出现库里写过的词（`mentionsAnyTerm`）。
-  //    这样库里以后加新条目会自动生效，不用同时改正则 —— 和 anime 库同一套思路。
+// ── 服务器库：四份分片（上游 2026-09-30 的拆分）─────────────
+  //
+  // ⚠️⚠️ 2026-10-04 合并决策（用户拍板「**框架留着，内容变占位符**」）：
+  //   · **机制全部接入**：四份文件 + `serverTopicsFor()` 按主题挑 1~2 份 + 兜底 basic。
+  //     问"整合包怎么装"就只带 basic，不再顺手背上整份线路表和名录。
+  //   · **内容全部占位**：上游那张关键词表里写死了
+  //     `大足 / 安岛 / 东心 / 中心市 / 首都 / 龙岗` 这类地名，以及某人管理员的名与别名
+  //     —— 全是**上游作者自己服务器**的地名人名，在我们这儿毫无意义、还会误命中。
+  //     本机 `knowledge/` 下也没有服务器库（`hzymtr-server.md` 还是未填写的空模板）。
+  //     ⇒ 只保留**通用**词；地名/人名靠 `mentionsAnyTerm()` 从我们自己填的内容里提别名。
+  //
   // ⚠️ 关键词故意留「加速器」：正是用户要纠正的那类问题（这服直连、**不需要加速器**）。
   //    不认它，问的人反而看不到正确答案。
-  const srv = files.find((f) => f.name === 'hzymtr-server.md');
-  if (srv) {
-    const needServer =
-      /服务器|进服|进不去|连不上|连接|超时|加速器|登录|登陆|白名单|崩了|卡顿|存档|备份|版本|更新|MOD|模组|IP|地址|端口|掉线|延迟|ping/i.test(
-        t,
-      ) || mentionsAnyTerm(t, srv.name);
-    if (needServer) picked.push(srv.name);
-    else skipped.push(srv.name);
+  const needServer =
+    // ⚠️ 2026-09-15 晚补：`超时|连接|加速器|登录|进服` ——
+    //    实测「怎么连接超时了，难道要加速器？」原来**一条都不命中** ✗
+    //    → 服务器库没注入 → 她只能凭通用知识瞎答（那次的"回滚点"就是这么来的）。
+    /服务器|整合包|模组|存档|白名单|启动器|客户端|报错|崩|进不去|进不了|连不上|超时|连接|加速器|登录|进服|开服|端口|延迟|卡顿|闪退|掉线|op\b|java|forge|neoforge|光影|资源包|远程|内存|显卡|配置|任务/i.test(
+      t,
+    ) ||
+    // 消息里有文件（多半是整合包/存档相关）
+    segs.some((s) => s.type === 'file') ||
+    // ⚠️⚠️ 2026-09-26：**消息里出现了服务器库登记过的人名 / 别名**也要读它。
+    //
+    //    用户报的原话：「最近机器人一直都不认得服务器的几个管理员了，
+    //    在群里问的时候会直接说不认识」。
+    //
+    //    根因：上面那张关键词表里**只有「管理员 / 腐竹」这种身份词，没有任何别名** ——
+    //    于是「XX 是谁」「XX_Official.在b站上的成就怎么样」**一个词都不命中**
+    //    ⇒ 整份服务器库（含人员名录）**压根不进上下文** ⇒ 她只能答"我不认识" ✗
+    //
+    //    ⚠️ 这条**不是新发明**：`anime.md` 和**群资料库**都早就加了 `mentionsAnyTerm`，
+    //    **只有服务器库漏了** —— 而它恰恰是"人员名录"最全的一份。
+    //    ⇒ 而且这也是**去掉写死地名人名之后**，这条线路唯一还能用的信号。
+    mentionsAnyTerm(t, 'server-people.md') ||
+    mentionsAnyTerm(t, 'server-world.md');
+  // ⚠️ 注意：**不要**因为「说话的人是主人/管理员」就无条件读服务器库。
+  //    他也会闲聊（「我想你了」「今天怎么样」），那种时候塞服务器资料纯属浪费，
+  //    还把真正该看的关系设定挤到后面去（用户反馈「关系不够明显」）。
+  //    他真问服务器的事，上面的关键词会命中。
+  //
+  // ⚠️ 2026-09-30：拆成四份之后，不再"命中就整份带" ——
+  //    先按主题判该带哪 1~2 份（见 `serverTopicsFor`）。
+  // ⚠️⚠️ 这里**必须是带 `.md` 的完整文件名** ——
+  //    `selectFor()` 挑出来的名字会作为 `only` 集合传给 `knowledgeText()`，
+  //    而那边比的是 `only.has(f.name)`（`f.name` 是 `server-world.md`）。
+  //    写成 `'server-world'`（少扩展名）⇒ 四份服务器知识**一份都注入不进去**，
+  //    而 `selectFor().names` 看起来"挑对了"，裸调 `knowledgeText()` 又看不出问题
+  //    （没传 only 时它会把所有文件都带上）—— 于是**自检全绿、实际她什么都不知道**。
+  const SERVER_FILES = ['server-basic.md', 'server-rules.md', 'server-world.md', 'server-people.md'];
+  // ⚠️ 2026-09-30：**主题词本身也算服务器问题** —— 上面那张表里没有
+  //    「环线 / 号线 / 专线」这类线路名，于是「某条环线在哪」`needServer` 是 false
+  //    ⇒ 一份服务器库都不带 ⇒ 她只能答"不知道"（实测踩到）。
+  const topics = serverTopicsFor(t).map((f) => `${f}.md`);
+  if (needServer || topics.length) {
+    // 提到服务器了、但一份主题都没判出来 → 兜底带最常见的那份（basic）
+    const use = topics.length ? topics : ['server-basic.md'];
+    for (const f of use) picked.push(f);
+    for (const f of SERVER_FILES) if (!use.includes(f)) skipped.push(f);
   } else {
-    skipped.push('hzymtr-server.md');
+    for (const f of SERVER_FILES) skipped.push(f);
   }
 
   // ── 敏感词库：**这里什么都不做**（2026-09-28 从"整份"改成"总规则 + 撞库"）──
@@ -994,6 +1400,7 @@ export function selectFor(text, opts = {}) {
   // ⚠️ 原来那句注释担心「等消息里出现敏感词才临时补，模型早就接下去了」——
   //    **不成立**：提示词是同步拼完再发，不存在那个时序（梗库一直这么干）。
   //    而**总规则**本来就常驻，方法论不会因为词条按需而丢。
+
 
   // ⚠️⚠️ 2026-09-17 修（<主人> 报的：「699 群有群友让机器人介绍另一个群友，但是机器人说不知道。
   //    **应该先对应上名字**，直接调用群知识库来回答」）。
@@ -1080,6 +1487,23 @@ export function selectFor(text, opts = {}) {
   if (needOwner) picked.push('owner.md');
   else skipped.push('owner.md');
 
+  // ── `friends.md`：**熟人 / 朋友**（2026-10-02 加，用户拍板「做1」）────────
+  //
+  // 现场：一个好友私聊问「mei的资料是什么」，她答**不知道** ——
+  //   ① MEI 的资料原来写在 `owner.md` 里，而 owner.md **只对服主注入**（上面那条规矩）；
+  //   ② 那条"人名就近摘要"（`whoIsBrief`）**只在群聊里跑**（`bot.js` 里那句
+  //      `message_type === 'group'`）⇒ 私聊连它都不走。
+  //   ⇒ 私聊时她手里**一条 MEI 的信息都没有**，只能答不知道。
+  //
+  // 用户选的是：「把熟人资料独立成一份，**谁问都带**」（他自己也清楚
+  // 那些细节群里任何人都可能听到 —— 所以这份文件顶部专门写了这条警告）。
+  // ⚠️ 判据用 `mentionsAnyTerm`（扫文件里的加粗名字，如 `**MEI**`）+ 几个通用词，
+  //    这样「mei是谁」「MEIYIJIA 是谁」都能命中，而**闲聊时不会白占提示词**。
+  const needFriends =
+    mentionsAnyTerm(t, 'friends.md') || /朋友|熟人|老同学|初中同学|现实里/i.test(t);
+  if (needFriends) picked.push('friends.md');
+  else skipped.push('friends.md');
+
   // ── persona 的两份「按需分册」（2026-09-17 从 31.5K 的 persona.md 里切出来的）──
   //
   // ⚠️⚠️ 切它们的**目的不是省 token，是防"中段迷失"**：
@@ -1129,9 +1553,30 @@ export function animeLibNames() {
  * learned.md（群主教的）放在最后并显式声明优先级最高 —— 后出现的更靠近用户提问，
  * 模型通常也更重视后面的系统内容。
  */
+/**
+ * ⚠️⚠️ 2026-10-14 加：**这个号不看哪些共用知识**（`config.privateWork.skipKnowledge`）。
+ *
+ * 为什么需要：`knowledge/` 根下那些是**共用**的（服务器库、群记忆、二次元…）——
+ *   每个号都会读到。而用户给工作号的要求是「**把服务器的知识库移除**」，
+ *   直接删文件会把主号的一起删掉 ✗ ⇒ 只能"按号屏蔽"✓
+ *
+ * ⚠️ 只影响**这一个号**，别的号一个字不变 ✓
+ * ⚠️ 匹配是宽松的（`f.name === s || f.name.includes(s)`），因为 `files` 里存的
+ *    可能是 basename 也可能是带目录的相对路径（`server-*.md` 那套判据就是这么写的）。
+ */
+function skipKnowledge() {
+  const a = config.privateWork?.skipKnowledge;
+  return Array.isArray(a) ? a.map((x) => String(x).trim()).filter(Boolean) : [];
+}
+
 export function knowledgeText(opts = {}) {
   const only = opts.only ? new Set(opts.only) : null;
   const gid = String(opts.groupId ?? '').trim();
+  const skip = skipKnowledge();
+  const skipped = (name) => skip.some((s) => name === s || String(name).includes(s));
+  // 群记忆 / 这个群自己的资料 / 私聊记忆，用一个关键词统一关
+  const skipGroups = skip.some((s) => s.includes('group-memory') || s.includes('groups/'));
+  const skipLearned = skip.some((s) => s.includes('learned'));
 
   const chosen = files.filter((f) => {
     // ⚠️⚠️ 2026-09-28：**敏感词库不再是知识文件**。
@@ -1144,12 +1589,24 @@ export function knowledgeText(opts = {}) {
     //    `knowledge/` 里放一份 `sensitive/`，也不会被当普通知识整份读进提示词。
     if (f.name.startsWith('sensitive/')) return false;
     if (isPersona(f.name)) return true; // 人设永远读
+    if (skipped(f.name)) return false; // ⚠️ 按号屏蔽（工作号不读服务器那套）
     if (only) return only.has(f.name);
     return true;
   });
 
   const parts = [];
   if (chosen.length) {
+    // ⚠️⚠️ 2026-09-30 加（实测踩到的现场）：
+    //    **群聊记录里"过时的话"会压过知识库。**
+    //    <主人> 39 分钟前在群里说过「某地的建房规则 这个要等我导入进去」——
+    //    后来规则真的导进来了，可她**照着自己看到的那句旧话**一直答
+    //    「你还没导进来呢，我上哪儿知道」；而且她**自己之前那条"我手上真没料"**
+    //    也在上文里 ⇒ **自我强化**，越答越笃定，明明资料就在她手上。
+    //    ⇒ 在资料最前面钉一句"以这里为准"，把旧上下文压下去。
+    parts.push(
+      '⚠️ 下面这些是**已经在你手上的资料**。群里聊天记录里要是有人说某份规则「还没导入 / 我这边没有」，' +
+        '那是**之前**的话 —— **一律以这里写的为准**，直接照着答，别再重复"还没导入"。',
+    );
     // ⚠️ 过一遍"群归属"：不属于这个群的群标签块会被摘掉（内容不会丢，只是不给别的群看）
     parts.push(chosen.map((f) => scopeForGroup(f.content, gid)).filter(Boolean).join('\n\n---\n\n'));
   }
@@ -1176,7 +1633,7 @@ export function knowledgeText(opts = {}) {
   //       （那条 `needMine` 判据），那样 `chosen` 里已经有一份 ——
   //       不去重就是**同一份内容塞两遍**（探针抓到的就是这个）。
   const gf = groupFiles.get(gid);
-  if (gf && !chosen.some((f) => f.name === gf.name)) {
+  if (gf && !skipGroups && !chosen.some((f) => f.name === gf.name)) {
     parts.push(['# 【这个群自己的资料】', '', stripLearned(gf.content)].join('\n'));
   }
 
@@ -1193,7 +1650,7 @@ export function knowledgeText(opts = {}) {
   //    （那既会撑爆提示词，也是隐私问题：A 的私聊记忆不该让 B 看见）。
   const dmId = String(opts.dmUserId ?? '').trim();
   const dmKey = dmId ? `dm:${dmId}` : '';
-  if (dmKey && dmKey !== gid) {
+  if (dmKey && dmKey !== gid && !skipGroups) {
     const dm = groupFiles.get(dmKey);
     // 同上：私聊记忆文件里的 learned 部分交给下面统一处理
     if (dm) parts.push(['# 【你跟这个人的私聊记忆】', '', stripLearned(dm.content)].join('\n'));
@@ -1202,6 +1659,7 @@ export function knowledgeText(opts = {}) {
     if (odm) parts.push(['# 【你跟这个人私聊时观察到的】', '', odm.content].join('\n'));
   }
 
+  if (!skipLearned) {
   // ── 学来的知识（★ 2026-09-27 B 方案：按 scope 分片）────────────────
   //
   //    原来只有**一个** `learned.md`，于是 A 群教的东西 B 群和私聊全看得到。
@@ -1258,6 +1716,7 @@ export function knowledgeText(opts = {}) {
   for (const it of learnedScopes) {
     const learned = learnedText(picks, it.scope);
     if (learned) parts.push([it.title, '', it.lead, '', learned].join('\n'));
+  }
   }
 
   // ⚠️ 2026-09-28：整个知识库**统一填一次**称呼占位符。

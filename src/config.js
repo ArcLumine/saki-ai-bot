@@ -1,10 +1,13 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, watchFile } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, isAbsolute } from 'node:path';
 import yaml from 'js-yaml';
+// ⚠️ 多 QQ 号（2026-10-07）：`accounts.js` **不 import 本文件**（否则成环），
+//    所以 ROOT 以它那份为准 —— 只留一个真相。
+import * as accounts from './accounts.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const ROOT = join(__dirname, '..');
+export const ROOT = accounts.ROOT;
 
 /** 机器人进行日程、时段和提示词时间判断所使用的 IANA 时区。 */
 export const getTimeZone = () => String(config.timeZone || 'Asia/Shanghai');
@@ -44,7 +47,9 @@ export function zonedParts(at = new Date(), timeZone = getTimeZone()) {
  * 用法：在请求体字面量里展开 —— `{ model, messages, ...thinkingField() }`
  */
 export function thinkingField() {
-  const mode = String(config.llm?.thinking ?? 'disabled').toLowerCase();
+  // llm.thinking 在管理界面里是 {peer,questPeer,quest} 对象，所以「不发字段」另用 llm.thinkingField: off
+  const raw = config.llm?.thinkingField ?? (typeof config.llm?.thinking === 'string' ? config.llm.thinking : 'disabled');
+  const mode = String(raw).toLowerCase();
   if (['off', 'none', 'false', 'no'].includes(mode)) return {};
   return { thinking: { type: 'disabled' } };
 }
@@ -148,6 +153,59 @@ export const personaDir = () => {
  */
 const nz = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
+function normalizeBiliShare(src = {}, { includeDefaults = false } = {}) {
+  const source = src && typeof src === 'object' && !Array.isArray(src) ? src : {};
+  const out = {};
+  const bool = (value) => value === true || value === 'true' || value === 1 || value === '1';
+  const number = (key, min, max, fallback) => {
+    if (source[key] === undefined || source[key] === null || source[key] === '') {
+      if (includeDefaults) out[key] = fallback;
+      return;
+    }
+    const value = Number(source[key]);
+    if (Number.isFinite(value)) out[key] = Math.min(max, Math.max(min, value));
+  };
+
+  if (source.enable !== undefined || includeDefaults) out.enable = bool(source.enable);
+  if (source.keywords !== undefined || includeDefaults) {
+    const values = Array.isArray(source.keywords)
+      ? source.keywords
+      : String(source.keywords ?? '').split(/[\n,，、]/);
+    out.keywords = [
+      ...new Set(
+        values
+          .map((value) => String(value ?? '').trim())
+          .filter((value) => value.length >= 2 && value.length <= 40),
+      ),
+    ].slice(0, 30);
+  }
+  number('minPerDay', 0, 20, 1);
+  number('maxPerDay', 0, 20, 1);
+  number('startHour', 0, 23, 9);
+  number('endHour', 1, 24, 23);
+  number('cooldownMs', 10 * 60 * 1000, 24 * 60 * 60 * 1000, 4 * 60 * 60 * 1000);
+  number('maxResults', 4, 20, 8);
+  number('chance', 0, 1, 0.5);
+  number('gapMs', 300, 10000, 1500);
+  if (source.deny !== undefined || includeDefaults) out.deny = String(source.deny ?? '').trim().slice(0, 80);
+
+  if (includeDefaults) {
+    for (const [key, value] of Object.entries({
+      minPerDay: 1,
+      maxPerDay: 1,
+      startHour: 9,
+      endHour: 23,
+      cooldownMs: 4 * 60 * 60 * 1000,
+      maxResults: 8,
+      chance: 0.5,
+      gapMs: 1500,
+    })) {
+      if (out[key] === undefined) out[key] = value;
+    }
+  }
+  return out;
+}
+
 // ⚠️ 用户**显式写过的**配置（原始 YAML）—— 给「收紧度」滑块用，
 //    滑块只在用户没手写那一项时才接管它。
 let __explicit = {};
@@ -188,6 +246,30 @@ const DEFAULTS = {
     //    （真实踩过：群里显示「⚠️ 模型调用出错了，请稍后再试」）。
     //    现在 `streamChat` 会按 token 预算放大超时，上限用这个值。
     timeoutMax: 180000,
+    // ⚠️⚠️ 2026-10-07 加（用户要求，专门对付「中转站盗版慢速模型」）：
+    //    **当前这一轮已经生成超过 `slowQueueDropMs`（默认 60 秒）** ⇒
+    //    后面排队等生成的消息**全部丢掉**；而且要等**下一条新消息**当"试探轮"、
+    //    它正常生成完并发出去了，才**恢复**（详见 `bot.js` 的
+    //    `dropIfSlowGenerating()` / `noteGeneratingDone()`）。
+    //
+    //    用户原话：「如果已经接到了大于两分钟才开始生成消息（因为前面消息
+    //    生成太慢），**直接把后面排队生成的消息全部丢掉**，当有新消息进入
+    //    开始生成再恢复」；补了一句「**就像群里现在黑祥的状态一样，要避免
+    //    这种情况**」—— 慢模型会让队列一直追不上，每隔几分钟才回一次，
+    //    回的还是几分钟前那批已经过时的话，而且合并了太多不相关的消息
+    //    ⇒ 表现就是**答非所问 + 永远在补**。
+    //    后来又补：「那条超过阈值的生成完了**也不要恢复**，只有发完并且新消息
+    //    再生成完之后再恢复」、「**反正新消息之前的要全部丢弃**」。
+    //
+    //    ⚠️ **默认开**（界面上「模型 → 大模型」卡片里可以关）。
+    //    ⚠️ 阈值默认 **60 秒**（用户 2026-10-07 拍板：「把默认时长改为 60 秒吧」）。
+    slowQueueDrop: true,
+    slowQueueDropMs: 60000,
+    // ⚠️ 2026-10-09 加（用户：「把这个判据改成**超过 3 条消息的个数**，
+    //    时间还是没有精确对应到」）：**按条数**丢积压（默认 3 条）。
+    //    ⚠️ 上面那个 `slowQueueDropMs` 现在**只用于日志**（不再当判据）——
+    //      留着是为了老配置不报错，别再拿它当阈值。
+    slowQueueDropCount: 3,
     systemPrompt: '你是一个 QQ 聊天机器人，用简洁自然的中文回答。',
   },
   // ⚠️⚠️ 生图 —— 群里让她「拍个照」（2026-09-22 用户要求）。
@@ -234,7 +316,11 @@ const DEFAULTS = {
       // ⚠️ 为什么必须把人物和环境**分开写画风**：参考立绘本身是动漫的，模型天然会把
       //    **整张图**都拉成动漫 ⇒ 环境就"二次元"了、写实的好处全丢。所以要显式钉住。
       self:
-        '照片里的人是你本人，保持二维动画画风（动画线稿、赛璐璐上色）；' +
+        // ⚠️ 2026-10-02：「照片里的人是你本人，」这半句**删了** ——
+        //    光说"是你本人"对模型等于没说（它没见过"你"），身份得靠**指认参考图**
+        //    （见 `imagegen.buildPrompt()` 里那句 anchor）。
+        //    ⇒ 这里只留画风，身份交给 anchor，顺带把提示词长度压回 300 字以内。
+        '保持二维动画画风（动画线稿、赛璐璐上色）；' +
         '环境是完全写实的真实照片（真实材质、真实光影）。' +
         // ⚠️ 2026-09-22 用户看完第一张自拍后报的两条，都加在这儿：
         //  ①「自拍肯定看不到手机，这明显是别人给她拍的样子」——
@@ -297,6 +383,22 @@ const DEFAULTS = {
   //    低于下面档位就抱怨一次（按档位只报一次，落盘 state/balance.json）
   balance: {
     enable: true,
+    // ⚠️ 2026-10-06（用户：「群友用的中转站的 api，给中转站的余额接入适配一下」）：
+    //    余额接口**按服务商分好几种**，以前这里写死 DeepSeek 的 `/user/balance`，
+    //    群友换中转站之后永远查不出来 ⇒ 现在做成适配层（见 `src/balance.js`）。
+    //      auto（默认）        → 挨个试 deepseek → newapi → openai-billing，谁通用谁
+    //      deepseek           → `/user/balance`（官方，老行为）
+    //      newapi             → `/api/user/self`（new-api / one-api 面板，÷500000 = 美元）
+    //      openai-billing     → `/dashboard/billing/*`（很多中转站兼容）
+    //      custom             → 自己填 url / path / divide
+    //    ⚠️ `newapi` 要的是**面板访问令牌**（不是 sk- key），填在 `token` 里。
+    //    ⚠️ 换成中转站后币种多半是**美元**，`low` / `critical` 那两个阈值要自己按币种调。
+    provider: 'auto',
+    url: '',      // 余额查询地址；留空 = 沿用 llm.baseURL
+    token: '',    // 余额查询专用令牌；留空 = 沿用 llm.apiKey
+    path: '',     // 仅 custom：从返回 JSON 里取数值的路径（如 data.quota）
+    divide: 1,    // 仅 custom：取到的数值除以它才是金额
+    currency: '', // 强制币种（留空 = 按 provider 自己的）
     checkIntervalMs: 1800000, // 半小时查一次
     low: 5,                   // 低于 5 元抱怨一次
     critical: 2,              // 低于 2 元再抱怨一次
@@ -310,6 +412,27 @@ const DEFAULTS = {
   trigger: {
     privateChat: true,
     groupChat: true,
+      /**
+       * 可触发私聊应答的 QQ 号白名单（2026-09-20 从上游 fork 挑过来的）。
+       * ⚠️ **空名单 = 不回应任何私聊** —— 故意的：开了私聊之后任何陌生人都能触发她说话
+       *    （烧钱，也容易被当成免费客服）。要谁能私聊就把 QQ 写进来（服主记住写自己）。
+       */
+      allowPrivateUsers: [],
+    /**
+     * ⚠️ 2026-10-14 加（用户原话：「**每个好友是否主动回复不用一号一份，而且默认开启**」）。
+     *
+     * `true`（默认）= **只要是好友，私聊就正常回**（好友列表 = 天然白名单）——
+     *    不用再往 `allowPrivateUsers` 里一个个写，也**不用按号配**。
+     *    用户为什么敢默认开：「因为这是一个**新QQ号，没有残留好友**，
+     *    每个新好友都是**需要同意**的」⇒ 名单本身就是他亲手把关过的 ✓
+     *
+     * ⚠️ 这只管"**要不要回他**"，**不是**私聊工作模式
+     *    （那个是一号一份、默认关，见下面的 `privateWork`）。
+     * ⚠️ 好友列表是**协议端的真实好友**（`get_friend_list`），
+     *    🚫 **不碰** `affinity`（好感度），🚫 **不是** `friend.js` 那个"每天挑一个主动私聊"。
+     * 设成 `false` = 退回老行为：私聊只回 `allowPrivateUsers` 名单里的人。
+     */
+    allowFriendsPrivate: true,
     allowGroups: [],
     /**
      * 可触发私聊应答的 QQ 号白名单。
@@ -427,6 +550,20 @@ const DEFAULTS = {
     /** 单次搜索超时 */
     timeoutMs: 20000,
   },
+  /** 按群自动分享 B 站视频；默认关闭，目标仅限 1 档群。 */
+  biliShare: {
+    enable: false,
+    keywords: [],
+    minPerDay: 1,
+    maxPerDay: 1,
+    startHour: 9,
+    endHour: 23,
+    cooldownMs: 4 * 60 * 60 * 1000,
+    maxResults: 8,
+    chance: 0.5,
+    gapMs: 1500,
+    deny: '',
+  },
   /** 识图：把群友发的图交给带视觉的模型识别 */
   vision: {
     enable: true,
@@ -444,6 +581,227 @@ const DEFAULTS = {
     name: '',
     /** 定时上报的间隔（毫秒），0 = 关闭 */
     reportIntervalMs: 0,
+  },
+  /**
+   * ⚠️⚠️ 2026-10-13 加：**本机 agent 任务**（`src/agent-bridge.js`）。
+   *
+   * 用户定的规则（原话）：「可以让 bot 接入本机上的 agent 完成一些简单的任务吗」
+   *   「…**要支持自然语言**，现在**只允许主人 QQ 能直接开始任务**。
+   *    bot 发送的**确认开始任务**发的消息**前面加两个空格**…
+   *    其他人要开始的话 bot 先发一条 **@主人** 的消息问主人是否同意，
+   *    回复**同意**的消息之后再开始…加指令：`/任务撤回`。」
+   *
+   * ⚠️ **默认关** —— 一开就等于"群里的人能让这台机器上的 agent 干活"，
+   *    要开请在 `accounts/<号>.yml` 里显式开（`agent.enable: true`）✓
+   */
+  agent: {
+    enable: false,
+    /** agent 的工作目录（cwd，也是它**唯一**能写的地方；工作区外的写会被沙箱拒） */
+    workspace: '',
+    /** DSH 的 node / bin —— 留空就用本机便携版的默认路径 */
+    node: '',
+    dsh: '',
+    /**
+     * 用哪个 profile 跑任务。
+     *
+     * ⚠️⚠️ 默认 **headless**（2026-10-13 又改回来了，这次有实测证据）：
+     *
+     *   | 走法 | 会不会**真动手** | 会话落盘 / GUI 里能看见 |
+     *   | --- | --- | --- |
+     *   | `--profile headless <任务>`（**用这个**） | ✅ 有工具：实测让它建文件，文件真出来了 | ✅ 落盘了（跑完 `sessions/<工作区>/` 下多一个会话） |
+     *   | `agenttask` + stdio JSON-RPC | ❌ **一个工具都没有**（抓原始帧数过，`tools` 零匹配）⇒ 它只会"说"，20 秒退 0、一个字都没做 | ✅ |
+     *
+     *   ⇒ 拿"过程事件流"换"真能干活"，这笔账必须这么算。
+     *     会话 id 由 headless 自己生成 ⇒ 跑完**扫 `$DSH_HOME/sessions` 里新增的会话目录**取回来，
+     *     再登记进 GUI 的工作区列表（`registerSession`）。
+     */
+    profile: 'headless',
+    /** 单个任务最长跑多久（毫秒；到点杀掉） */
+    timeoutMs: 180000,
+    /** 回群时的截断长度（agent 的输出可能很长，群消息塞不下） */
+    maxOutputChars: 1200,
+    /**
+     * ⚠️ 2026-10-13 加：任务做完后，把**产出文件发进群**的上限。
+     *
+     * 用户要求：「做完的东西也发到群里」—— 光说一句"做好了"没用，他要的是那份文件。
+     *   · `maxFiles`：一次最多发几个（群里刷屏很烦，默认 3；设 0 = 不发文件）
+     *   · `maxFileMB`：单个文件多大就不发了（群文件传大文件很慢，QQ 侧也有上限）
+     * ⚠️ 超限的**不发文件**，但会**发一句话说明文件在哪个文件夹**（绝不假装发出去了）。
+     */
+    maxFiles: 3,
+    maxFileMB: 20,
+    /**
+     * ⚠️ 2026-10-13 加：**群文件夹**（用户：「上传文件时可以自动在群文件创建一个文件夹然后
+     *    只往这里面上传文件吗」+「群文件夹名字**直接命名为当前她自己的群昵称**」）——
+     *    传产物之前先确保群文件根目录里有那个文件夹，然后**只往它里面传** ✓
+     *    · **留空 = 用她在那个群里的昵称**（她自己改昵称，文件夹名也跟着变）；
+     *    · 写死一个名字 = 就用那个名字；
+     *    · 名字按群缓存（`state/agent.json` 的 `folders`）✓
+     *    · 建失败 / 传不进去 ⇒ **退回根目录传**（绝不因为文件夹的问题把文件丢掉）✓
+     */
+    groupFolder: '',
+    /**
+     * ⚠️⚠️ 2026-10-13 加（用户：「**接任务还是要严格一点，必须要 @ 她才能接任务**」）。
+     *
+     * `true`（默认）= 只有**明确 @ 了她**（at 段指她，或正文里 @ 她的任一叫法）才接活；
+     *   连"引用她那条消息"也算（那本来就是冲她说的）✓
+     * 例外（不受它管）：`/任务撤回` 这类斜杠指令、他**补一句**（她刚反问过的）、
+     *   主人回「同意 / 不行」（挂在待批的那件事上）。
+     * ⚠️ 设成 `false` 就回到老行为：不带 @ 的祈使句也算派活（那种容易把群里的闲聊误接成任务）✗
+     */
+    requireAt: true,
+    /**
+     * ⚠️⚠️ 2026-10-14 加（用户原话：「**直接把 agent 设定为 saki 自己的电脑**，
+     *    由**她自己决定**什么时候该用电脑、该去读那一段对话或者**直接发送消息到对话**」）。
+     *
+     * `true`（默认）= **她自己决定要不要动电脑**：有人跟她说话、而这句话"光靠聊天答不好、
+     *   得动那台电脑"（查文件/跑一下/写一份/翻以前的活…）⇒ 她自己上手去动
+     *   （判定由模型做，见 `agent-bridge.js` 的 `judgeSelfUse()`）。
+     * ⚠️ **明确派活那条路不受它管** —— 那条照旧要 @ 她 + 要确认（`requireAt` 那套一个字不改）✓
+     * ⚠️ 代价：**每轮她准备回话时多一次小模型调用**（约 1 秒 / 极便宜）—— 用户 2026-10-14 已确认接受。
+     * 设成 `false` = 退回老行为：只有他派活才动电脑（她不会自己动手）。
+     */
+    selfUse: true,
+    /** 她自己动手的冷却（默认 90 秒；防止一句话里连开好几次电脑） */
+    selfUseCooldownMs: 90000,
+    /** 每天最多几个任务（每次都是一次真实模型调用，会花钱；**0 = 不限次数**） */
+    maxPerDay: 3,
+    /** 除了主人，还允许谁**直接**开始任务（默认空 = 只有主人） */
+    allowUsers: [],
+  },
+  /**
+   * ⚠️⚠️ 2026-10-14 加：**私聊工作模式**（`src/private-work.js`）。
+   *
+   * 用户原话：「在QQ号那里先加一个**私聊工作模式**开关…开启之后**默认加入的所有好友
+   *   都开启主动回复功能**，但是一定**不是之前的主动私聊功能**，也**不要调用之前的好感度模块**」
+   *   +「**私聊工作模式开关还是一号一份，默认关闭**」（2026-10-14 用户明确划清的两件事：
+   *     ✅「每个好友是否回复」= 上面 `trigger.allowFriendsPrivate`，**不用一号一份、默认开**；
+   *     ✅「私聊工作模式」= **就是这一段**，**一号一份、默认关**）。
+   *
+   * ⇒ 所以这个开关写在 **`accounts/<QQ>.yml`** 里（那个接单号自己那份），
+   *    `config.yml` 这里只是**默认值**（`false`）。别的号不写就永远是关的 ✓
+   *
+   * ⚠️ 这个开关一开 = **好友能让这台机器上的 agent 干活**（跑命令、写文件）。
+   *    所以配套的硬边界写在 `private-work.js` 里，别在别处绕过：
+   *    · 工作区锁在**项目外**那个私聊目录（只能写它）；
+   *    · 对方发来的文件一律当**资料**，不当指令；
+   *    · 群聊那套 agent（`agent-bridge.js`）一个字都不受影响。
+   */
+  privateWork: {
+    enable: false,
+    /** 只认好友（好友列表 = 白名单；设 false 就谁都能触发，不建议） */
+    friendOnly: true,
+    /** 好友列表多久刷一次（毫秒） */
+    friendRefreshMs: 600000,
+    /**
+     * ⚠️ 单个活最长跑多久 —— 用户要求「**agent 那边的对话时长上限延长至 15 分钟**」
+     *    （群任务那个是 3 分钟，见 `agent.timeoutMs`；这两条是分开的）
+     */
+    agentTimeoutMs: 900000,
+    /**
+     * ⚠️ 跟对方说的「大概多久」——**是真人干这个活要多久，不是 agent 要多久**。
+     *    这几个值只是兜底区间，真正的数由模型按活的大小估（见状态机那一步）。
+     */
+    etaMinMin: 8,
+    etaMaxMin: 240,
+    /** 说好的时间到点后再抖一下（0.25 = ±25%），免得"每次都掐着秒发" */
+    etaJitter: 0.25,
+    /** 对方发来的单个文件上限（MB；超了就告诉他传不上来，别硬下） */
+    maxIncomingMB: 50,
+    /** 回过去的单个文件上限（MB） */
+    maxSendMB: 30,
+    /** ⚠️ 产物**多于这个数才打包**（用户：「3个以上的再打包，而且压缩包的名字要像人写的」） */
+    maxFilesDirect: 3,
+    /**
+     * ⚠️ 2026-10-15 加（用户：「**多单并发先设为 5 吧**，也加个设置框」）。
+     *
+     * **同时最多跑几个 agent** —— 5 个人同时来问，就是 5 个 agent 一起跑 ✗
+     * 超出的**先排队**（不丢单），等有位置了自动开始 ✓
+     */
+    maxConcurrent: 5,
+    /** 一天最多接几单（0 = 不限；每次都是一次真 agent 运行，会花钱） */
+    dailyMax: 5,
+    /**
+     * 工作区的根目录（**必须在项目外** —— 见 `private-work.js` 开头那段：
+     * 工作区要是落在项目里，agent 会把 `qq-ai-bot/AGENTS.md`（70KB、含用户私有资料）
+     * 整份注入进去 ✗）。留空 = `%LOCALAPPDATA%\DeepSeekHarness\private-work`。
+     */
+    rootDir: '',
+    /** 人设正文从哪读（留空 = `$DSH_HOME/.agent-presets/<主人>/agent.cordis.yml`） */
+    personaFile: '',
+    /**
+     * ⚠️⚠️ 2026-10-14 加：**这个号不看哪些共用知识**（用户：「把服务器的知识库移除」）。
+     *
+     * `knowledge/` 根下那些是**共用**的（服务器库、群记忆、二次元…）—— 每个号都会读到。
+     * 直接删文件会把主号的一起删掉 ✗ ⇒ 只能按号屏蔽（实现在 `knowledge.js` 的 `skipKnowledge()`）。
+     *
+     * ⚠️ 匹配是**宽松**的（相等或包含）；`group-memory` / `groups/` 一个词同时关掉
+     *    「群记忆 + 这个群自己的资料 + 私聊记忆」；`learned` 关掉学习档案。
+     * ⚠️ **默认空 = 都看** ⇒ 别的号零影响 ✓
+     * ⚠️ 它**不看 `enable`** —— 清单写了就生效（工作号连"还没打开工作模式"的那段时间也不该带服务器知识）。
+     */
+    skipKnowledge: [],
+  },
+  /**
+   * ⚠️⚠️ 2026-10-14 加：**人工接管**（用户要求）。
+   *
+   * 用户原话：「只加一个人工接管的开关，在QQ号页 **同样一号一份，默认关闭**。
+   *   打开时机器人**直接取消所有主动回复包括@**，但是**聊天消息要落盘**，
+   *   不然回到 bot 模式，bot **会不记得之前的聊天记录**」。
+   *
+   * 语义（一件事三面，改的时候三面一起看）：
+   *   ① **入站**：照常收、**照常落盘**（进上下文）——  这一条是用户特别点名的，
+   *      不落盘的话接管结束它就"失忆"了 ✗；
+   *   ② **回复**：一条都不发 —— 包括 @她、私聊、命令，也包括**主动搭话 / 日常事件 /
+   *      剧情 / 定时提醒 / 主动私聊 / QQ空间**（人在用这个号，它一出声就露馅）；
+   *   ③ **出口**：`sendText` 和 `call('send_*')` 两道都拦（见 `bot.js` 里那两处），
+   *      免得哪个定时任务绕过第一道。
+   *
+   * ⚠️ **一号一份**：它不在 `SHARED_SECTIONS` 里 ⇒ 界面保存时会自动写进
+   *    `accounts/<QQ>.yml`（只有那个号变），别把它挪进共用 ✓
+   */
+  humanTakeover: {
+    enable: false,
+  },
+  /**
+   * ⚠️⚠️ 2026-10-15 加：**B 站视频分享**（用户要求）。
+   *
+   * 用户原话：「这个插件可以让 bot 也能看到 b 站视频，或者能自己分享视频吗」
+   *   → 选「**只发链接**」（卡片被 QQ 挡了，见 `src/bili-share.js` 开头那段实测）
+   *   → 「加个**看的视频的关键词**，要不然容易转群友都不感兴趣的视频」
+   *   → 「关键词是**列表**；**只在一档群发**，和日常事件一样有开启按钮，**默认关闭**」
+   *
+   * ⚠️⚠️ 2026-10-15 **改成按群**了（用户：「**b站分享也要分群调节**」）——
+   *    实际生效的是 `paramsFor('biliShare', 群号)`：
+   *      **这里的这份 = 内置默认**（没配过的群看它）→ **`groupParams.<群>.biliShare` 覆盖** ✓
+   *    ⇒ 界面上「B站分享」页是**先选群、再调那一套**（跟「日常事件」页一个样子）✓
+   *    ⚠️ 老版本里写在这份上的值**照旧生效**（它就是默认那一层）⇒ 不会把谁配好的弄丢 ✓
+   *    ⚠️ 默认关闭 + **关键词为空** —— 两个条件缺一不发（没关键词就不知道该看什么）✓
+   */
+  biliShare: {
+    enable: false,
+    /** 看哪类视频（一行一个；逗号/顿号也行）。⚠️ 空 = 不发 */
+    keywords: [],
+    /** 每天发几条（在这个区间里随机；两个都是 1 = 每天正好一条） */
+    minPerDay: 1,
+    maxPerDay: 1,
+    /** 只在几点到几点之间发（默认 9~23；半夜不发） */
+    startHour: 9,
+    endHour: 23,
+    /** 两条之间至少隔多久（默认 4 小时） */
+    cooldownMs: 4 * 3600 * 1000,
+    /** 搜几条里挑（默认 8；挑播放量最高的那条） */
+    maxResults: 8,
+    /**
+     * ⚠️ 2026-10-15 加（用户：「再加一个**一半概率**会触发的 bot 自己对这个视频想说的话」）：
+     * **多大概率带一句她自己的想法**（0~1）—— 0 = 永远只发链接，1 = 每条都带 ✓
+     * ⚠️ 想不出来 / 模型挂了 ⇒ **那条就不发**，只发链接（绝不发空消息）✓
+     */
+    chance: 0.5,
+    /** 分条间隔：她那句一条、链接一条，中间隔多久（毫秒，带随机抖动） */
+    gapMs: 1500,
+    /** 标题里不要的词（正则，可选）—— 挡"蹭字"的假结果 */
+    deny: '',
   },
   /** QQ 空间：偶尔把群里的趣事发到空间 */
   qzone: {
@@ -513,6 +871,34 @@ const DEFAULTS = {
     requeueMax: 2,
     enable: false,
     group: '',
+    // ⚠️ 2026-10-06 加（用户：「我觉得道别太快了」）—— 两个机器人互刷到什么程度算
+    //    「聊够了、该收尾」（见 `bot.js` 的 `botOnlyChain()`）。三条一起看：
+    //      botChainWindow      取最近几条发言来判断（默认 14）
+    //      botChainMin         机器人发言加起来够几条（默认 10 = 五个来回）
+    //      botChainMinSpanMs   或者：窗口首尾跨够久（默认 3 分钟）
+    //    ⚠️ 后两条是**或**关系：快刷靠条数、慢聊靠时间，设成"与"会有一头永远停不下来。
+    //    ⚠️ 窗口必须大于 botChainMin，否则条数那条永远够不到。
+    //    ⚠️ 原来是 8 / 4（两个来回就道别），实测 4 分钟里道别 2 次 ⇒ 太急。
+    botChainWindow: 14,
+    botChainMin: 10,
+    botChainMinSpanMs: 180000,
+    botChainHardMin: 24,
+    botChainHardSpanMs: 600000,
+    botChainCooldownMs: 60000,
+    /**
+     * ⚠️⚠️ 2026-10-13 加（用户报：「问工资这个…好像不会进上下文」→ 查出来的真因）：
+     *
+     *   她**刚回过话**之后，这条消息**不算"别人在对话、不插嘴"** —— 这道豁免原来
+     *   **复用了 `chat.followUp.idleMs`**，而实盘那个值是 **25 秒**（用户自己调紧的）⇒
+     *   他 47 秒后接着说的话，既不算"对话延续"、又撞上"群里两个真人（他 + 爱音）
+     *   在互相对话"那道闸 ⇒ **直接被丢**（日志：`两个人在互相对话，且跟它无关，不插嘴`）。
+     *   从他那边看，就是"她刚报完工资，接着问她就不理了"，很像"那条没进上下文"
+     *   （其实**进了** —— `state/recent.json` 里她报的账原句就在）。
+     *
+     *   ⇒ 「她刚回过话」是**独立的一件事**，别跟"对话延续窗口"共用一个 25 秒：
+     *     那个窗口管"要不要**主动**接着聊"，这个宽限管"**别人说话时我别乱插嘴**"。
+     */
+    replyGraceMs: 120000,
     question: {
       enable: true,
       keywords: [],
@@ -601,6 +987,16 @@ const DEFAULTS = {
   ownerAliases: [],
   botQQ: '',
   adminQQ: '',
+  /**
+   * ⚠️ 2026-10-07 加：**主号是哪个 QQ**（多号模式下唯一"用老路径"的那个）。
+   *
+   * 为什么要显式写：主号的数据文件**不搬到子目录**（`state/*.json`、
+   * `knowledge/group-memory.md`、`logs/bot-<日期>.log` 全都不动）——
+   * 这正是"加多号"对老用户零迁移的原因。但"谁是主号"必须有个**确定**的出处：
+   * 靠目录里第一个文件猜（字典序）会随加号而变 ⇒ 那会让主号的数据**换个目录读**。
+   * 所以写在这儿，不写则退回"账号目录里第一个"。
+   */
+  mainAccount: '',
   chunking: {
     maxChars: 260,
     delayMs: 700,
@@ -625,6 +1021,89 @@ function merge(base, override) {
   return out;
 }
 
+/**
+ * 算出**这个进程在控制哪个 QQ 号**，并把那个号的私有配置读出来。
+ *
+ * 判据只有两个来源（别再加）：
+ *   1. 环境变量 `QQBOT_ACCOUNT` —— 启动器拉起某个号的进程时设的（多号的主路径）；
+ *   2. `config.yml` 的 `mainAccount` —— 没设环境变量时用它（老用户升级上来就是这个）。
+ *
+ * ⚠️ 一个号都没有（`accounts/` 是空的、`mainAccount` 也没写）时返回 `id = ''`
+ *    ⇒ 整个项目退回**单号老行为**（路径也全是老的）。这条是"向后兼容"的根：
+ *    所有既有回归套件都不设账号，跑的就是这条路。
+ */
+function resolveAccount(shared) {
+  const fileMain = String(shared?.mainAccount ?? '').trim();
+  const want = String(process.env.QQBOT_ACCOUNT ?? '').trim();
+  const wantOk = /^\d{5,12}$/.test(want) ? want : '';
+  const ids = accounts.ids();
+  // ⚠️⚠️ 「谁是主号」的兜底链里 `wantOk` 必须排在 `''` **之前**：
+  //    没写 `mainAccount`、账号目录也还是空的时候（= 老用户还没做多号迁移），
+  //    env 指定的那个号**就是主号** ⇒ 它继续走老路径。
+  //    少了这一条会出**最吓人的那种故障**：给主号进程设一个 `QQBOT_ACCOUNT`，
+  //    它的数据目录就从 `state/` 跳到 `state/accounts/<QQ>/` ——
+  //    表现是「好感度、剧情、群记忆全线归零」（其实是读了一个空的新目录）。
+  const main = /^\d{5,12}$/.test(fileMain) ? fileMain : (ids[0] || wantOk);
+  const id = wantOk || main;
+  if (!id) return { id: '', main: '', isMain: true, private: null, privateFile: '' };
+  return {
+    id,
+    main,
+    // ⚠️ 主号 = **老路径**（它的数据文件一个都不搬）。env 设没设都不影响这条判定 ——
+    //    启动器会给主号的进程也设 env（日志/界面里要认得出它是谁），
+    //    但它的 `state/`、`knowledge/`、日志名仍然是老的那套。
+    isMain: id === main,
+    private: accounts.read(id),
+    privateFile: accounts.fileOf(id),
+  };
+}
+
+/**
+ * 「**所有 QQ 共用**」的那几段（用户拍板：只有模型页那一类共用）。
+ *
+ * ⚠️ 私有文件（`accounts/<QQ>.yml`）里写了这些段也**一律不认** —— 这不是洁癖：
+ *    哪天某个号的私有文件里混进一个 `llm.apiKey`，那个号就会**悄悄不跟随
+ *    "模型页"的改动**，表现是「我明明改了模型，怎么这个号没变」——
+ *    而界面上那个号的一切看起来都正常。宁可在启动日志里吵一行，也不要这种坑。
+ *
+ * `webui` 是特例：`enable`/`host` 共用，但 **`port` 必须按号**（每个号一个界面端口）。
+ */
+export const SHARED_SECTIONS = Object.freeze([
+  'llm',
+  // ⚠️⚠️ 2026-10-14：`imagegen` 和 `balance` **从共用段里挪出来了** ——
+  //    用户的 **工作号**要求「娱乐功能全关」：生图、余额抱怨这些要能**单独**在那个号上关，
+  //    而共用段是"按号配了也会被丢掉"的（`privateSectionsOnly` 会把它们 eligible 掉）✗
+  //    ⇒ 实测踩过：`accounts/<号>.yml` 里写了 `imagegen.enable: false`，加载出来还是 true。
+  //    ⚠️ 对已有号**零影响**：它们的账号文件里没这两个段 ⇒ merge 之后照旧用 `config.yml` 那份 ✓
+  'search',
+  'saucenao',
+  'bilibili',
+  'vision',
+  'provider',
+  'cleanup',
+  'machine',
+]);
+
+/** 只保留私有文件里**真正属于这个号**的段；返回 `{ body, ignored }` */
+function privateSectionsOnly(priv) {
+  if (!priv || typeof priv !== 'object') return { body: null, ignored: [] };
+  const ignored = [];
+  const body = {};
+  for (const [k, v] of Object.entries(priv)) {
+    if (SHARED_SECTIONS.includes(k)) {
+      ignored.push(k);
+      continue;
+    }
+    if (k === 'webui') {
+      // 只认 port（其余共用）
+      if (v && typeof v === 'object' && v.port !== undefined) body.webui = { port: v.port };
+      continue;
+    }
+    body[k] = v;
+  }
+  return { body, ignored };
+}
+
 function load() {
   const path = CONFIG_FILE;
   let raw;
@@ -644,7 +1123,51 @@ function load() {
     throw new Error('config.yml 顶层必须是一个对象（键值对）');
   }
 
-  const cfg = merge(DEFAULTS, parsed);
+  let cfg = merge(DEFAULTS, parsed);
+
+  // ── 多 QQ 号：把这个号**私有**的那份覆盖上来（2026-10-07）──────────
+  //
+  //   `config.yml`   = 共用（大模型 / 生图 / 搜索 / 识图 / 协议端 / 界面 …）
+  //   `accounts/<QQ>.yml` = 这个号私有（灵敏度 / 按群设定 / 剧情 / 好感度 …）
+  //
+  //   ⚠️ 顺序是 **默认值 ← 共用 ← 私有**：私有文件里只写要改的键，
+  //      没写的自动跟着共用走（用户要的"模型页所有号共用"就是这么实现的）。
+  //   ⚠️ 现在（还没做迁移时）`config.yml` 里仍然带着全套私有段，
+  //      所以**主号的行为逐字不变**；迁移（把私有段搬进 accounts/）是可选的下一步。
+  const acct = resolveAccount(parsed);
+  const priv = privateSectionsOnly(acct.private);
+  if (priv.body) cfg = merge(cfg, priv.body);
+  cfg.__account = { ...acct, ignoredPrivate: priv.ignored };
+
+  // ── ⚠️⚠️ 2026-10-14 加（用户要求：「**非主号默认不开日常事件**」）──────────
+  //
+  //   日常事件是**主号那条人设线**的功能（"她今天遇到的一件小事"），
+  //   而 `config.yml` 里那份 `life` / `groupParams.*.life` 是**主号配的**。
+  //   原来非主号会**照样继承** ⇒ 新加一个号（爱音那类群友号）就自动开始在群里
+  //   发日常事件 ✗
+  //
+  //   ⇒ 非主号**一律不继承**：只有它自己在 `accounts/<QQ>.yml` 里写过的才算 ——
+  //     没写 = 关。要开就在那个文件里显式写 `life: { enable: true }`
+  //     （或者按群 `groupParams.<群>.life.enable: true`）；
+  //     界面「按群设定」保存的**就是那个文件** ⇒ 想给某个号按群开，走界面就行 ✓
+  //
+  //   ⚠️ 为什么写在 `load()` 里、而不是 `paramsFor()` 里：
+  //     `paramsFor()` 若去读 `ACCOUNT.private`，拿到的是**启动那一刻的快照**，
+  //     而 `reloadConfig()` 只换顶层键、`ACCOUNT` 这个 `const` 不跟着更新 ⇒
+  //     界面上把开关打开，它**看不见**（实测被 `test/accounts.js` 的【9】抓到 ✗）
+  //     ⇒ 在这里按"刚读进来的这份 `acct`"算，热重载自然就是对的 ✓
+  //   ⚠️ 只动 `enable` 这一个键：条数 / 时段 / 冷却这些参数该继承还是继承 ✓
+  //   ⚠️ 主号一个字都不变（`acct.isMain` 为真时整段跳过）✓
+  if (!acct.isMain) {
+    const own = acct.private && typeof acct.private === 'object' ? acct.private : {};
+    const ownGroups = own.groupParams && typeof own.groupParams === 'object' ? own.groupParams : {};
+    cfg.life = { ...(cfg.life ?? {}), enable: own.life?.enable === true };
+    for (const [g, v] of Object.entries(cfg.groupParams ?? {})) {
+      if (!v || typeof v !== 'object' || !v.life) continue;
+      v.life = { ...v.life, enable: ownGroups[g]?.life?.enable === true };
+    }
+  }
+  cfg.biliShare = { ...DEFAULTS.biliShare, ...normalizeBiliShare(cfg.biliShare, { includeDefaults: true }) };
 
   // 旧配置只写 requireAtInGroup 时，不能被默认的 respondTo=2 遮住。
   const parsedTrigger = parsed.trigger;
@@ -745,6 +1268,21 @@ function load() {
   cfg.context.enable = cfg.context.enable !== false;
   cfg.context.maxMessages = Math.max(0, Number(cfg.context.maxMessages) || 0);
   cfg.context.maxAgeMs = Math.max(60000, Number(cfg.context.maxAgeMs) || 1800000);
+
+  // ── 私聊的上下文窗口（2026-10-03 加）──────────────────────────────
+  // 用户报：「前一天和她说睡觉了，后一天问她睡了多久，也不能计算出来」——
+  // 根因之一是**私聊原来压根没有上下文**（`recent` 只存群）。
+  // 现在私聊也存（桶是 `dm:<QQ号>`），窗口给得比群宽：
+  //   · 私聊一天可能就说十几句 ⇒ 条数要更宽（默认 40）
+  //   · "昨晚那句"必须在 ⇒ 时间上限默认 **72 小时**（群那份是 12 小时）
+  //   · 一天的话比一屏群聊长 ⇒ 字数上限默认 3000（群那份 1200）
+  cfg.context.dm = cfg.context.dm ?? {};
+  cfg.context.dm.maxMessages = Math.max(1, Number(cfg.context.dm.maxMessages) || 40);
+  cfg.context.dm.bufferMaxAgeMs = Math.max(
+    3600000,
+    Number(cfg.context.dm.bufferMaxAgeMs) || 72 * 60 * 60 * 1000,
+  );
+  cfg.context.dm.maxChars = Math.max(500, Number(cfg.context.dm.maxChars) || 3000);
   cfg.context.maxChars = Math.max(200, Number(cfg.context.maxChars) || 1200);
   cfg.context.forwardTtlMs = Math.max(60000, Number(cfg.context.forwardTtlMs) || 600000);
   // 连发消息合并（同一个人短时间内发好几条 → 合成一次回复）
@@ -823,10 +1361,22 @@ function load() {
   // 同一个人多久内只回拍一次（防刷屏）
   cfg.poke.cooldownMs = Math.max(1000, Number(cfg.poke.cooldownMs) || 30000);
   // ⚠️⚠️ 2026-09-21（用户要求）：「机器人戳回来的话在我戳了3次再触发一次就行了」
-  //    → 同一个人的戳**攒次数**，每这么多下回拍一次（拍完归零，也就是第 3、6、9… 次）。
-  //    ⚠️ 它只管"拍回去"；**文字回应不受它影响**（那个走上面的 `cooldownMs`，
-  //      用户明确说了"还是直接和之前一样给回复好一点"）。
+  //    → 同一个人的戳**攒次数**，每这么多下触发一次（触发完归零，也就是第 3、6、9… 次）。
+  //    ⚠️ 它只管"攒够那一次做什么"（见下面的 `backMode`）；**普通文字回应不受它影响**
+  //      （那个走上面的 `cooldownMs`，用户明确说了"还是直接和之前一样给回复好一点"）。
   cfg.poke.countPerBack = Math.max(1, Number(cfg.poke.countPerBack) || 3);
+  // ⚠️⚠️ 2026-09-30 加、2026-10-01 改默认值（用户先提要求、随后纠正
+  //    「**这是黑祥下的设定啊，搞错了**」）：
+  //    **攒够 `countPerBack` 次那一下做什么** ——
+  //      · `'auto'`（**默认**）→ **按人设自动分**：暖色人设（客服小祥）= 回戳；
+  //        黑祥（`identity.style.warm=false`）= 文字反击
+  //      · `'packet'`          → 强制回戳（老行为；只有 snowluma 那类支持的协议端发得出去）
+  //      · `'text'`            → 强制用**反击语气**回一句（不发包）
+  //      · `'off'`             → 攒够也当普通一次，什么都不特殊做
+  //    ⚠️ 黑祥下**永远不拍回去**（那是打闹）—— 这条写死在 `bot.js` 的 `wantBack` 里。
+  cfg.poke.backMode = ['auto', 'text', 'packet', 'off'].includes(String(cfg.poke.backMode))
+    ? String(cfg.poke.backMode)
+    : 'auto';
   // 发包能力不可用时（QQ 版本越界），退化成用文字回应
   cfg.poke.fallbackText = cfg.poke.fallbackText !== false;
   // ⚠️⚠️ 2026-09-16：**戳一戳交给模型回**（用户要求：
@@ -855,6 +1405,25 @@ function load() {
   cfg.observe.threshold = Math.max(20, Number(cfg.observe.threshold) || 200);
   // 多久检查一次（毫秒）
   cfg.observe.checkIntervalMs = Math.max(60000, Number(cfg.observe.checkIntervalMs) || 600000);
+
+  // ── 「他的资料」自动更新（2026-10-03 用户要求，实现见 src/owner-update.js）──
+  //    场景：他在私聊里聊到自己的生活变化（「我毕业了」），`owner.md` 里那条要跟着改。
+  //    ⚠️ **只在私聊、只对他本人**；群里不收（群里别人也在看）。
+  //    ⚠️ 默认**开着** —— 这是用户点名要的功能，不该让他再去配置里找开关。
+  cfg.ownerUpdate = cfg.ownerUpdate ?? {};
+  cfg.ownerUpdate.enable = cfg.ownerUpdate.enable !== false;
+  // 攒够几条他的私聊消息就核对一次
+  cfg.ownerUpdate.minMessages = Math.max(1, Number(cfg.ownerUpdate.minMessages) || 6);
+  // 或者隔了这么久（哪怕没攒够）也核对一次
+  cfg.ownerUpdate.minIntervalMs = Math.max(
+    60000,
+    Number(cfg.ownerUpdate.minIntervalMs) || 30 * 60 * 1000,
+  );
+  // 定时器多久问一次「该核对了吗」
+  cfg.ownerUpdate.checkIntervalMs = Math.max(
+    60000,
+    Number(cfg.ownerUpdate.checkIntervalMs) || 300000,
+  );
 
   cfg.context.batch = cfg.context.batch ?? {};
   cfg.context.batch.enable = cfg.context.batch.enable !== false;
@@ -919,6 +1488,23 @@ function load() {
   cfg.provider.dir = String(cfg.provider.dir ?? '').trim();
   cfg.provider.launcher = String(cfg.provider.launcher ?? '').trim();
   cfg.provider.manageUrl = String(cfg.provider.manageUrl ?? '').trim();
+  // ── 协议端自愈（2026-10-06 用户要求）──────────────────
+  // 实测：SnowLuma 跑约 2 小时后会**短暂抖 1 分钟**（3001 没人听、进程却还在）
+  // ⇒ 那段时间机器人只能 ECONNREFUSED 反复重连、用户看到的就是"她不回话"。
+  // ⚠️ 这里只配"多久探一次、几次算挂、挂多久才动手、动手后冷却多久" ——
+  //    真正动手的部分（只启动、不杀进程）在 `src/provider-watch.js` 顶部有完整说明。
+  cfg.provider.watch = cfg.provider.watch ?? {};
+  cfg.provider.watch.enable = cfg.provider.watch.enable !== false;
+  cfg.provider.watch.intervalMs = Math.max(5000, Number(cfg.provider.watch.intervalMs) || 30000);
+  cfg.provider.watch.maxFails = Math.max(1, Math.floor(Number(cfg.provider.watch.maxFails) || 3));
+  cfg.provider.watch.cooldownMs = Math.max(
+    0,
+    Number(cfg.provider.watch.cooldownMs) || 5 * 60 * 1000,
+  );
+  cfg.provider.watch.probeTimeoutMs = Math.max(
+    500,
+    Number(cfg.provider.watch.probeTimeoutMs) || 3000,
+  );
 
   cfg.saucenao.enable = cfg.saucenao.enable !== false;
   cfg.saucenao.apiKey = String(cfg.saucenao.apiKey ?? '').trim();
@@ -949,14 +1535,38 @@ function load() {
   cfg.vision.model = String(cfg.vision.model ?? '').trim();
   cfg.vision.describeStickers = cfg.vision.describeStickers === true;
   cfg.vision.maxBytes = Math.max(1024*100, Number(cfg.vision.maxBytes) || 8388608);
-  // 识图慢时先甩一句「等一下」稳住对方（0=关掉这个行为）
-  cfg.vision.ackAfterMs = Math.max(0, Number(cfg.vision.ackAfterMs ?? 9000));
+  // ⚠️⚠️ 2026-10-06 **删掉一个死开关**：这里原来是一个 `vision.ackAfterMs = 9000`
+  //    （注释写着「识图慢时先甩一句『等一下』稳住对方」）。
+  //    真相：**全项目没有一行代码读它** —— 大概率是当年加了配置项、机制没接上
+  //    （或后来被删了），于是它一直躺在配置里冒充"第二个开关"。
+  //    查「为什么群友那边还有等待词」时我被它误导过一轮，还照着它给用户列了
+  //    "两个开关、一起关" ⇒ **死开关比没开关更糟，删掉**。
+  //    ⚠️ 发图慢时冒的那句等待词，走的是**同一条路**：`chat.ackAfterMs`（见下面）。
   // 识图**关掉思考链**（实测快 3.2 倍、描述还更长）。想开就设 true
   cfg.vision.thinking = cfg.vision.thinking === true;
 
   cfg.machine.enable = cfg.machine.enable !== false;
   cfg.machine.name = String(cfg.machine.name ?? '').trim();
   cfg.machine.reportIntervalMs = Math.max(0, Number(cfg.machine.reportIntervalMs) || 0);
+
+  // ── 自动清理（2026-10-06 用户要求）──────────────────
+  // 用户原话：「机器人自己 QQ 的聊天文件缓存占多少？我觉得可以加个自动清理的功能了，
+  //   因为对机器人没用」。
+  // ⚠️ 只删**临时产物**（群友发来的文件缓存 / 测试临时目录 / 按天日志 / 待审表情）——
+  //    `*.md`、`*.json`、`*.bak-*`、`*备份*` **永不碰**（发布凭据就在里面）⇒ 见 src/cleanup.js
+  cfg.cleanup ??= {};
+  cfg.cleanup.enable = cfg.cleanup.enable !== false;
+  cfg.cleanup.dryRun = cfg.cleanup.dryRun === true;
+  for (const [k, d] of [
+    ['uploadedDays', 3],
+    ['tmpDays', 3],
+    ['logDays', 7],
+    ['pendingDays', 14],
+  ]) {
+    const v = Number(cfg.cleanup[k]);
+    cfg.cleanup[k] = Number.isFinite(v) && v >= 0 ? v : d;
+  }
+  cfg.cleanup.intervalMs = Math.max(10 * 60 * 1000, Number(cfg.cleanup.intervalMs) || 6 * 3600 * 1000);
 
   const qz = cfg.qzone;
   qz.enable = qz.enable === true; // 默认关，得显式打开
@@ -974,6 +1584,7 @@ function load() {
   cfg.trigger.allowGroups = (cfg.trigger.allowGroups ?? [])
     .filter((g) => g !== null && g !== undefined && String(g).trim())
     .map((g) => String(g).trim());
+// ⚠️ 和 allowGroups 一样收法：去空值、统一字符串（配置里写数字也不会漏配）
   cfg.trigger.allowPrivateUsers = (cfg.trigger.allowPrivateUsers ?? [])
     .filter((user) => user !== null && user !== undefined && String(user).trim())
     .map((user) => String(user).trim());
@@ -1103,6 +1714,10 @@ function load() {
     cfg.chat.followUp.idleMs,
     Math.min(15 * 60 * 1000, Number(cfg.chat.followUp.sameUserMs) || 180000),
   );
+  // ⚠️ 2026-10-13：「她刚回过话」的宽限（默认 2 分钟，见 defaults 里那段注释）。
+  //    ⚠️ 它**必须 ≥ 15 秒**、而且**故意不跟 `followUp.idleMs` 联动** ——
+  //      两者管的是不同的事（那个管"要不要主动接着聊"，这个管"别人说话时别乱插嘴"）。
+  cfg.chat.replyGraceMs = Math.max(15000, Number(cfg.chat.replyGraceMs) || 120000);
   cfg.chat.anyMessage.enable = cfg.chat.anyMessage.enable !== false;
   cfg.chat.anyMessage.probability = Math.min(1, Math.max(0, Number(cfg.chat.anyMessage.probability) || 0));
   cfg.chat.anyMessage.cooldownMs = Math.max(10000, Number(cfg.chat.anyMessage.cooldownMs) || 120000);
@@ -1133,13 +1748,20 @@ function load() {
   //
   // 这里**只存原始值**（0~100），换算留给 `strictnessFactor()` ——
   // 因为灵敏度是**分群**的，不能在这里算成一个全局倍数。
+  //
+  // ⚠️ 收紧度默认值按本地要求保持 50，不继承旧的全局配置。
+  //    ⇒ 默认从 **50 改成 80**（更严、她主动搭话更少）✓
+  //    ⚠️ **他显式配过的群一个字不动**（合并顺序是「这一层 → **按群**」，
+  //       按群那份永远盖过这里）—— 他配的是 40 / 60 / 95 / 100，照旧生效 ✓
+  //    ⚠️ 代价（已跟他说明）：他**没配过**的那 4 个群会跟着从 50 变 80 ✓
   cfg.chat.strictness = Math.min(100, Math.max(0, Number(cfg.chat.strictness ?? 50)));
 
   // ⚠️ 回复超过这么久还没出来 → **先说一句「等一下」**（2026-09-13 用户要求）。
   //    用户原话：「建议超出20秒时，机器人先随便回复一句你等等之类的话」，
   //    而且「回复的话不要太死板，也可以经过 llm」（那句话交给模型现生成）。
   //    0 = 关掉。单位毫秒。默认 20000（用户说的 20 秒）。
-  cfg.chat.ackAfterMs = Math.max(0, Number(cfg.chat.ackAfterMs ?? 20000));
+  // ⚠️ 2026-09-23：默认 0 = 过渡话机制**不启用**（用户要求先不要它；见 bot.js 那行注释）。
+  cfg.chat.ackAfterMs = Math.max(0, Number(cfg.chat.ackAfterMs ?? 0));
 
   // ⚠️ **「自己接自己」（追补）** —— 和上面的 `chat.followUp`（**对话延续**：
   //    别人又说话了，要不要接着聊）完全是两件事，所以名字必须分开，
@@ -1150,7 +1772,7 @@ function load() {
   // 概率闸：不是每次回完都问模型"要不要补一句"（真人也不会每次都补）
   // ⚠️ 2026-09-19 用户反馈"太频繁" → 默认从 0.15 降到 0.08
   cfg.selfFollowUp.probability = Math.min(1, Math.max(0, Number(cfg.selfFollowUp.probability ?? 0.08)));
-  // 硬上限（用户指定「最多自己接自己五条消息」）
+  // 硬上限（用户反馈追补太频繁后收紧到最多两条）
   cfg.selfFollowUp.maxPerReply = Math.min(2, Math.max(1, Number(cfg.selfFollowUp.maxPerReply) || 2));
   // 第 2 条起，还继续补的概率 —— 见 follow-up.js 的 `CONTINUE_P`
   // ⚠️ 2026-09-19 同上，默认从 0.5 降到 0.3
@@ -1196,7 +1818,13 @@ function load() {
   //    纯随机撒点会撞出两条隔八分钟的消息，那比定时还假。
   // ⚠️ 0 点到 startHour 之间**完全不发**（他明确要求 0-7 点不发）。
   cfg.life ??= {};
-  cfg.life.enable = cfg.life.enable !== false;
+  // ⚠️⚠️ 2026-10-15 改成**默认关**（用户：「把随机事件默认开关设为关闭」）——
+  //    ⚠️ 这一层其实**不是"代码默认"**：它是**多号拆分**那一步从
+  //       `accounts/<QQ>.yml` 的顶层 `life:` 抄过来的（见本文件 980 行附近）。
+  //       也就是说 —— **没写账号文件的号（= 别人拉下来的）这一层是 `false`** ✓
+  //    ⇒ 配合上面的 `DEFAULT_LIFE.enable: false`：**两层都是关** ⇒ 别人默认不跑 ✓
+  //    ⚠️ 而**用户自己**的 `true` 是他**账号文件里显式写的** ⇒ 照样生效、一个字不动 ✓
+  cfg.life.enable = cfg.life.enable === true;
   cfg.life.minPerDay = Math.max(0, Number(cfg.life.minPerDay) || 3);
   cfg.life.maxPerDay = Math.max(cfg.life.minPerDay, Number(cfg.life.maxPerDay) || 5);
   cfg.life.startHour = Math.min(23, Math.max(0, Number(cfg.life.startHour) ?? 7));
@@ -1309,7 +1937,7 @@ function load() {
 
   // ── 分群参数覆盖（2026-09-15 <主人>：「参数也可以分群设定」）────────────
   //
-  // 形状：`groupParams: { "<群号>": { life: {...}, quest: {...}, chat: {...} } }`
+  // 形状：`groupParams: { "<群号>": { life: {...}, quest: {...}, chat: {...}, biliShare: {...} } }`
   //   · 只写**要覆盖的那几项**，没写的自动用全局那套（见 `paramsFor()`）
   //   · `life` 目前有意义的是 `enable`（这个群收不收日常事件）
   //   · `quest` 是整个模块都能覆盖：enable / chance / maxPerWeek / waitMs /
@@ -1317,6 +1945,7 @@ function load() {
   //   · `chat` 目前有意义的是 **`strictness`（收紧度）** —— 2026-09-15 晚用户要求：
   //     「收紧度也加一个一样的下拉菜单分群调节」（热闹的大群该松一点才接得上话，
   //      严肃的群该收紧，各群不该一刀切）
+  //   · `biliShare` 控制该群的 B 站自动分享；启用后仍只对 1 档群生效。
   //
   // ⚠️ 和 `trigger.groupRespondTo`（档位）不是一回事，别搞混：
   //    · `groupRespondTo` 管的是「**她要不要在这个群说话**」（0~3 档）
@@ -1361,6 +1990,9 @@ function load() {
       checkIntervalMs: 'num',
       // 群友哪句话才算"能改变剧情"（strict / normal / loose）
       replyMode: 'str',
+      // ⚠️ 2026-10-05 加：这个群**收不收 `/剧情` 命令**（默认 true）——
+      //    用户要求（同群跑两个机器人时避免冲突）。见 DEFAULT_QUEST 里那段注释。
+      commands: 'bool',
     };
     const pick = (src, keys) => {
       const out = {};
@@ -1406,6 +2038,58 @@ function load() {
           else delete c.strictness;
         }
         if (Object.keys(c).length) one.chat = c;
+      }
+      // ⚠️⚠️ 2026-10-15 加（用户报「B站分享保存不了」）：**B站分享也是按群的一份**。
+      //    上面这段是**白名单式重建**（只挑 life / quest / chat / peers / otherBots），
+      //    ⇒ 没在这里登记的段会被**整段丢掉** ✗
+      //    表现和 2026-10-09 那次 `otherBots` **一模一样**：保存**确实写进了账号文件**
+      //    （日志有「配置写入账号私有文件」），但重载后内存里没有 ⇒ 界面回读还是旧值
+      //    ⇒ 用户看到的就是「保存不了」（实测：保存完 GET 回来的是**顶层**那份关键词）✗
+      //    ⇒ 照 `chat` 那套整个对象收下来（各字段的合法性由 `bili-share.js` 的
+      //      `normalizeCfg` 管，写歪了它在保存时就夹回来了）✓
+      //    ⚠️ **以后再加按群段，必须在这里登记一行** —— 漏了就是静默失效，界面照样"保存成功"。
+      if (v.biliShare && typeof v.biliShare === 'object') {
+        const share = normalizeBiliShare(v.biliShare);
+        if (Object.keys(share).length) one.biliShare = share;
+      }
+      // ⚠️⚠️ 2026-10-05 加（用户要求）：「机器人**同类池**」——**按群**填 QQ 号，
+      //    填进去的直接当同类机器人（见 bot.js 的 `isPeerBot`）：
+      //      ① 上下文里标出来（别把它的立场/经历当成自己说的）；
+      //      ② **不再被"别的机器人一律不接"挡掉** —— 用户要的是"能跟它聊起来"
+      //         （⚠️ 防刷靠现有的**连续接话链上限**，不给它开特例）；
+      //      ③ 群里冷场时，她可能主动 @ 它说一句。
+      //    ⚠️ 照 `allowGroups` 那套收：去空值、统一字符串、去重、封顶 10 个。
+      if (Array.isArray(v.peers)) {
+        const seen = new Set();
+        const peers = [];
+        for (const x of v.peers) {
+          const id = String(x ?? '').trim();
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          peers.push(id);
+          if (peers.length >= 10) break;
+        }
+        if (peers.length) one.peers = peers;
+      }
+      // ⚠️⚠️ 2026-10-09 修（用户报：「**不同类机器人池保存不了**」）：
+      //    上面那段只处理了 `peers` —— **`otherBots` 压根没被合并** ✗
+      //    后果（实证）：保存时它**确实写进了账号文件**
+      //      （日志有 `配置写入账号私有文件（号 …）：groupParams`），
+      //      但 `reloadConfig()` 这一步把它**丢掉** ⇒ 内存里没有 ⇒
+      //        ① 界面回读显示空 —— 用户看到的就是"保存不了"；
+      //        ② `otherBotsFor(gid)` 返回空 ⇒ **那道"完全不回应"的闸等于一直没配** ✗
+      //    ⇒ 照 `peers` 同一套收（去空值 / 统一字符串 / 去重 / 封顶 10 个）✓
+      if (Array.isArray(v.otherBots)) {
+        const seenO = new Set();
+        const otherBots = [];
+        for (const x of v.otherBots) {
+          const id = String(x ?? '').trim();
+          if (!id || seenO.has(id)) continue;
+          seenO.add(id);
+          otherBots.push(id);
+          if (otherBots.length >= 10) break;
+        }
+        if (otherBots.length) one.otherBots = otherBots;
       }
       if (Object.keys(one).length) g[k] = one;
     }
@@ -1470,15 +2154,24 @@ function load() {
   );
 
   // ── 海豹骰（SealDice，2026-09-30）────────────────────────
-  // ⚠️ 方案是「甲」：**海豹不接 IM**，小祥主动调它的 HTTP API 算骰 / 读 log。
-  //    缘由见 `src/sealdice.js` 顶部：同一个 NapCat 挂两个 WS 客户端会有
-  //    **自反馈死循环**（小祥发的消息被海豹当成群友消息再转回来），那是架构问题。
+  // ⚠️ 2026-10-06 **更正**：当初这里写的理由（同 NapCat 挂两个 WS 客户端会有
+  //    「自反馈死循环」「后连的顶掉先连的」）**经读源码已证伪**，详见 src/sealdice.js 顶部。
+  //    海豹现在可以接同一个 QQ（用户 2026-10-06 拍板走**同号**，没有小号）。
   // ⚠️ `baseUrl` / `token` 默认空 ⇒ `sealdice.enabled()` 恒 false ⇒ 完全不影响现有行为。
   cfg.sealdice ??= {};
   cfg.sealdice.enable = cfg.sealdice.enable !== false && !!cfg.sealdice.baseUrl;
   // ⚠️ 超时上限 15 秒：这条调用在**消息处理链路**上，挂住 = 整条消息卡住。
   //    默认 4 秒；再高没意义（海豹本地，几乎瞬时）。
   cfg.sealdice.timeoutMs = Math.min(15000, Math.max(500, Number(cfg.sealdice.timeoutMs) || 4000));
+  // ⚠️ `relay` = 小祥要不要替海豹转述骰点。**只归一化，不设默认**：
+  //    `shouldRelay()` 里 `mode !== false && mode !== 'fallback'` 一律当 true，
+  //    保持旧行为（没配这个键的部署仍然转述，不会突然没人答骰点）。
+  //    · true      = 海豹不接 IM，小祥转述（默认）
+  //    · false     = 海豹已接 IM、自己收发 ⇒ 小祥闭嘴（防「两条结果」）
+  //    · fallback  = 海豹接了 IM，但离线时由小祥兜底
+  if (cfg.sealdice.relay === 'false') cfg.sealdice.relay = false;
+  else if (cfg.sealdice.relay === 'fallback') cfg.sealdice.relay = 'fallback';
+  else cfg.sealdice.relay = true;
 
   // ── 骰娘模式（2026-09-30）──────────────────────────────
   // ⚠️ 用户原话：「进入骰娘模式，别人发 ra 之类的指令，她只会回复骰点结果。
@@ -1574,12 +2267,83 @@ function load() {
 
   cfg.webui.enable = cfg.webui.enable !== false;
   cfg.webui.host = String(cfg.webui.host ?? '127.0.0.1');
-  cfg.webui.port = Math.max(1, Number(cfg.webui.port) || 3099);
+  // ⚠️ 先记住"配置里到底写没写端口"：下面那句会把它规范成 3099，之后就分不清
+  //    "配置里写了 3099" 和 "配置里根本没写" 了。
+  const rawUiPort = Number(cfg.webui.port);
+  cfg.webui.port = Math.max(1, rawUiPort || 3099);
+  // ⚠️⚠️ 2026-10-09 加：**管理界面端口可以被环境变量顶掉**（`QQBOT_WEBUI_PORT`）。
+  //
+  //    踩到的（用户报：「**3099 为什么打不开了**」）：他那一刻打不开管理界面，
+  //    日志里是 `管理界面端口 3099 被占用，换一个端口或关掉占用的程序`。
+  //    ⚠️ 占它的**不是别的软件，是我自己** —— 回归套件里那些
+  //    `spawn(node, [src/index.js])` 起的探针（behavior / e2e / …）**全都想绑真实的 3099**：
+  //      · `test/run-all.js` 的隔离 env 只管状态文件 / 单例锁 / 账号目录 / 日志，
+  //        **没有一条管 webui 端口** ⇒ 探针按真实配置绑 3099；
+  //      · 于是"探针先绑上"时，真实机器人一重启就绑不上 ⇒ **他的管理界面直接没了** ✗
+  //        （14:04 和 15:11 两次都是这个原因；而他 14:25 / 15:08 的点又恰好错开了。）
+  //
+  //    ⚠️ 这不是今天才有的，是**一直存在**的：按天日志里「端口被占用」的次数 ——
+  //      10-03: 42 / 10-04: 48 / 10-05: 210 / 10-06: 120 / 10-07: 198 / 10-09: 97。
+  //      以前每次回归都在赌"探针和真实机器人谁先绑上"。
+  //
+  //    ⇒ 给测试一条**顶掉端口**的路，由 `run-all.js` 给每个套件发一个独立高位端口。
+  //      真实运行时**不设这个 env** ⇒ 行为一个字都不变（还是 config 里那个 3099）✓
+  //
+  //    ⚠️⚠️ 但**只在"配置里没写端口、走的默认 3099"时才顶** ——
+  //      套件自己显式配的端口（`test/accounts.js` 给两个号配的 39601 / 39602）
+  //      优先级更高，**不能被顶**：顶了它就连不上自己刚起的进程 ✗
+  //      （第一版我写成了无条件顶掉，`accounts` 套件立刻红两项 —— 就是它抓出来的。）
+  const envUiPort = Number(process.env.QQBOT_WEBUI_PORT);
+  const useDefaultPort = !Number.isFinite(rawUiPort) || rawUiPort === 0 || rawUiPort === 3099;
+  if (Number.isFinite(envUiPort) && envUiPort > 0 && useDefaultPort) {
+    cfg.webui.port = Math.floor(envUiPort);
+  }
 
   return cfg;
 }
 
 export const config = load();
+
+/**
+ * ── 多 QQ 号：**路径分家**（2026-10-07 用户要求）─────────────────────
+ *
+ * 用户原话：「我希望从一个应用端控制多个 QQ 号……其他配置全部分 QQ 控制」。
+ * 一个号一个进程，所以每个进程必须知道**自己是谁**，才能把运行期数据
+ * （状态文件、群记忆、日志）写到自己的地方去 —— 不然两个号会互相覆盖。
+ *
+ * ⚠️⚠️ **主号（`mainAccount`）一律走老路径**：`state/*.json`、
+ *    `knowledge/group-memory.md`、`logs/bot-<日期>.log` 一个都不搬。
+ *    这是"加多号对老用户零迁移"的关键 —— 也让**全部既有回归套件**
+ *    （不设账号 ⇒ `ACCOUNT.id === ''`）跑的还是原来那条路。
+ *    非主号才落到子目录 `state/accounts/<QQ>/`、`knowledge/accounts/<QQ>/`。
+ */
+export const ACCOUNT = config.__account ?? { id: '', main: '', isMain: true, privateFile: '' };
+
+/** 这个进程在控制哪个 QQ 号（`''` = 单号老模式，路径全都不变） */
+export const accountId = () => ACCOUNT.id;
+/** 是不是"主号"（主号用老路径；判定依据见 `resolveAccount`） */
+export const isMainAccount = () => ACCOUNT.isMain;
+
+/** 运行期状态文件的目录（`state/`） */
+export function stateDir() {
+  return ACCOUNT.id && !ACCOUNT.isMain
+    ? join(ROOT, 'state', 'accounts', ACCOUNT.id)
+    : join(ROOT, 'state');
+}
+
+/**
+ * 知识库里**按号分**的那部分目录。
+ *
+ * ⚠️ 共用那些（`owner.md`、`server-*.md`、`holidays.md`、`anime/`）仍在
+ *    `knowledge/` 根 —— 它们是"同一个主人 / 同一台服务器 / 同一套节日"，
+ *    没有按号分的道理。按号分的是**这个号的经历**：
+ *    群记忆、学习档案、群资料库（`groups/`）、私聊记忆（`dm/`）。
+ */
+export function knowledgePrivateDir() {
+  return ACCOUNT.id && !ACCOUNT.isMain
+    ? join(KNOWLEDGE_DIR, 'accounts', ACCOUNT.id)
+    : KNOWLEDGE_DIR;
+}
 
 /**
  * ⚠️⚠️ 2026-09-16：**life / quest 的「全局默认」取消了**。
@@ -1592,7 +2356,14 @@ export const config = load();
  * ⚠️ 值就是原来 config.yml 里那份（保证行为不变）；改这里等于改所有群的**起点**。
  */
 export const DEFAULT_LIFE = {
-  enable: true,
+  // ⚠️⚠️ 2026-10-15 用户要求：「**把随机事件默认开关设为关闭**，但是不要修改我现在的设置，
+  //     然后**下次推上的要把别人的随机事件开关关闭**」
+  //     ⇒ 内置默认从 `true` 改成 **`false`** —— **别人拉下来默认不跑日常事件** ✓
+  //     ⚠️ 对他**零影响**：他现有的两个群都是**显式**写的 `enable: true`
+  //        （`config.yml` 的 200000001、`accounts/…yml` 的 200000006），
+  //        合并顺序是「内置默认 → 全局 → **按群**」⇒ 显式的按群值永远盖过默认 ✓
+  //     （改完用 `life.targetGroups()` 验过：还是那两个群，一个没变 ✓）
+  enable: false,
   minPerDay: 3,
   maxPerDay: 3,
   startHour: 7,
@@ -1613,14 +2384,18 @@ export const DEFAULT_QUEST = {
   affinityGood: 3,
   affinityBad: -2,
   checkIntervalMs: 60000,
+  // ⚠️ 2026-10-05 加（用户要求）：「在按群设定那里加一个开关，控制是否接收 /剧情 的命令，
+  //    默认开启接收 —— 主要是等下会有**两个机器人在同一个群**，避免冲突」。
+  //    ⚠️ 默认 **true**（开着）：不设这个开关的群，行为跟以前**一模一样**。
+  //    关掉之后这个群里 `/剧情` 和 `/清除剧情` 都会被无视（不回复、也不动剧情）。
+  commands: true,
 };
 /**
  * 收紧度没有全局设置：这是「某个群没有单独覆盖时」的起点。
  *
  * ⚠️ `config.chat.strictness` 是旧配置遗留，不能再作为这里的底稿。
- *    用户已经定过「默认 50，然后只保留分群的数据」；聊天运行时也用
- *    `DEFAULT_STRICTNESS = 50`。`paramsFor()` 必须和它保持同一个契约，
- *    否则管理界面删除覆盖后会显示旧全局值，而机器人实际仍按 50 走。
+ *    没有群级覆盖时统一回退到 50；聊天运行时的 `DEFAULT_STRICTNESS` 也为 50。
+ *    `paramsFor()` 必须和它保持同一个契约，否则管理界面显示值会和机器人行为不一致。
  */
 export const DEFAULT_CHAT = { strictness: 50 };
 
@@ -1639,6 +2414,11 @@ export const DEFAULT_CHAT = { strictness: 50 };
  * ⚠️ 只覆盖**写了的**那几项，没写的跟着内置默认走。
  * ⚠️ `groupId` 给空/给不出 → 只用内置默认（老调用点、私聊、模拟面板都走这条）。
  * ⚠️ 返回的是**新对象**（浅合并），别拿它去改 —— 改了不会落盘。
+ *
+ * ⚠️ 「**非主号默认不开日常事件**」那道闸**不在这里**，在 `load()` 里 ——
+ *    这里读 `ACCOUNT.private` 拿到的是**启动那一刻的快照**，
+ *    界面上把开关打开它会看不见（`reloadConfig()` 只换顶层键，
+ *    `ACCOUNT` 这个 const 不跟着更新）。写在 `load()` 里热重载才是对的。
  *
  * @param {'life'|'quest'|string} kind
  * @param {string|number} [groupId]
@@ -1665,6 +2445,52 @@ export function paramsFor(kind, groupId) {
 }
 
 /**
+ * 这个群的「**同类机器人池**」（用户 2026-10-05 要求）。
+ *
+ * 用户原话：「加一个机器人同类池放在分群设定里也分群管理，做一个和『它能在哪些群说话』
+ *   一样的输入框填 QQ 号，填入的 QQ 号**直接默认为同类机器人**，
+ *   会随机主动 @ 找那个同类机器人聊天」。
+ *
+ * ⚠️ 池里的号 = **同类**（不是"要忽略的机器人"）：
+ *   · 上下文里会标出来（`recent.contextText` 的 `isBot`）；
+ *   · **不再被"别的机器人一律不接"挡掉** —— 要能跟它聊起来；
+ *   · 冷场时她可能主动 @ 它。
+ *
+ * @param {string|number} groupId
+ * @returns {string[]} QQ 号数组（没配就是空数组）
+ */
+export function peersFor(groupId) {
+  const gid = String(groupId ?? '').trim();
+  if (!gid) return [];
+  const p = config.groupParams?.[gid]?.peers;
+  return Array.isArray(p) ? p.map(String) : [];
+}
+
+/**
+ * 「不同类机器人池」—— 这个群里**她完全不回应**的机器人（2026-10-06 用户要求）。
+ *
+ * 用户原话：「和刚加的那个同类机器人池一样，再加个**不同类机器人池**，
+ *   和那个**相反**，这个池专门放**小豆这种机器人**，saki **直接完全不回应**」。
+ *
+ * ⚠️⚠️ 和同类池（`peersFor`）**正好相反**，两个千万别搞混：
+ *   · `peers`     = **同类**（另一个"她自己"，比如黑祥）→ 要**能聊起来**，冷场时还会主动找它；
+ *   · `otherBots` = **异类**（小豆那种别的机器人）→ **一个字都不回**（连 @ 她也不回）。
+ *
+ * ⚠️ 和 `teach.bots` 的区别：那个是**全局**的"已知机器人"名单（最早用来挡教学、
+ *    后来顺带挡回复），不分群；这个是**按群**配的，语义只有一个 —— 这个群里别理它。
+ *    ⇒ 两个名单**可以同时用**，不冲突（`teach.bots` 那边留着不影响）。
+ *
+ * @param {string|number} groupId
+ * @returns {string[]} QQ 号数组（没配就是空数组）
+ */
+export function otherBotsFor(groupId) {
+  const gid = String(groupId ?? '').trim();
+  if (!gid) return [];
+  const p = config.groupParams?.[gid]?.otherBots;
+  return Array.isArray(p) ? p.map(String) : [];
+}
+
+/**
  * 重新从 config.yml 读取配置（管理界面改完配置后调用，不用重启机器人）。
  * 保留同一个对象引用，这样所有 `import { config }` 的地方都能看到新值。
  */
@@ -1672,6 +2498,54 @@ export function reloadConfig() {
   const fresh = load();
   for (const k of Object.keys(fresh)) config[k] = fresh[k];
   return config;
+}
+
+/**
+ * 盯着 `config.yml` —— **谁写了它，本进程就重载一次**。
+ *
+ * ⚠️⚠️⚠️ 2026-10-10 加（用户：「**能不能模型界面两个界面是同时保存的**」）：
+ *    `config.yml` 是**多个账号进程共享**的一份文件，而 `reloadConfig()` 原来只在
+ *    「收到保存请求的那个进程」里跑（`webui.js` 的保存路由调的）⇒
+ *    用户在 A 号界面点保存，**B 号进程内存里还是旧值** ✗
+ *    （实测表现：改一次"备选模型"开关，得在**两个界面各点一次**才全生效。）
+ *    ⇒ 挂文件监听：**一次保存，所有进程各自重载** ✓
+ *
+ * ⚠️ 为什么用 `watchFile`（轮询）而不是 `watch`（事件）：
+ *    保存走的是"写 `.tmp` + rename **覆盖**" —— 在 Windows 上 `fs.watch(file)`
+ *    盯着的是被替换掉的那个句柄，rename 之后**可能就不再触发** ✗
+ *    `watchFile` 按 stat 变化判，rename 也躲不过 ✓ 代价是最多 2 秒延迟（可接受）。
+ *
+ * ⚠️ 三条讲究：
+ *   · **只认"内容真的变了"**（mtime/size 一起变）—— 免得 stat 抖动白重载；
+ *   · **自己写也会触发一次**（webui 保存 → 写文件 → 触发）：`reloadConfig()` 幂等，无害 ✓
+ *   · **必须 `unref()`** —— 不然这个轮询会把进程吊着不退（测试里会起真进程）✗
+ *
+ * ⚠️ **不在这里 import `log`**：`log.js` 反过来 import 本文件 ⇒ 顶部 import 会成环 ✗
+ *    ⇒ 要打日志就用 `onReload(fresh)` / `onReload(null, err)` 回调，由调用方打 ✓
+ *
+ * ⚠️ 边界（**不是这次新增的**）：`reloadConfig()` 是**整段替换**，所以只有启动时
+ *    才读的那些项（协议端 url / 管理界面端口 / 账号文件）热重载不会真的重连 ——
+ *    它们仍然要重启。界面保存本来就是这个边界，这里只是让**另一个号**也享受到 ✓
+ *
+ * @param {(fresh?:object|null, err?:Error)=>void} [onReload]
+ * @returns {boolean} 挂上了没有
+ */
+export function watchConfigFile(onReload = null) {
+  try {
+    const sw = watchFile(CONFIG_FILE, { interval: 2000 }, (cur, prev) => {
+      if (cur.mtimeMs === prev.mtimeMs && cur.size === prev.size) return;
+      try {
+        const fresh = reloadConfig();
+        if (typeof onReload === 'function') onReload(fresh, null);
+      } catch (e) {
+        if (typeof onReload === 'function') onReload(null, e);
+      }
+    });
+    sw.unref?.();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 启动前体检，返回问题列表（空数组 = 没问题） */
