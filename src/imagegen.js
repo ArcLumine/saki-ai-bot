@@ -350,8 +350,8 @@ export function buildPrompt({ what, withSelf = true, time = '', place = '', hasR
       ? mates.length
         ? `画面里 ${mates.length + 1} 个人：图1是主角，` +
           mates.map((o, i) => `图${i + 2}是${String(o?.name ?? '').trim() || '她的同伴'}`).join('、') +
-          '。各自照自己参考图的发色发型五官画，别混。'
-        : '画面里的人是参考图1里的女孩，发色发型五官保持一致。'
+          '。各自照参考图，别混。'
+        : '画面里的人是图1女孩，发色发型五官照图。'
       : '';
   return [body + '。', anchor, when ? `${when}。` : '', pick].filter(Boolean).join('');
 }

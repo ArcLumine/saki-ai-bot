@@ -13,6 +13,11 @@ import { sensitiveRules } from './sensitive.js';
 // ⚠️ 2026-09-17 加：群友常**@着某人**问「介绍一下他」，而文本里**没有名字** ——
 //    得靠 at 段的 QQ 号反查出群名片，才能判断"这是在说资料里的某个人"。
 import * as names from './names.js';
+// ⚠️ 2026-10-22：短期共享记忆（QQ 聊天和 B站评论回复读的是同一份）
+import * as shortMemory from './short-memory.js';
+// ⚠️ 2026-10-22：**实时状态机** —— 用户要求「QQ 和 B站两边状态要一致」
+//    两边读的是**同一份** `state/bili-presence.json`（`bili-presence.js`）⇒ 天然一致 ✓
+import * as presence from './bili-presence.js';
 
 /** ⚠️ 走 `config.js` 的 `KNOWLEDGE_DIR`（测试可以用 `QQBOT_KNOWLEDGE_DIR` 整份搬走） */
 const DIR = KNOWLEDGE_DIR;
@@ -1204,7 +1209,7 @@ export function aliasesOf(uid, exclude = []) {
   // ⚠️⚠️ 只认**带引导词的**别名 ——「又叫 A」「也叫 A」「游戏 ID A」「B 站叫 A」。
   //
   //    第一版是"把这一行里所有加粗片段都当别名"，实测 <主人> 那行抽出了
-  //    `**建设申请都由他批**` ⇒ 提示词里出现「也叫 <主人> / 建设申请都由他批」✗。
+  //    `**建设申请都由他批**` ⇒ 提示词里出现「也叫 hzyzhzy / 建设申请都由他批」✗。
   //    根因：**加粗在人设里也用于强调**，不只是标名字 —— 光看"加粗"分不出这两者。
   //
   //    ⚠️ 所以在 `hzymtr-server.md` 里加别名时**要带引导词**（又叫 / 也叫 / 游戏 ID / B 站叫…），
@@ -1345,9 +1350,12 @@ export function selectFor(text, opts = {}) {
     //    用户报的原话：「最近机器人一直都不认得服务器的几个管理员了，
     //    在群里问的时候会直接说不认识」。
     //
-    //    根因：上面那张关键词表里**只有「管理员 / 腐竹」这种身份词，没有任何别名** ——
-    //    于是「XX 是谁」「XX_Official.在b站上的成就怎么样」**一个词都不命中**
-    //    ⇒ 整份服务器库（含人员名录）**压根不进上下文** ⇒ 她只能答"我不认识" ✗
+
+    //    根因（查过日志 + `state/recent.json` 的现场对话）：上面那张关键词表里
+    //    **只有「管理员 / 腐竹」这种身份词，没有任何人名或别名** ——
+    //    于是「Luminiflux是谁」「hzyzhzy是谁」「LSF_Official.在b站上的成就怎么样」
+    //    **一个词都不命中** ⇒ 整份 `hzymtr-server.md`（含管理员名录）**压根不进上下文**
+    //    ⇒ 她手里没有名单，只能答"我不认识" ✗
     //
     //    ⚠️ 这条**不是新发明**：`anime.md` 和**群资料库**都早就加了 `mentionsAnyTerm`，
     //    **只有服务器库漏了** —— 而它恰恰是"人员名录"最全的一份。
@@ -1704,6 +1712,7 @@ export function knowledgeText(opts = {}) {
         '它和上面知识库冲突时，**只在这个群里**以它为准。',
     });
   }
+
   if (mt === 'private' && dmId) {
     learnedScopes.push({
       scope: `dm:${dmId}`,
@@ -1719,11 +1728,19 @@ export function knowledgeText(opts = {}) {
   }
   }
 
-  // ⚠️ 2026-09-28：整个知识库**统一填一次**称呼占位符。
-  //    为什么在这儿而不是每份文件各填：`persona.md` / `relationship.md` / `owner.md` /
-  //    `group-memory.md` 全是从磁盘读的 md，用户能在管理界面里直接编辑 ——
-  //    在这里填一次，它们就都能写「<主人>」而不必各写各的接法。
-  //    没占位符时 `fillOwnerTerms` 原样返回，代价约等于零。
+  try {
+    const pres = presence.block();
+    if (pres) parts.push(pres);
+  } catch (e) {
+    log.debug(`状态机拼进提示词失败（不影响聊天）：${e.message}`);
+  }
+
+  try {
+    const sm = shortMemory.block({ maxChars: 900 });
+    if (sm) parts.push(sm);
+  } catch (e) {
+    log.debug(`短期记忆拼进提示词失败（不影响聊天）：${e.message}`);
+  }
   return fillOwnerTerms(parts.join('\n\n---\n\n'));
 }
 

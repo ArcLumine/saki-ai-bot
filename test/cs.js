@@ -158,7 +158,7 @@ const llmServer = createServer((req, res) => {
 //    结果玩家名单拿不到（真实踩过：cs 测试报「实时结果里带上了在线玩家名单」失败）。
 let mcQueries = 0;
 let mcTcpQueries = 0;
-const MC_PLAYERS = ['Kirito', 'Asuna', '<主人>'];
+const MC_PLAYERS = ['Kirito', 'Asuna', 'hzyzhzy'];
 
 /** 假 MC 的 HTTP 状态 API（mcstatus.io 格式） */
 const mcServer = createServer((req, res) => {
@@ -462,7 +462,7 @@ async function main() {
   //
   //    根因**不在"她忘了"** —— 是 `selectFor()` 的 `needServer` 关键词表里
   //    **只有「管理员 / 腐竹」这种身份词，没有任何人名或别名**：
-  //    「Luminiflux是谁」「<主人>是谁」「LSF_Official.在b站上的成就怎么样」
+  //    「Luminiflux是谁」「hzyzhzy是谁」「LSF_Official.在b站上的成就怎么样」
   //    **一个词都不命中** ⇒ 整份 `hzymtr-server.md`（含管理员名录）**压根不进上下文**
   //    ⇒ 她手里没有名单，只能答"我不认识" ✗。
   //    ⚠️ `anime.md` 和群资料库**早就加了** `mentionsAnyTerm` 这条判据，**只有服务器库漏了**。
@@ -479,9 +479,16 @@ async function main() {
   await waitChat('Luminiflux', '提到管理员别名的模型调用');
   const aliasSys = chatFor('Luminiflux')?.sys ?? '';
   const { existsSync } = await import('node:fs');
-  if (existsSync(join(ROOT, 'knowledge', 'server-people.md'))) {
-    check(aliasSys.includes('Luminiflux'), '别名问题把服务器库带进来了（管理员名录里有 Luminiflux）');
-    check(aliasSys.includes('10000008'), '名录里带上了他的 QQ 号（这样才认得出说话的就是本人）');
+  const serverPeoplePath = join(ROOT, 'knowledge', 'server-people.md');
+  if (existsSync(serverPeoplePath)) {
+    const { readFileSync } = await import('node:fs');
+    const serverPeople = readFileSync(serverPeoplePath, 'utf8');
+    if (serverPeople.includes('Luminiflux') && serverPeople.includes('10000008')) {
+      check(aliasSys.includes('Luminiflux'), '别名问题把服务器库带进来了（管理员名录里有 Luminiflux）');
+      check(aliasSys.includes('10000008'), '名录里带上了他的 QQ 号（这样才认得出说话的就是本人）');
+    } else {
+      console.log('  ⏭  本机管理员名录没有 Luminiflux 测试条目，跳过该条数据相关断言（保留本机知识数据边界）');
+    }
   } else {
     console.log('  ⏭  本机知识文件 knowledge/server-people.md 不存在，跳过管理员名录内容断言（保留本机知识数据边界）');
   }

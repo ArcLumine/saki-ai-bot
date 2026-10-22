@@ -147,11 +147,17 @@ console.log('\n【8】★ 同类自言自语 → 按独立概率接话（2026-10
   // ⚠️⚠️ 这一条是"高于收紧度"的**实现**：judge 那边同类要**打个折**再传。
   //     ⚠️ 用户特地补过：「**不要完全没紧度了，略低就行了**」—— 所以判的是
   //     `strictness × strictnessFactor`，**不是 0**（传 0 就等于完全放开，他要的不是那个）。
+  // ⚠️ 2026-10-19 改：收紧度现在**不管几档都传给 judge**（原来非 1 档传 `undefined`，
+  //    结果 699 群收紧度 95、judge 压根不知道 ✗）⇒ 字面从 `strictness: isLevel1` 变成
+  //    `strictness: this.isPeerBot(...)`；这条只判"同类打折 + 默认 0.7"这个实现还在 ✓
   check(
-    /strictness: isLevel1[\s\S]{0,320}?strictnessFactor \?\? 0\.7/.test(botSrc),
+    /strictness: this\.isPeerBot\([\s\S]{0,320}?strictnessFactor \?\? 0\.7/.test(botSrc),
     '★★ 说话判断那边：同类按**收紧度 × strictnessFactor（默认 0.7）**传 —— 略低于收紧度，没全放',
   );
-  check(!/strictness: isLevel1[\s\S]{0,120}?\? 0\s*:/.test(botSrc), '★ 确认**不是**直接传 0（"略低"不是"没有"）');
+  check(
+    !/strictness: this\.isPeerBot\([\s\S]{0,200}?\? 0\s*:/.test(botSrc),
+    '★ 确认**不是**直接传 0（"略低"不是"没有"）',
+  );
   check(Number(config.peerChat?.strictnessFactor ?? 0.7) === 0.7, '默认折扣 0.7（40 → 28）');
   check(Number(config.peerChat?.replyChance ?? 0.6) === 0.6, '默认概率 0.6（比收紧度 40 对应的意愿高）');
 }
@@ -1132,7 +1138,8 @@ console.log('\n【21】★★ `/清除剧情` 只由**主导那条线的号**执
     '★★ 正在演的那条**不是我起的头** ⇒ 我不清（判据 = 我没有在跑的线 + 群里在演剧情）',
   );
   check(
-    /this\.muteGroup\(gid, 60000, '收到 \/清除剧情（这条不是我起的头）'\)/.test(src21),
+    // ⚠️ 2026-10-19：`/清除剧情` 那道静默现在是**强制**的（`{ strict: true }`，连 @ 也不回）✓
+    /this\.muteGroup\(gid, 60000, '收到 \/清除剧情（这条不是我起的头）', \{ strict: true \}\)/.test(src21),
     '★ 但**静默照旧**（两个号都停发一分钟 —— 那是他发这条指令的意图）',
   );
   check(
@@ -1267,6 +1274,14 @@ console.log('\n【22】★★ 开场**轮流**（2026-10-07 用户问「为什�
     !/myIdx = iOpenedLast \? order\.length/.test(src22),
     '★★★ 旧写法（"排到最后"）已经删掉 —— 那版会让两个号都在等，剧情指令看起来没反应',
   );
+  // ⚠️ 2026-10-22 加（用户报「621 群的剧情让位失败了，看看为什么」）：
+  //   这条守卫（`order.length <= 1` ⇒ 不让位）原来**静默** return，一个字都不打，
+  //   而下面那行「序位公式」永远走不到 ⇒ 日志里既没让位也没不让位 ⇒ 纯黑盒。
+  //   真因就是那个群的 `peers` 空着（两个号各自只算出自己）⇒ 都开场 ✗
+  check(
+    /不让位：本群参与/.test(src22),
+    '★★ 只有自己一个号（没配同类池）时**也要打日志**说明为什么不让位（别再是黑盒）',
+  );
   quest22.__peerPlots().delete(G22);
   quest22.__set({ byGroup: {} });
 }
@@ -1301,6 +1316,23 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
   check(quest23.clearSharedPremise(G23) === true, '★ 清得掉（剧情结束 / 被清除时要用）');
   check(quest23.sharedPremise(G23) === '', '★ 清掉之后不再注入');
 
+  // ⚠️⚠️ 2026-10-22 加（用户报「621 群的剧情让位失败了」⇒ 查出来的第二件事）：
+  //   清剧情**只许撤起因**，不许把「上一次是谁起的头」（`by`）一起擦掉 ——
+  //   开场轮换 `sharedOpener()` 全靠它。用户的习惯正是「先 /清除剧情、再开新的」，
+  //   而原来 `clearSharedPremise()` 是 `delete j.byGroup[g]`（整条删）
+  //   ⇒ 轮换记忆每次被擦 ⇒ 退回按号序 ⇒ **号小的那个永远第一个开场**。
+  //   （日志实证：01:33~02:33 连着 7 次都是同一个号排第 1，轮换那行日志一次都没出现。）
+  check(
+    quest23.sharedOpener(G23) === '999000099',
+    '★★★ 清剧情**只撤起因、保留"上次谁起的头"**（轮换记忆必须活下来）',
+  );
+  const GCLEAR23 = '999000032';
+  quest23.noteSharedPremise(GCLEAR23, { premise: '只有起因、没记是谁开的', by: '' });
+  check(
+    quest23.clearSharedPremise(GCLEAR23) === true && !quest23.sharedPremise(GCLEAR23),
+    '★ 连 `by` 都没有的记录清完就整条删掉（共享文件里不留空壳）',
+  );
+
   const src23 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
   const bsrc23 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(
@@ -1316,6 +1348,37 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
     '★★ 聊天提示词（`buildSystemPrompt`）真的注入了剧情简报（并带上"刚说过的几句"）',
   );
   check(/6c-4\./.test(src23), '★ 剧情提示词里有 6c-4（真相 / 秘密必须演出来）');
+  // ⚠️ 2026-10-22 加（用户报的两个 bug，都有日志实证）：
+  //   ① 621 群里两个号反复刷「翻了半天也没翻到几个像样的」「我回去再翻翻」
+  //      —— 那是 `maybeHalfSay`（"半句话"接下一段）在剧情里补的，而那段提示词**没有剧情上下文**
+  //      ⇒ 剧情里必须整条掐掉；并且提示词里那句具体示范被逐字照抄了 5 次，示范也得删。
+  //   ② 752 群里两个号连着顶了二十分钟嘴（用户被逼到在群里说「你们别吵了」）
+  //      ⇒ 拌嘴只能一轮，这是新加的死规则。
+  check(
+    /剧情里不补第二段/.test(bsrc23),
+    '★★ 剧情进行中**不补"半句话"**（那段提示词没有剧情上下文，补出来必然是阶段话）',
+  );
+  check(
+    // ⚠️ 只能钉**提示词里那一句原文**（带书名号 + "这种"）：日志引用、注释里那些
+    //    "翻了半天…像样的"是**证据**，必须允许存在（扫全文件字面会把它们一起判红 ✗）
+    !/「还没找着几个像样的」这种/.test(bsrc23),
+    '★ "接下一段"的提示词里**不再给具体示范**（模型照着抄了 5 次同一句）',
+  );
+  check(
+    /拌嘴只能一轮/.test(src23),
+    '★★★ 剧情里**拌嘴只能一轮**（用户原话：「很容易演变成两个人拌嘴，而不推进剧情」）',
+  );
+  // ⚠️ 2026-10-22 用户当场纠正方向：「**不是先换成别的东西，要先回剧情主线，
+  //    强调一遍剧情开始时的提示词**」—— 第一版写的是"换成别的东西"（动手/说新发现/让步），
+  //    那样她会另起一条线，看着还是没在演这条剧情 ✗
+  check(
+    /主线就是开头那条起因/.test(src23),
+    '★★ 顶完嘴要**回到主线**，并把**起因原话再摆一遍**（用户纠正过："不是先换成别的东西"）',
+  );
+  check(
+    /每一轮拌嘴之后自问一次/.test(src23),
+    '★ 每轮拌嘴之后自问"起因里那件事动了没有"（没动就回到它上面）',
+  );
   check(
     /开场不许急着找出口/.test(src23),
     '★★ 开场那一段单独强化过：**开场不许急着找出口**（用户看到的就是开头就去找风）',
@@ -1517,9 +1580,12 @@ console.log('\n【24】★★ 清剧情要**连残留一起清** + 硬条件剧�
   story24.__clear(G24);
 
   // ③ 清剧情时**顺手**清这两处
+  // ⚠️⚠️ 2026-10-19 改（用户：「**还得清除从开始剧情到清除剧情之间的上下文**」）——
+  //    这里**不传 `uids`** 了：传了就只清那两个号说的话，真人那几句「推一下/继续」还留着，
+  //    她照样能从那些话把上一场接下去 ✗ ⇒ 整段时间的上下文全清 ✓
   check(
-    /recent\.dropWindow\(gid, \{ from, to, uids \}\)/.test(src24),
-    '★★★ `/清除剧情` 顺手抹掉上下文里那段台词（不用用户额外操作）',
+    /recent\.dropWindow\(gid, \{ from, to \}\)/.test(src24),
+    '★★★ `/清除剧情` 顺手抹掉上下文里那段台词（而且**是整段全清**，不挑是谁说的）',
   );
   check(
     /storyline\.removeWindow\(gid, \{ from, to \}\)/.test(src24),
@@ -2079,8 +2145,10 @@ console.log('\n【33】★★ 「花多少时间」不许被当成「花了多�
   check(m1?.type === 'spend' && m1?.scope === 'month', '★★★ 对照：「这个月花了多少钱」照旧认', JSON.stringify(m1));
   const m2 = spend33.looksLikeSpendQuestion('今天花了多少');
   check(m2?.type === 'spend' && m2?.scope === 'day', '★★★ 对照：「今天花了多少」照旧认（含 day 范围）', JSON.stringify(m2));
+  // ⚠️ 2026-10-19 改：问工资**已经交给工具**（用户：「先把问工资这个改成工具吧，不用关键词判断了」）
+  //    ⇒ 这里要反过来验：「你赚了多少」**不再**被关键词路当成查账（不认才不会把聊天顶掉）✓
   const m3 = spend33.looksLikeSpendQuestion('你赚了多少');
-  check(m3?.type === 'earn', '★★ 对照：「你赚了多少」照旧认（earn 那一路）', JSON.stringify(m3));
+  check(m3 === null, '★★ 「你赚了多少」不再走关键词路（工资交给工具）', JSON.stringify(m3));
   const m4 = spend33.looksLikeSpendQuestion('余额还有多少');
   check(m4?.type === 'spend', '★★ 对照：「余额还有多少」照旧认', JSON.stringify(m4));
 }
@@ -2701,10 +2769,17 @@ console.log('\n【45】★★★ `/清除剧情` 要连「她自己的话」一�
   //   两个进程各自收到 `/清除剧情`、各自清自己那份 ⇒ 机制上能覆盖两边 ✓
   const src45 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
 
+  // ⚠️⚠️ 2026-10-19 改：`uids` 里带 `'__self__'` 这件事现在只剩**开新剧情前清残留**那条路
+  //    （`/清除剧情` 那条改成**整段全清、不传 uids** 了 —— 它连 `__self__` 一起带走 ✓
+  //     判据见【24】那条；这里只要确认"她自己那份话确实会被清掉"这个坑没回来 ✓）
   check(
-    /String\(this\.selfId \?\? config\.botQQ \?\? ''\),[\s\S]{0,600}?'__self__',/.test(src45),
-    '★★★ `/清除剧情` 的 `uids` 里必须有 `\'__self__\'` —— ' +
+    /\[\.\.\.peersFor\(gid\)\.map\(String\), '__self__'\]/.test(src45),
+    '★★★ 清残留时 `uids` 里必须有 `\'__self__\'` —— ' +
       '她自己的发言在 `recent` 里存的是这个，只传 QQ 号永远清不掉 ✗',
+  );
+  check(
+    /recent\.dropWindow\(gid, \{ from, to \}\)/.test(src45),
+    '★★★ `/清除剧情` 那条改成整段全清（连她自己的台词一起带走）',
   );
   check(/清掉上一段的聊天残留/.test(src45), '★★★ 开新剧情时也会自动清一次上一段的残留（不用手动 /清除剧情）');
   check(
@@ -2934,11 +3009,21 @@ console.log(
     '★ 判"是不是机器人之间"用 `isPeerBot()`，不是靠昵称猜',
   );
   const h = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
-  for (const id of ['llm-thinkPeer', 'llm-thinkQuestPeer', 'llm-thinkQuest']) {
-    check(h.split(id).length - 1 >= 3, `★★ 模型页里「${id}」表单 + 回填 + 保存三处配套`);
+  // ⚠️ 2026-10-19：保存那处重构成 `bool('thinkPeer')` 辅助函数（内部拼 `'llm-' + id`），
+  //    字面量只剩**表单 + 回填**两处 ⇒ 判据改成「≥2 处 + 保存处有对应的 bool()」，
+  //    "表单 / 回填 / 保存三件配套"照样守住。
+  const thinkSaveKey = {
+    'llm-thinkPeer': 'thinkPeer',
+    'llm-thinkQuestPeer': 'thinkQuestPeer',
+    'llm-thinkQuest': 'thinkQuest',
+  };
+  for (const id of Object.keys(thinkSaveKey)) {
+    const n = h.split(id).length - 1;
+    const saved = new RegExp(`bool\\('${thinkSaveKey[id]}'\\)`).test(h);
+    check(n >= 2 && saved, `★★ 模型页里「${id}」表单 + 回填 + 保存三处配套（出现 ${n} 处，保存${saved ? '有' : '缺'}）`);
   }
   check(
-    /thinking: \{[\s\S]{0,200}?peer: !!/.test(h),
+    /thinking: \{[\s\S]{0,200}?peer: (?:bool\('thinkPeer'\)|!!)/.test(h),
     '★★ 保存时三个开关**都显式写**（省略 = 用户关不掉，和 slowQueueDrop 那条同理）',
   );
 }

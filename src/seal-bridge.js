@@ -87,7 +87,7 @@ const SEND_ACTIONS = new Set(['send_group_msg', 'send_private_msg', 'send_msg', 
 const { url: UP_URL, token: UP_TOKEN } = upstreamConfig();
 // ⚠️⚠️ 2026-10-20 换过两次默认端口，都是**撞上了真进程**，记在这里免得再试：
 //    · 3002 —— 一开始用的，用户说容易被别的东西占；
-//    · 4001 —— 实测被 **QQ.exe**（`<QQ安装目录>\QQ.exe`）占着 ⇒ EADDRINUSE，
+//    · 4001 —— 实测被 **QQ.exe**（`D:\Programs\QQNT\QQ.exe`）占着 ⇒ EADDRINUSE，
 //      桥起来就崩（日志只有一行"骰桥启动"）。
 //    ⇒ 现在用 **38021**（高位、不落在 QQ / 常用服务那一段）。
 //    仍然可以用环境变量 `SEAL_BRIDGE_PORT` 覆盖。
@@ -172,7 +172,7 @@ wss.on('connection', (ws) => {
   diceClients.add(ws);
   log('海豹已连上');
 
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let req;
     try {
       req = JSON.parse(String(raw));
@@ -182,37 +182,49 @@ wss.on('connection', (ws) => {
     const action = String(req.action ?? '');
     const echo = req.echo ?? `b${++seq}`;
 
-    // ── 发送类：拦下来交给小祥 ──
+    // ── 发送类：**群里**只在骰娘模式下交给小祥；**私聊直接放行** ──
+    //
+    // ⚠️⚠️ 2026-10-22 重排（用户拍板选 B：「不在骰娘模式就直接拦住不发」）：
+    //    之前这里无条件转给小祥 ⇒ 日常模式打骰子她也会发结果+吐槽；
+    //    改成先问小祥「群 X 在骰娘模式吗」：
+    //      · 在   → 转 `/api/seal-say`（小祥发原文 + 一句括号吐槽）✓
+    //      · 不在 → **直接丢弃**（只给海豹回假成功，群友看不到这条）✓
+    //      · 查不到（小祥没起/超时）→ 当"不在"处理，同样丢弃 ✓
+    //    ⚠️ 假成功**必须先回**再判模式：海豹只看 `retcode`，等久了它会重试/报错。
+    //    ⚠️⚠️ 2026-10-22 再改（用户：「骰娘模式管群吧，私聊直接放行好了」）：
+    //      私聊**不拦** —— 原样转发给上游，海豹自己发到私聊（骰娘模式只管群）。
+    //      放行时**不能先回假成功**：要等上游的真实响应（message_id 等）送回去。
     if (SEND_ACTIONS.has(action)) {
       const p = req.params ?? {};
       const gid = p.group_id ?? p.user_id ?? '';
       const text = extractText(p);
-      const isGroup = action === 'send_group_msg' || action === 'send_group_forward_msg' || !!p.group_id;
-      log(`拦截海豹的 ${action} → 群/人 ${gid}：${String(text).slice(0, 60)}`);
-      relayToBot({ group_id: isGroup ? String(gid) : '', user_id: isGroup ? '' : String(gid), text })
-        .catch((e) => log(`交给小祥失败：${e.message}`));
-      // 对海豹回一个"成功"（它只看 retcode，不信的话会重试/报错）
+      const isGroup =
+        action === 'send_group_msg' || action === 'send_group_forward_msg' || !!p.group_id;
+      if (!isGroup) {
+        log(`放行海豹的 ${action} → 私聊 ${gid}（骰娘模式只管群）：${String(text).slice(0, 40)}`);
+        forwardUp(ws, req, action, echo);
+        return;
+      }
       try {
         ws.send(JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 0 }, echo }));
       } catch {}
+      const on = await diceModeOn(String(gid)).catch(() => false);
+      if (!on) {
+        log(
+          `拦住海豹的 ${action} → 群 ${gid}（**不在骰娘模式**，不发）：` +
+            String(text).slice(0, 40),
+        );
+        return;
+      }
+      log(`拦截海豹的 ${action} → 群 ${gid}（骰娘模式，交给小祥）：${String(text).slice(0, 60)}`);
+      relayToBot({ group_id: String(gid), user_id: '', text }).catch((e) =>
+        log(`交给小祥失败：${e.message}`),
+      );
       return;
     }
 
     // ── 查询类 / 其它：转发给上游，回来的响应按 echo 送回 ──
-    if (!upReady) {
-      try {
-        ws.send(JSON.stringify({ status: 'failed', retcode: 100, data: null, echo, wording: '上游未连接' }));
-      } catch {}
-      return;
-    }
-    const outEcho = `up${++seq}`;
-    pending.set(outEcho, { from: ws });
-    try {
-      up.send(JSON.stringify({ ...req, echo: outEcho }));
-    } catch (e) {
-      pending.delete(outEcho);
-      log(`转发 ${action} 失败：${e.message}`);
-    }
+    forwardUp(ws, req, action, echo);
   });
 
   ws.on('close', () => {
@@ -230,6 +242,48 @@ function extractText(p) {
     return seg.map((s) => (s?.type === 'text' ? String(s?.data?.text ?? '') : `[${s?.type ?? '?'}]`)).join('');
   }
   return '';
+}
+
+/**
+ * 问小祥：这个群现在在骰娘模式吗？
+ *
+ * ⚠️ 2026-10-22 加：桥是"海豹发不发言"的唯一闸门，所以它必须知道骰娘模式状态。
+ *    · 小祥的 `GET /api/dice-mode?group_id=` 返回 `{ on: true|false, until, by }`
+ *    · **查不到 / 超时 / 非 200 一律当"不在"** —— 宁可不发，也别重复发
+ *      （用户选 B：不在骰娘模式时海豹的结果就不该进群）
+ */
+async function diceModeOn(groupId) {
+  const url = `${SAY_URL}/api/dice-mode?group_id=${encodeURIComponent(String(groupId))}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(3000) });
+  if (!res.ok) return false;
+  const j = await res.json();
+  return j?.on === true;
+}
+
+/**
+ * 把海豹的一条请求**原样转发给上游**（真协议端），响应回来时按 echo 送回这条连接。
+ *
+ * ⚠️ 2026-10-22 抽出来：发送类里的**私聊**和所有查询类都走这里。
+ *    · 私聊放行 —— 海豹自己把结果发到私聊（用户：「骰娘模式管群吧，私聊直接放行好了」）
+ *    ⚠️ 上游没连上 → 给海豹回 `failed`（它自己会重试/报错，比静默丢掉好排查）
+ */
+function forwardUp(ws, req, action, echo) {
+  if (!upReady) {
+    try {
+      ws.send(
+        JSON.stringify({ status: 'failed', retcode: 100, data: null, echo, wording: '上游未连接' }),
+      );
+    } catch {}
+    return;
+  }
+  const outEcho = `up${++seq}`;
+  pending.set(outEcho, { from: ws });
+  try {
+    up.send(JSON.stringify({ ...req, echo: outEcho }));
+  } catch (e) {
+    pending.delete(outEcho);
+    log(`转发 ${action} 失败：${e.message}`);
+  }
 }
 
 /** 把海豹的原文交给小祥：小祥负责「原样发 + 补一句吐槽」 */

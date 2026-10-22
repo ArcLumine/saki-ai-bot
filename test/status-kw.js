@@ -24,6 +24,9 @@
 //    （`QQBOT_CONFIG` 显式设过的话不动它 —— 那是有意的调试用法）。
 await import('./_config-base.mjs');
 
+const { config } = await import('../src/config.js');
+config.status.enable = true;
+config.status.host ||= 'test.invalid';
 const { Bot } = await import('../src/bot.js');
 
 let failures = 0;

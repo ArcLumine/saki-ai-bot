@@ -271,10 +271,8 @@ console.log('\n【★★】报账那条路必须「记一笔对话」（<主人>
   check(/attempt < 2/.test(seg), '★ 润色失败会重试一次');
   check(/log\.warn\(`\[花销\] 报账润色失败/.test(seg), '★ 失败用 warn 记（原来 debug，等于没记）');
   check(/润色两次都没成 → 退回模板/.test(seg), '★ 退模板时也留一条能看见的日志');
-  // 顺手：B站那条也是提前 return，同样要记对话
-  const j = botSrc.indexOf('looksLikeVideoQuestion');
-  const seg2 = botSrc.slice(j, j + 3000);
-  check(/touchConversation\(event\)/.test(seg2), '★★ B站那条提前 return 的路也补了 `touchConversation`');
+  // ⚠️ 2026-10-20 删（B 站那条自动触发没了，改成她自己调 [工具:查B站]）——
+  //    touchConversation 现在在 runReadTool 的 handler 里调（不在自动触发那段了）
 }
 
 // ⚠️⚠️ 2026-10-15 加（用户截图：他在群里说「**能看见天花板**」，她当场报了一遍这个月的账：
@@ -289,16 +287,22 @@ console.log('\n【★】★★ 「能看见天花板」不许被当成问账（"
   for (const q of ['能看见天花板', '今晚看烟花', '你这花里胡哨的', '看看这个']) {
     check(spend.looksLikeSpendQuestion(q) === null, `「${q}」不算问账`);
   }
-  // 反过来：**真问账的照旧要认出来**（收紧不能收过头）
+  // 反过来：**真问「花了多少」的照旧要认出来**（收紧不能收过头）
   for (const [q, type] of [
     ['这个月花了多少钱', 'spend'],
     ['花了多少了', 'spend'],
     ['你这月花费多少', 'spend'],
     ['看一下这个月花了多少', 'spend'],
     ['余额还有多少', 'spend'],
-    ['你工资多少', 'earn'],
   ]) {
     check(spend.looksLikeSpendQuestion(q)?.type === type, `「${q}」照旧认出来（${type}）`);
+  }
+  // ⚠️⚠️ 2026-10-19 加（用户：「**先把问工资这个改成工具吧，不用关键词判断了**」）——
+  //    「问工资」这一类**不许再由关键词抢**：换个说法（赚了多少 / 挣多少 / 够不够花）
+  //    原来全靠一张词表，漏得很厉害；现在她在思考链里写 `[工具:工资]` ✓
+  //    ⚠️ 但不许**反过来**把它错判成"问花了多少"（那会报成一笔花销，比不接更糟）✗
+  for (const q of ['你工资多少', 'anon 这个月赚了多少', '你这个月挣了多少', '工资够不够花']) {
+    check(spend.looksLikeSpendQuestion(q) === null, `「${q}」不再由关键词判（交给 [工具:工资]）`);
   }
 }
 

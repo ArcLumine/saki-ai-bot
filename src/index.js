@@ -13,7 +13,18 @@ import * as observe from './observe.js';
 import * as diceLog from './dice-log.js';
 // ⚠️ 「他的资料」自动更新（2026-10-03 用户要求）：他私聊里聊到生活变化 → 自动改 owner.md
 import * as ownerUpdate from './owner-update.js';
+// ⚠️ 2026-10-17 加：**主人最近的近况**短时记忆（48 小时滚动）—— 攒够就总结、定期清过期的 ✓
+import * as ownerRecent from './owner-recent.js';
 import * as life from './life.js';
+// ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关）
+import * as biliShare from './bili-share.js';
+import * as biliPublish from './bili-publish.js';
+// ⚠️ 2026-10-22：B站评论回复（走真浏览器子进程，见 tools/bili-comment-bot.mjs）
+import * as biliComments from './bili-comments.js';
+// ⚠️ 2026-10-21：B站**主动去别人视频下发评论**（搜视频 → 让她写一条 → 真发 → 记链接）
+import * as biliProactive from './bili-proactive.js';
+// ⚠️ 2026-10-22：QQ 侧短期摘要（写进短期共享记忆）
+import * as qqDigest from './qq-digest.js';
 // ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
 import * as peerChat from './peer-chat.js';
 import * as storyline from './storyline.js';
@@ -38,8 +49,6 @@ import * as sessions from './sessions.js';
 // ⚠️ 2026-10-10 加：「服务器重新开启 → @ 他」那套订阅（触发点在 `sessions.tick()`）✓
 import * as serverWatch from './server-watch.js';
 import * as qzoneComment from './qzone-comment.js';
-// ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关）
-import * as biliShare from './bili-share.js';
 
 const bot = new Bot();
 let reconnectTimer = null;
@@ -315,6 +324,18 @@ const HB_MS = 30000;
 const HB_TIMEOUT_MS = 8000;
 const HB_MAX_FAIL = 2;
 
+// ⚠️⚠️ 2026-10-19 修（用户截图：主号在群里一直不接话，日志**每 30 秒断一次**、永远写「第 1 次」）——
+//    「收消息自检」的三个状态变量原来写在 `connectForward()` **里面**
+//    ⇒ 每次断线重连都会重新执行那个函数 ⇒ **冷却和计数全被清零**：
+//      ① 冷却（10 分钟）失效 ⇒ 每 30 秒就判一次死、救一次，
+//         而重连那几秒的群消息**白丢**（表现就是"看着在线、但不接话"）✗
+//      ② `recvRescueCount` 永远是 1 ⇒ 三级自愈里的第 3 级
+//         （**自动重启协议端**）一次都触发不了 ✗
+//    ⇒ 必须放在**模块顶层**，让它们跨连接存活 ✓
+let lastRecvRescueAt = 0;
+let recvRescueCount = 0;
+let recvRescueTimes = [];
+
 function connectForward() {
   const url = config.onebot.url;
   // ⚠️ 2026-09-21：别再写死 NapCat —— 协议端换成 SnowLuma 之后这句是误导的
@@ -334,6 +355,8 @@ function connectForward() {
     log.info('连接成功');
     bot.attach(ws);
     startHeartbeat();
+    // ⚠️ 心跳之外再加一道**收消息自检**（心跳照不出"能发不能收"）—— 见上面那段注释 ✓
+    startRecvCheck();
     // ⚠️ 重连 = 可能"刚掉线恢复" → 立刻查一次月末工资单要不要补发
     //    （用户要求：「如果因为 QQ 掉线正好没发送，当恢复上线之后马上补发」）
     setTimeout(() => {
@@ -385,12 +408,260 @@ function connectForward() {
     hbBusy = false;
   }
 
+  // ── 收消息自检（⚠️ 2026-10-17 加，见下面那段注释）──────────────
+  //
+  // 为什么光有心跳不够：**心跳只证明"我发的请求它有回应"** ——
+  // 而"能发不能收"那种半死状态（请求有回应、事件一条不推）它**照不出来** ✗
+  const RECV_CHECK_MS = 2 * 60 * 1000; // 每 2 分钟看一次
+  const RECV_WINDOW_MS = 6 * 60 * 1000; // 只看最近 6 分钟的消息
+  const RECV_COOLDOWN_MS = 10 * 60 * 1000; // 救过一次之后 10 分钟内别再救
+  let recvTimer = null;
+  let recvBusy = false;
+  // ⚠️⚠️ 2026-10-19 修：`lastRecvRescueAt` / `recvRescueCount` / `recvRescueTimes`
+  //    已提到**模块顶层**（在 `connectForward()` 外面）——
+  //    写在这里会被"每次重连重新执行本函数"清零，
+  //    表现就是每 30 秒救一次、永远"第 1 次"、自动重启协议端永不触发 ✗
+  const RECV_STREAK_WINDOW_MS = 10 * 60 * 1000;
+
+  /**
+   * ⚠️⚠️⚠️ 2026-10-19 加 —— **重启协议端**（不是重启机器人）。
+   *
+   * 实测（2026-10-19 04:5x，爱音半死那次）：机器人侧反复断开重连四次无效，
+   *   而**重启协议端进程后 6 秒**三个号全部重新登录、爱音立刻开始收消息 ✓
+   * ⇒ "能发不能收"这种半死，靠重连治不了，要换掉协议端那个进程。
+   *
+   * ⚠️ 协议端是**三个号共用**的 ⇒ 重启会让三个号一起断几秒再回来（实测 6 秒）✓
+   * ⚠️ 只做 provider 说"能重启"的情况；不支持就明说，别假装 ✓
+   * ⚠️ 先按 PID 停（绝不用命令行匹配杀 —— 会杀到自己的 runner ✗），再按原方式起。
+   */
+  async function restartProvider(bot) {
+    const prov = await import('./provider.js');
+    if (typeof prov.restart === 'function') {
+      const r = await prov.restart({ why: '收消息自检判定"能发不能收"' });
+      log.info(`[收消息自检] 协议端重启调用返回：${JSON.stringify(r ?? {}).slice(0, 200)}`);
+      return r;
+    }
+    const dir = String(config.provider?.dir ?? '').trim();
+    if (!dir) throw new Error('配置里没有 provider.dir，不知道协议端装在哪');
+    // ⚠️⚠️ **绝不把要匹配的字面量直接写进命令行**（会把 DSH 自己的 runner 一起杀掉 ✗，
+    //    铁律：杀进程一律按 PID；这里用**变量拼**关键词、再加"在协议端目录下"双重条件）✓
+    //
+    // ⚠️⚠️⚠️ 2026-10-20 修（**真事故**：用户「爱音又不回消息，能不能把问题一次解决好」）——
+    //    老判据要求 `CommandLine` **同时**含 `index.mjs` 和 `C:\SnowLuma`；
+    //    但实测存在**裸命令行**的实例（`node.exe  index.mjs`，不含任何路径）⇒
+    //    **杀不掉** ⇒ 起来的时候旧的还在 ⇒ **两个 SnowLuma 并存** ⇒
+    //    两个抢同一批身份会话 ⇒ 某个号"能发不能收"、反复出现 ✗✗
+    //
+    //    ⇒ 现在**只认 `ExecutablePath`**（SnowLuma 自带的 `C:\SnowLuma\node.exe`）：
+    //      · 裸命令行的实例**也跑在它上面** ⇒ 照样认得出（70972 那种）✓
+    //      · 而 **DSH 自己的 runner 永远不会命中** —— 我实测加过"命令行含关键词"那条，
+    //        结果它把 `powershell ... 'C:\SnowLuma\node.exe' -ArgumentList 'index.mjs'` 这种
+    //        **我自己的命令行**也数进去了（里面同时含 index.mjs 和 C:\SnowLuma）⇒
+    //        自愈一触发就把正在跑我的那条命令杀掉 ✗（AGENTS 铁律里记过同一个坑）
+    //    ⚠️ 并且**起之前再数一次**：还有残留就**不起了**（宁可报错，绝不留下第二个）✓
+    const ps = [
+      "$ErrorActionPreference='Stop'",
+      "$kw = 'ind' + 'ex.' + 'mjs'", // 拼出来，命令行里不出现那个字面量
+      "$dir = $env:PROV_DIR",
+      'function IsProv($p) {',
+      '  if ($p.ExecutablePath) { if ($p.ExecutablePath -like "$dir*") { return $true } }',
+      '  return $false',
+      '}',
+      '$all = @(Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Where-Object { IsProv $_ })',
+      'foreach ($p in $all) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }',
+      'Start-Sleep -Seconds 3',
+      '# ⚠️ 起之前再数一次 —— 还有残留就**不起**（绝不留下第二个实例 ✗）',
+      '$left = @(Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Where-Object { IsProv $_ })',
+      'if ($left.Count -gt 0) {',
+      "  Write-Output ('STILLRUNNING ' + $left.Count + ' pid=' + (($left | ForEach-Object { $_.ProcessId }) -join ','))",
+      '  exit 0',
+      '}',
+      'Start-Process -FilePath (Join-Path $dir "node.exe") -ArgumentList $kw -WorkingDirectory $dir -WindowStyle Hidden',
+      "Write-Output ('RESTARTED ' + $all.Count)",
+    ].join('\n');
+    const { execFileSync } = await import('node:child_process');
+    const out = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-EncodedCommand',
+        Buffer.from(ps, 'utf16le').toString('base64'),
+      ],
+      { env: { ...process.env, PROV_DIR: dir }, encoding: 'utf8', timeout: 90000 },
+    );
+    log.info(`[收消息自检] 协议端已重启：${String(out ?? '').trim().slice(0, 120)}`);
+    return { ok: true, raw: String(out ?? '').trim() };
+  }
+
+  function stopRecvCheck() {
+    if (recvTimer) clearInterval(recvTimer);
+    recvTimer = null;
+    recvBusy = false;
+  }
+
+  /**
+   * ⚠️⚠️ 2026-10-17 加（用户：「加」）—— **四个号的活儿错开**。
+   *
+   * 起因：用户玩 Minecraft 时**帧率不如以前**。查下来机器人**不是**主因
+   *   （四个号加起来 200 MB、2.5 小时才用 8 秒 CPU ✓），但**多个号会在同一秒一起干活**
+   *   ⇒ 瞬时 CPU / 网络尖峰 ⇒ 对 MC 那种**单线程**的游戏就是掉帧 ✓
+   *
+   * ⇒ 每个号按**自己的 QQ 号**算一个**固定相位**（0~89 秒）+ 每轮再加一点随机抖动
+   *   ⇒ 四个号的周期活从此**永不重叠** ✓
+   */
+  const PHASE_SEC = (() => {
+    const key = String(config.botQQ ?? config.webui?.port ?? '');
+    let h = 7;
+    for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) % 9973;
+    return h % 90;
+  })();
+
+  function startRecvCheck() {
+    stopRecvCheck();
+    // 首轮：按号错开（同一个号每次重启相位一样，便于排查 ✓）
+    const firstMs = (PHASE_SEC + Math.random() * 15) * 1000;
+    recvTimer = setTimeout(() => {
+      void checkRecvHealth();
+      // 之后：每轮在 2 分钟基础上 ±15 秒抖动 ⇒ 就算两个号相位撞了也不会一直撞 ✓
+      recvTimer = setInterval(
+        () => void checkRecvHealth(),
+        RECV_CHECK_MS + (Math.random() * 30 - 15) * 1000,
+      );
+      recvTimer.unref?.();
+    }, firstMs);
+    recvTimer.unref?.();
+  }
+
+  /**
+   * ⚠️⚠️ 2026-10-17 加（用户：「**看752群爱音又没回消息**」）——
+   * **"能发心跳、收不到群事件"那种半死的自动检测与自愈**。
+   *
+   * ## 现场（有协议端日志）
+   *   爱音那条连接在协议端侧是**只出不进**：
+   *     · 它每 30 秒的 `get_login_info` **一直有回应**（⇒ 心跳那道闸判它是好的 ✗）
+   *     · 可 SnowLuma 日志里**一条群事件都没推给它** —— 用户 @ 它的那条，
+   *       协议端只推给了别的两个号 ✗ ⇒ 它一声不响，靠人工重启才恢复
+   *
+   * ## 判据（准，而且不会误伤"半夜没人说话"）
+   *   用 `get_group_msg_history` 拉最近历史 ⇒ 里面若有**必须回她的**消息
+   *   （@ 她 / 关键词 / 服务器问题），而它的 `message_id` **我这边压根没见过**
+   *   （`handled` 里没有 ⇒ 正常收到的消息**一定会**在里面 ✓）
+   *   ⇒ 那就是"协议端推过、我没收到" ⇒ 判定半死 ✓
+   *   ⚠️ 群里没人说话 ⇒ 历史里没有这类消息 ⇒ **不判死** ✓（不会半夜反复重连）
+   *   ⚠️ 拉历史走的是"请求/响应"（半死状态下它**照样通** ✓）—— 这正是这个判据能成立的原因 ✓
+   *
+   * ## 动作
+   *   `terminate()` 强制断开（半开时 `close()` 的挥手可能永远等不到对面）⇒
+   *   走现成的重连；同时把 `catchUpDone` 清掉，让重连后的**补看**把那几条捞回来 ✓
+   */
+  async function checkRecvHealth() {
+    if (recvBusy || stopping || ws.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - lastRecvRescueAt < RECV_COOLDOWN_MS) return;
+    const groups = (config.trigger?.allowGroups ?? []).map(String).filter(Boolean);
+    if (!groups.length || !bot.selfId) return;
+    recvBusy = true;
+    try {
+      for (const gid of groups) {
+        let raw;
+        try {
+          // ⚠️ 数量从 20 降到 12：够判"有没有漏推"就行，别每次都拉一大坨（省 CPU / 网络 ✓）
+          raw = await bot.call('get_group_msg_history', { group_id: gid, count: 12 });
+        } catch {
+          continue; // 这个群拉不到就换下一个（别因为一个群把自检搞挂）
+        }
+        const list = Array.isArray(raw) ? raw : (raw?.messages ?? raw?.data?.messages ?? []);
+        if (!Array.isArray(list) || !list.length) continue;
+        // ⚠️ 判据统一收在 `bot.missedRequiredIds()` 里（和 `catchUpMissed` 同一套口径 ✓）
+        const missed = bot.missedRequiredIds(list, { windowMs: RECV_WINDOW_MS });
+        if (!missed.length) continue;
+        lastRecvRescueAt = Date.now();
+        // ⚠️⚠️⚠️ 2026-10-19 加（用户：「**B**」—— 先验证根因，再按结果改自愈）——
+        //    **实测结论**（04:57→05:00 爱音那个号）：
+        //      · 判据是对的（协议端推过、这边真的没收到）
+        //      · 但**断开重连四次全部无效** —— 重连只重建 WS，
+        //        协议端那边这个号的会话还是坏的 ✗
+        //      · **重启协议端进程后立刻恢复**（三个号 6 秒全部重新登录，爱音马上开始收消息）
+        //      · （重启机器人进程也有效，05:01 那次就是）
+        //    ⇒ 自愈**升级成三级**，别再无脑反复重连：
+        //      ① 本轮第 1 次 ⇒ 断开重连（保留现状，代价最小）
+        //      ② 10 分钟窗口内第 2 次 ⇒ 还是重连，但**明说"大概率要重启协议端"**
+        //      ③ 第 3 次 ⇒ **自动重启协议端**（一个进程、6 秒全回来；可用配置关掉）
+        // ⚠️⚠️⚠️ 2026-10-19 再修（用户：「**看一下为什么 anon 没回消息**」）——
+        //    上一版用 `recvRescueCount` + `recvRescueFirstAt` 两个变量算"第几次"，
+        //    实测**每次都算成 1**（日志三次全是「本轮第 1 次」）⇒ 永远到不了第 3 次
+        //    ⇒ **自动重启协议端一次都没触发** ✗✗
+        //    ⇒ 改成**记时间戳数组**：只数"最近 10 分钟内判死过几次"，
+        //      不依赖任何"重置"逻辑（不会因为某处清零就丢计数）✓
+        recvRescueTimes.push(Date.now());
+        recvRescueTimes = recvRescueTimes.filter((t) => Date.now() - t <= RECV_STREAK_WINDOW_MS);
+        recvRescueCount = recvRescueTimes.length;
+        log.error(
+          `[收消息自检] 群 ${gid} 有 ${missed.length} 条"必须回"的消息**协议端推过、我这边压根没见过**` +
+            `（心跳却是好的）⇒ 判定这条连接**能发不能收**（10 分钟内第 ${recvRescueCount} 次）`,
+        );
+        // ⚠️ 清掉"只补一次"的标记 ⇒ 重连之后 `catchUpMissed()` 会把它们捞回来 ✓
+        bot.catchUpDone = false;
+        // ⚠️⚠️⚠️ 2026-10-20 改（用户：「**爱音又不回消息，能不能把问题一次解决好**」）——
+        //    **第 2 次就重启协议端**（原来是第 3 次）。
+        //    第 1、2 次不断开这条判断是对的（SnowLuma 的 warmup 只在协议端启动时给
+        //    "那时连着"的号建立 ⇒ 中途重连吃不到）；但"等到第 3 次"意味着用户要等十几分钟
+        //    —— 实测他早就发现"又不回消息"了 ✗
+        //    而重启协议端实测 6 秒三个号全部回来 ✓ ⇒ 10 分钟窗口内第 2 次就动手。
+        //    ⚠️ 第 1 次仍然只记日志：偶发一条没推过来不值得重启整个协议端（防误判）✓
+        if (recvRescueCount >= 2 && config.provider?.autoRestartOnDeaf !== false) {
+          log.error(
+            `[收消息自检] ⚠️⚠️ 第 ${recvRescueCount} 次判定"能发不能收" ⇒ **重启协议端**` +
+              `（实测这招有效：三个号 6 秒全部重连）`,
+          );
+          await restartProvider(bot).catch((e) =>
+            log.error(`[收消息自检] 重启协议端失败：${e.message}`),
+          );
+          recvRescueTimes = []; // 重启过就重新计数（清空时间戳数组）✓
+          recvRescueCount = 0;
+          return;
+        }
+        // ⚠️⚠️⚠️ 2026-10-19 关键修正（用户：「**还是不回**」，连续折腾两小时才查出来）——
+        //    **第 1、2 次判死时不再断开重连！**
+        //
+        //    为什么：这个自检原来一判死就 `ws.terminate()`，而对 **SnowLuma** 来说
+        //    **重连是有害的** —— 事件推送（warmup）只在协议端启动时对"那时连着"的号建立；
+        //    她中途重连一次，协议端**不会**给新连接补跑 warmup ⇒ 新连接照样收不到事件 ✗
+        //    ⇒ 于是形成死循环：
+        //        收不到 → 判死 → 主动断连 → 重连后协议端仍不推 → 更收不到 → 再判死…
+        //    实测证据（02:02→02:06 那几轮）：每次断连重连后，协议端日志里
+        //    她的记录**全是 `get_*`，一条 `[Event]` 都没有**，而主号/谷雨的 Event 正常 ✓
+        //
+        //    ⇒ 现在：第 1、2 次**只记日志、不动连接**（漏掉的那条靠 `catchUpMissed` 补看），
+        //      只有第 3 次（10 分钟内）才重启协议端 —— 那才是真正有效的动作 ✓
+        if (recvRescueCount < 2) {
+          log.warn(
+            `[收消息自检] 第 ${recvRescueCount} 次判定"收不到事件" ⇒ ` +
+              `**这次不断开**（对 SnowLuma 来说重连会丢掉事件推送，越连越糟 ✗）；` +
+              `漏的那几条靠「补看」捞回来；**再漏一次就自动重启协议端** ✓`,
+          );
+          return;
+        }
+        try {
+          ws.terminate();
+        } catch {}
+      }
+    } catch (e) {
+      log.debug(`[收消息自检] 出错（不影响收消息）：${e.message}`);
+    } finally {
+      recvBusy = false;
+    }
+  }
+
   ws.on('error', (err) => {
     log.warn(`连接失败: ${err.message}`);
   });
 
   ws.on('close', (code) => {
     stopHeartbeat();
+    stopRecvCheck();
     if (stopping) return;
     bot.onClose();
     if (code === 1008 || code === 4001) {
@@ -680,6 +951,34 @@ if (config.ownerUpdate?.enable !== false && !privateWork.noLearn()) {
   log.info('他的资料自动更新：**工作模式禁止学习** ⇒ 这个号不跑');
 }
 
+// ── 「主人最近的近况」短时记忆（2026-10-17 用户要求）──
+// 用户原话：「加一个对主人的**短时记忆区**，同样计入 `owner.md`，**到 48 小时**前的数据就清除，
+//   主要用于**跨群和私聊**的记忆，所以**只用总结记忆**即可……而且要**记下时间**以便调用和删除。
+//   机器人可以在**没事的时候提一下**里面的东西，但是**不能老是提**」。
+// ⚠️ 这里只负责两件后台事（`bot.js` 那边只负责"攒他说的话"）：
+//   · 每 10 分钟问一次"攒够该总结了吗" ⇒ 够了就**让模型总结**成短句写进 owner.md 末尾区块 ✓
+//   · 每 60 分钟清一遍**超过 48 小时**的（用户要求：到点就清 ✓）
+// ⚠️⚠️ 每个号**各跑各的**（各自的 buf 在自己 state 里 ✓），但写的是**同一份** `knowledge/owner.md`
+//    ⇒ 所以 `owner-recent.js` 写入前会**按文本去重**（同一句已经有了就跳过 ✓），不会互相踩 ✗。
+//    好处：**他在哪个群说的话，那个群的号就会把它总结进去** ⇒ 别的号、私聊也读得到 ✓
+//    （这就是用户要的"跨群和私聊"✓）
+if (config.ownerRecent?.enable !== false) {
+  const everySum = config.ownerRecent?.summarizeIntervalMs ?? 600000;
+  setInterval(() => {
+    ownerRecent
+      .maybeSummarize()
+      .catch((e) => log.debug(`[近况] 总结出错：${e.message}`));
+  }, everySum).unref();
+  setInterval(() => {
+    try {
+      ownerRecent.sweep();
+    } catch (e) {
+      log.debug(`[近况] 清理出错：${e.message}`);
+    }
+  }, 60 * 60 * 1000).unref();
+  log.info('主人近况（短时记忆）：每 10 分钟看要不要总结，超过 48 小时自动清掉 ✓');
+}
+
 // ── 群记忆的「按时间压缩」（2026-09-14 用户要求）──
 // 用户原话：「再加一个**按时间压缩**的功能，**压缩不重要的事情**，
 //   但是**性格要不断细化，不能删除**，**好感度也不能修改**」。
@@ -906,7 +1205,11 @@ if (biliShare.anyEnabled(biliGroups)) {
       .catch((e) => log.warn(`[B站分享] 出错：${e.message}`));
   };
   setInterval(tickBili, every).unref();
-  setTimeout(tickBili, 120 * 1000).unref();
+  // ⚠️⚠️ 2026-10-20（用户：「有时候两个 bot 会同时转发视频」）：**号间错峰** ——
+  //    三个号的进程如果同一时刻醒来判定，就算共享了状态文件，
+  //    同一秒内的两次判定也互相看不见（竞态窗口）⇒ 按号给一个稳定的相位偏移，
+  //    三个号"先后醒"而不是"同时醒" ✓（偏移由号尾决定，重启后不变 ✓）
+  setTimeout(tickBili, 120 * 1000 + biliShare.staggerMs(bot.selfId, every)).unref();
   const detail = biliGroups
     .filter((g) => biliShare.enabled(g))
     .map((g) => {
@@ -918,6 +1221,111 @@ if (biliShare.anyEnabled(biliGroups)) {
     `B站分享：每 ${Math.round(every / 60000)} 分钟看一次（**只发 1 档群**）；` +
       `开着的有：${detail || '（一个都没有）'}`,
   );
+}
+
+/**
+ * 「**这个号要不要跑 B站 那一套**」—— 2026-10-21 用户：
+ *   「**b站那一套也要分QQ账号**，以后也许会加一个b站账号给其他QQ号」
+ *
+ * ⚠️ 为什么不能只靠 `isMainAccount()`：
+ *   配置已经从共用段改成**按号私有**（`biliPublish` / `biliComments` / `biliProactive`），
+ *   但 `config.yml` 顶层那份仍然是"默认值" ⇒ **三个号都会读到 `enable: true`**
+ *   ⇒ 不点名的话三个号会各投一条、各回一遍 ✗
+ * ⇒ 判据：**主号一律跑**；别的号必须在那个段的 `accounts: [QQ, ...]` 里**被点名**才跑 ✓
+ *   （以后给爱音接一个 B站 号：`accounts/10000012.yml` 里写 `biliPublish.enable: true`
+ *     + `accounts: ['10000012']` 就行 —— 登录态那边 profile 已经按号分开了）
+ */
+function biliWanted(section) {
+  const c = config[section] || {};
+  if (c.enable !== true) return false;
+  if (isMainAccount()) return true;
+  const list = (Array.isArray(c.accounts) ? c.accounts : []).map(String);
+  const me = String(bot?.selfId || '');
+  return !!me && list.includes(me);
+}
+
+// ── B站全自动投稿（2026-10-22 加）──────────────────────────
+// 用户：「设置一个时间段，每天随机在这段时间制作发送…全部 agent 完成」（A 档 = 直接发布）
+// ⚠️ 默认只在**主号**上跑（别的号要在 `accounts` 里点名）：三个号都读同一份默认配置 ⇒
+//    不加这道闸会三个号各做一条、发三条 ✗
+if (biliWanted('biliPublish')) {
+  // ⚠️ 2026-10-21 用户：「**所有视频缓存要在12点清除**」
+  //    每 10 分钟看一次，12 点之后当天第一次跑（`sweepTick` 自己按天去重）
+  setInterval(() => {
+    try { biliPublish.sweepTick(); } catch (e) { log.warn(`[B站投稿] 清缓存 tick 出错：${e.message}`); }
+  }, 10 * 60 * 1000).unref();
+  const everyPub = 30 * 1000; // 每 30 秒看他到点没（一天只做一次，判据在模块里）
+  setInterval(() => {
+    try { biliPublish.tick(); } catch (e) { log.warn(`[B站投稿] tick 出错：${e.message}`); }
+  }, everyPub).unref();
+  const st = biliPublish.status();
+  log.info(`B站投稿：已开启（每天在 ${st.window} 里随机挑一个时刻，自动生成并发布）；` +
+    `今天是 ${st.todayDone ? '已经做过了' : st.nextAt}；连续群聊 ${st.streakGroup}/${st.groupMaxStreak} 天`);
+} else if (config.biliPublish?.enable) {
+  log.info('B站投稿：本进程不是主号 ⇒ 不跑（只在主号上执行，防重复投稿）');
+}
+
+/* ── B站**评论回复**（2026-10-22 加）─────────────────────────
+ * 用户：「继续接管 b 站账号的下一步，要能回复在 b 站对她的回复消息」
+ * ⚠️ 同样只在**主号**跑：浏览器登录态是同一个账号，多号一起跑会互相抢 profile ✗
+ * ⚠️ 默认关着（`biliComments.enable`）—— 在 B站对外说话得用户自己开
+ */
+if (biliWanted('biliComments')) {
+  setInterval(() => {
+    try { biliComments.tick(); } catch (e) { log.warn(`[B站评论] tick 出错：${e.message}`); }
+  }, 30 * 1000).unref();
+  // ⚠️ 2026-10-22 用户：「每次启动机器人时都启动一个最大化节省资源的浏览器实例，一直运行」
+  //    ⇒ 开机就把常驻浏览器拉起来（之后每次检查只要 goto 一下，2~3 秒）
+  try { biliComments.warmup(); } catch (e) { log.warn(`[B站评论] 预热浏览器失败：${e.message}`); }
+  const cs = biliComments.status();
+  log.info(`B站评论回复：已开启（每 ${cs.checkEveryMinutes} 分钟看一次，一次最多回 ${cs.maxPerRun} 条，` +
+    `只看 ${cs.sinceHours}h 内的；常驻浏览器：${cs.browserReady ? '已就绪' : '正在启动'}）`);
+} else if (config.biliComments?.enable) {
+  log.info('B站评论回复：本进程不是主号 ⇒ 不跑');
+}
+
+/* ── B站**主动去别人视频下发评论**（2026-10-21 加）───────────
+ * 用户：「继续主动去别人视频下发评论的工作」「和分享视频一样，可以差不多直接复用那边的所有设置」
+ * ⚠️ 只在主号跑（同一个浏览器登录态，多号一起跑会抢 profile ✗）
+ * ⚠️ 默认关着 —— 这是在陌生人视频下公开说话，必须用户自己开
+ */
+if (biliWanted('biliProactive')) {
+  setInterval(() => {
+    try { biliProactive.tick(); } catch (e) { log.warn(`[B站主动评论] tick 出错：${e.message}`); }
+  }, 30 * 1000).unref();
+  const bp = biliProactive.status();
+  log.info(`B站主动评论：已开启（关键词 ${bp.keywords.length} 个｜每天 ${bp.minPerDay}~${bp.maxPerDay} 条｜` +
+    `${bp.startHour}~${bp.endHour} 点｜今天 ${bp.countToday}/${bp.targetToday}）`);
+} else if (config.biliProactive?.enable) {
+  log.info('B站主动评论：本进程不是主号 ⇒ 不跑');
+}
+
+/* ── 语音：启动时后台预热 TTS（2026-10-21 加）───────────────
+ * ⚠️ 为什么要预热：IndexTTS 冷启动要 **91 秒**（加载模型），
+ *   而 `synth()` 在没热起来时是**故意**返回失败的（让那一条先发文字，用户不用干等）——
+ *   于是**她第一次想发语音的那条永远是文字**，用户看到的就是"工具没生效" ✗
+ *   ⇒ 启动后延迟 45 秒（等机器人自己稳定）**在后台把 TTS 拉起来**，
+ *     之后她一调 `[工具:语音]` 就是真的语音 ✓
+ *   ⚠️ 只在 `voice.enable` 开着时预热（关了就别占显存）
+ */
+if (config.voice?.enable === true) {
+  setTimeout(() => {
+    import('./group-voice.js')
+      .then((gv) => gv.warmup())
+      .catch((e) => log.debug(`[群语音] 预热失败：${e.message}`));
+  }, 45 * 1000).unref();
+}
+
+/* ── QQ 侧的**短期摘要**（2026-10-22 加）─────────────────────
+ * 用户要求：短期记忆里要有「在 QQ 这边最近发生了什么事」
+ * ⚠️ 只在主号跑：三个号都写会把同一件事记三遍 ✗
+ */
+if (isMainAccount()) {
+  setInterval(() => {
+    try { qqDigest.tick(); } catch (e) { log.warn(`[QQ摘要] tick 出错：${e.message}`); }
+  }, 30 * 1000).unref();
+  const qd = qqDigest.status();
+  if (qd.enable) log.info(`QQ 短期摘要：每 ${qd.everyMinutes} 分钟总结一次群聊（写进短期记忆）`);
 }
 
 // ── 待发箱：通道恢复之后自动补发 ─────────────────────────────
@@ -955,6 +1363,38 @@ function startOutboxTick() {
 // ⚠️ 待发箱的定时器**无条件注册**（和剧情那个一样）：
 //    总开关只该管"要不要主动生成"，不该管"已经生成、只是没发出去的东西"。
 startOutboxTick();
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-22 加（用户：「**上传的时候失败了也要记下来，下次重启继续发**」）——
+ * **待补发产物**：群任务做完了、但文件没发出去（上传超时 / 群文件空间满 / 协议端正好挂着）
+ * ⇒ `agent-bridge.js` 把它落盘到 `state/pending-arts.json`
+ * ⇒ 这里**启动时补一次 + 每 5 分钟补一次**，直到发出去为止 ✓
+ *
+ * 真事故（2026-10-22 00:11）：`丰川祥子出场.mp4` 做好了，发的时候协议端正好挂了
+ * ⇒ 只在日志里留一行 ⇒ 重启后谁也不知道还有东西没发 ⇒ 用户问「752 群做好的文件又没发出来」✗
+ */
+function startPendingArtsTick() {
+  const every = 5 * 60 * 1000;
+  let running = false;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      if (!bot?.selfId) return; // 没登录就别试（下一轮再说）
+      const ab = await import('./agent-bridge.js');
+      await ab.retryPendingArts(bot);
+    } catch (e) {
+      log.debug(`[任务] 待补发轮询出错：${e.message}`);
+    } finally {
+      running = false;
+    }
+  };
+  // 启动时先试一次（等 20 秒：让协议端先连上）
+  setTimeout(() => void tick(), 20 * 1000).unref?.();
+  setInterval(tick, every).unref();
+  log.info('待补发产物：启动后 20 秒试一次，之后每 5 分钟一次（发不出去的会一直留着重试）');
+}
+startPendingArtsTick();
 
 // ── 二级剧情（任务系统）的推进 ─────────────────────────────
 //

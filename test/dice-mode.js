@@ -178,21 +178,24 @@ console.log('\n【5】★★★★ 三处拦截点全都在（最要紧的一组
   );
 
   // 权限：必须复用 canTeach()（用户明确「权限和安静指令一致」）
-  // ⚠️⚠️ 2026-10-06：窗口从 2000 加到 3200 —— 因为插进了 `sealdice.shouldRelay()`
-  //    的分支（防「海豹接了 IM ⇒ 两条结果」），`sealdice.ask()` 被推到 2000 字符之外，
-  //    这条断言就红了。⚠️ 别为了让它过就把窗口缩回去 —— 那是把新代码挤出检查范围。
   const h = bj.slice(bj.indexOf('async handleDiceMode'), bj.indexOf('async handleDiceMode') + 3200);
   check(/this\.canTeach\(event\)/.test(h), '★★ handleDiceMode 用 canTeach() 判权限（同安静指令）');
 
-  // 转述：骰娘模式下走 sealdice.ask()；**日常模式**下交给海豹（2026-10-20 加）
+  // ⚠️⚠️ 2026-10-22 改（用户选 B：骰点唯一入口改成骰桥）：
+  //    `sealdice.ask()` / `shouldRelay()` 那一套**全部退役** —— 骰点指令只做一件事：
+  //    消费掉（return true），别掉进 decide()。真正转给海豹的是桥，
+  //    海豹回话时桥再问 `GET /api/dice-mode` 决定发不发。
+  // ⚠️ 必须先剥掉注释行再查 —— 注释里自己就写着「绝不能再调 sealdice.ask()」，
+  //    不剥的话会测出一个假的失败。
+  const hCode = h
+    .split(/\r?\n/)
+    .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+    .join('\n');
+  check(!/sealdice\.(ask|shouldRelay|enabled)\(/.test(hCode), '★★ 不再调 sealdice（骰点交给桥）');
   check(
-    /if \(!this\.isDiceMode\(event\)\)[\s\S]{0,700}?shouldRelay\('group'\)/.test(h),
-    '★★ 日常模式：海豹接了 IM 时把骰点**消费掉**（她不接嘴，2026-10-20）',
+    /diceMode\.isDiceCommand\([\s\S]{0,200}?return true/.test(h),
+    '★★ 骰点指令**照样消费掉**（别让它当普通消息走 decide）',
   );
-  check(/sealdice\.ask\(/.test(h), '★ 转述走 sealdice.ask()');
-  // ⚠️ 海豹没配时也必须**消费掉**这条，否则它会当普通消息走 decide
-  check(/if \(!sealdice\.enabled\(\)\)/.test(h), '★ 海豹没启用时有专门分支');
-  check(/!sealdice\.enabled\(\)\)[\s\S]{0,400}?return true/.test(h), '★★ 海豹没启用时**仍然消费掉**这条（别让它当普通消息走）');
 }
 
 console.log('\n【6】★ 重启后回归日常（用户要求）');

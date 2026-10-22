@@ -105,6 +105,10 @@ ab.__setVoice(async (kind, facts) => String(facts ?? ''));
 //    不桩的话它会**真调模型**（每句 @她的消息都要等 8 秒 ✗），而且会抢插话那条路 ✗
 //    （要测它的那一段自己覆盖成 `action:'ask'` ✓ 见【27】）
 ab.__setAskAgent(async () => ({ action: '', question: '' }));
+// ⚠️⚠️ 2026-10-16 加：**"插话前先探查现状"那一步也要桩掉**（`peekForChange`）——
+//    它是**一次真的只读 agent 调用** ⇒ 不桩的话：① 本套件从 4 秒变 **216 秒**；
+//    ② 真花一次 agent 的钱 ✗（要验的是"探查之后有没有带上建议重跑"，不是探查质量）
+ab.__setPeek(async () => '');
 // ⚠️⚠️ 2026-10-14（用户：「**直接把 agent 设定为 saki 自己的电脑**，由**她自己决定**
 //    什么时候该用电脑…」）：那道"她自己决定要不要动电脑"的判定也是**一次真模型调用** ——
 //    默认桩成「不用」，否则**套件里每一句 @她的话都会真调模型**（等 6 秒 + 花钱 ✗）。
@@ -227,11 +231,20 @@ console.log('\n【1】★★ 主人说一句活 → 两个空格开头的确认 
     !!dir && existsSync(join(dir, 'AGENTS.md')) && existsSync(join(dir, '任务.md')),
     '★★ 文件夹里放好了 `AGENTS.md`（铁律的副本）+ `任务.md`（这次是谁、原话是什么）',
   );
-  // ⚠️ 用"父目录就是工作区"判（工作区在套件里是**相对路径** —— 别拿绝对路径去 startsWith）
+  // ⚠️ 2026-10-19 改（用户：「**把在群里开的任务都收到一个文件夹里**，现在 agentwork 文件夹里有点乱了」）——
+  //    原来这条断言要求"任务文件夹就在工作区**根下**"，现在改成**统一放进 `群任务/`** 了。
+  //    ⚠️ 但"别塞进深层子目录"那个初衷**还在**：任务文件夹往下**不再有子层**，
+  //    再深就不许了 —— 不然清理逻辑（按顶层文件夹扫）和用户自己翻文件都会变难 ✗
+  // ⚠️ 用"父目录就是工作区/群任务"判（工作区在套件里是**相对路径** —— 别拿绝对路径去 startsWith）
+  const wsBase = String(config.agent.workspace).replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
   const parent = dir ? dirname(String(dir)).replace(/[\\/]+$/, '').toLowerCase() : '';
+  // ⚠️⚠️ 2026-10-21 再改（用户：「**不同群不应该不是同一个 agent 文件夹吗**」）——
+  //    现在多一层**群号**：`<工作区>/群任务/<群号>/<任务文件夹>`
+  //    ⇒ 两个群同一个活名也各归各的，物理上串不了（2026-10-21 跨群发错视频的根因之一）
+  const groupOfDir = parent ? parent.slice(parent.lastIndexOf('\\') + 1) : '';
   check(
-    !!parent && parent === String(config.agent.workspace).replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase(),
-    '★ 任务文件夹就在工作区**根下**（没有塞进深层子目录）',
+    !!parent && dirname(parent) === `${wsBase}\\群任务` && /^\d+$/.test(groupOfDir),
+    '★ 任务文件夹在 `<工作区>/群任务/<群号>/` 里（按群隔离，不往更深的子目录里塞）',
     dir || '',
   );
 }
@@ -560,6 +573,39 @@ console.log('\n【14】★★ 把会话登记进 GUI 的工作区列表（用户
   delete process.env.QQBOT_DSH_HOME;
 }
 
+console.log('\n【14.5】★★ 会话反查：**"正在跑的活"也要能在任务面板上看对话**');
+{
+  // ⚠️⚠️ 2026-10-16 加（用户：「**正在跑的能不能也把对话显示出来**」）——
+  //    会话 id 是**扫会话目录**扫出来的，而"扫"原来只在子进程**退出之后**才做 ⇒
+  //    跑着的那几十分钟里任务历史里是空的 ⇒ 面板点开显示「（这次没有可显示的对话）」✗
+  //    ⇒ 现在两条兜底：① 跑着时每 2 秒扫一次（`cliRunner` 里的 `grabSid`）；
+  //                    ② 真没有就按「工作区尾巴 + 时间窗」反查（`sessionIdForTask`）✓
+  //    这里测 ②（① 要真起一个 dsh 进程，套件里太慢 ✗）
+  const home = join(ROOT, 'logs', '__test-agent-dsh-sid');
+  rmSync(home, { recursive: true, force: true });
+  const uid = '10000002';
+  // 工作区目录名就是 DSH 那套编码：非 ASCII 变成 `~XXXX~`，**中文尾段的号原样保留** ✓
+  const wsName = '--C-x--agentwork-~79C1~804A-10000002--';
+  const sid = 'session-11111111-2222-3333-4444-555555555555';
+  mkdirSync(join(home, 'sessions', wsName, sid), { recursive: true });
+  writeFileSync(join(home, 'sessions', wsName, sid, 'session.v3.jsonl.zstd'), 'x', 'utf8');
+  const keepHome = process.env.QQBOT_DSH_HOME;
+  process.env.QQBOT_DSH_HOME = home;
+  const at = Date.now();
+  const hit = ab.sessionIdForTask({ dir: join(ROOT, WS_REL, '私聊', uid), startedAt: at, endedAt: 0 });
+  check(hit === sid, '★★ 按"工作区尾巴 + 时间窗"把会话反查出来了', hit || '（没查到）');
+  const other = ab.sessionIdForTask({ dir: join(ROOT, WS_REL, '私聊', '9999999999'), startedAt: at, endedAt: 0 });
+  check(other === '', '★ **别的号**的活不会捞到这条会话（认工作区尾巴）', other || '（对的，空的）');
+  const old = ab.sessionIdForTask({
+    dir: join(ROOT, WS_REL, '私聊', uid),
+    startedAt: at - 86400000,
+    endedAt: at - 86400000 + 1000,
+  });
+  check(old === '', '★ 时间对不上的老任务也不乱认（时间窗兜着）', old || '（对的，空的）');
+  if (keepHome === undefined) delete process.env.QQBOT_DSH_HOME;
+  else process.env.QQBOT_DSH_HOME = keepHome;
+}
+
 console.log('\n【15】★★ 做完的**文件**发进群（用户要的是那份产物，不是一句"做好了"）');
 {
   ab.__reset();
@@ -606,8 +652,12 @@ console.log('\n【15】★★ 做完的**文件**发进群（用户要的是那�
     JSON.stringify(up.map((u) => u.params.group_id)),
   );
   check(
-    b.sent.some((s) => /太大\.pdf/.test(s.text) && /脚本\.py/.test(s.text)),
-    '★★ 没发出来的那些**明说了一句**（连"在哪个文件夹里"一起说清，绝不假装发过）',
+    // ⚠️ 2026-10-20 改：原来还要求"连在哪个文件夹里一起说清"——
+    //    可代码那边明令「不许出现工作区/文件夹/路径」（用户 2026-10-13 定的：
+    //    别交代放哪儿，东西直接发到群里了）⇒ 两条互相打架 ✗
+    //    ⇒ 只断言**最关键的那点**：没发出去的东西要**点名说**，绝不假装发过 ✓
+    b.sent.some((s) => /太大\.pdf/.test(s.text)),
+    '★★ 没发出来的那个**明说了一句**（点了名，绝不假装发过）',
     JSON.stringify(b.sent.map((s) => s.text.slice(0, 30))),
   );
 
@@ -1082,7 +1132,18 @@ console.log('\n【22】★★ 群文件：自动建一个文件夹，只往它�
 
   // 上传时带上 folder_id
   ab.__reset(); // ⚠️ 清掉上面那份缓存，不然拿到的还是 FID1
-  const d = ab.taskDirFor('发个东西测试');
+  const d = ab.taskDirFor('发个东西测试', GROUP);
+  // ⚠️ 2026-10-21 加（用户：「**不同群不应该不是同一个 agent 文件夹吗**」）——
+  //    任务目录按群隔离：同样的活名、两个群 ⇒ 两个目录，绝不共用 ✓
+  {
+    const dA = ab.taskDirFor('同名任务隔离', '999000001');
+    const dB = ab.taskDirFor('同名任务隔离', '999000002');
+    check(
+      dA !== dB && dA.includes('999000001') && dB.includes('999000002'),
+      '★★ A/B 群的任务目录各归各的（同一个活名也不共用）',
+      `${dA} | ${dB}`,
+    );
+  }
   writeFileSync(join(d, '报告.md'), 'x'.repeat(20), 'utf8');
   const up = [];
   const b2 = botWith();
@@ -1148,14 +1209,21 @@ console.log('\n【23】★★ 必须 @ 她才能接任务（用户：「接任�
   await wait(40);
   check(h2 === true && calls.tasks.length === 1, '★★ @ 了她 ⇒ 照常接', String(calls.tasks.length));
 
-  // ③ 引用她那条消息 ⇒ 也算（那本来就是冲她说的）
+  // ③ ⚠️ 2026-10-21 改（用户：「**在群里所有的和任务相关的都必须要@她才能启动**」）——
+  //    原来这里断言"引用她那条 ⇒ 也算在跟她说话"，
+  //    现在**引用谁那条都不算**（真事故：黑祥没 @ 她、只挂着引用，
+  //    就把正在跑的视频活顶掉、另开了一个 ✗）⇒ 断言反过来：**不接** ✓
   ab.__reset();
   const calls3 = stubRunner();
   const b3 = botWith();
   const m3 = [{ type: 'reply', data: { id: '1' } }, textSeg(taskText)];
   const h3 = await ab.handle(evOf(OWNER, m3), m3, b3);
   await wait(40);
-  check(h3 === true && calls3.tasks.length === 1, '★ 引用她那条 ⇒ 也算在跟她说话', String(calls3.tasks.length));
+  check(
+    h3 === false && calls3.tasks.length === 0,
+    '★★ 只挂着引用、没 @ 她 ⇒ **不接**（2026-10-21 收紧：引用不算 @）',
+    String(calls3.tasks.length),
+  );
 
   // ④ `/任务撤回` 不带 @ 也照旧管用（例外）
   ab.__reset();
@@ -1301,8 +1369,15 @@ console.log('\n【26】★★ 插话 = 立刻带上新要求接着做（且绝�
   ab.__setRunner((task, hooks) => {
     runs.push({ task: String(task), dir: String(hooks?.taskDir ?? '') });
     // ⚠️ 产物要在"agent 还在跑的时候"写出来 —— 它收尾时才会去扫任务文件夹 ✓
+    // ⚠️ 2026-10-20：**必须写进 `产物/` 子目录**（用户：「刚才做动画，又发了散文件出来」）——
+    //    新规矩是"位置即意图"：`产物/` 里的才算她声明要交的成品；
+    //    写根目录的脚本/音频会被当"她自己干活的工具"跳过 ✓
     try {
-      if (hooks?.taskDir) writeFileSync(join(String(hooks.taskDir), 'x.py'), 'print(1)\n', 'utf8');
+      if (hooks?.taskDir) {
+        const od = join(String(hooks.taskDir), '产物');
+        mkdirSync(od, { recursive: true });
+        writeFileSync(join(od, 'x.py'), 'print(1)\n', 'utf8');
+      }
     } catch {}
     return {
       // ⚠️ 第一轮**必须一直挂着**（不然插话时"手上没活"，根本走不到插话那条路 ✗）；
@@ -1357,7 +1432,14 @@ console.log('\n【27】★★ 她答不上来时，把问题转给 agent 再问�
   ab.__setVoice(async (k, f) => String(f ?? ''));
   const runs = [];
   ab.__setRunner((task, hooks) => {
-    runs.push({ task: String(task), dir: String(hooks?.taskDir ?? '') });
+    const td = String(hooks?.taskDir ?? '');
+    // ⚠️ 2026-10-21：真往 `产物/` 放一份东西 —— 追问判定的"活简介"要靠它认出"这个活做出了 x.py"✓
+    //    （位置即意图：`产物/` 里的才是成品，见 `collectArtifacts`）
+    try {
+      mkdirSync(join(td, '产物'), { recursive: true });
+      writeFileSync(join(td, '产物', 'x.py'), 'print(1)', 'utf8');
+    } catch {}
+    runs.push({ task: String(task), dir: td });
     return {
       promise: Promise.resolve({
         code: 0,
@@ -1376,6 +1458,13 @@ console.log('\n【27】★★ 她答不上来时，把问题转给 agent 再问�
   await wait(80);
   check(runs.length === 1, '★ 先做完一个活');
   check(!!ab.recentDoneTask(), '★ 任务历史里能取到"刚做完的那个"');
+  // ⚠️ 2026-10-21 加（用户：「**给模型的还要有之前任务的简介，才能判定到底是在追问什么**」）——
+  //    追问判定不许只看到"活的名字"，要看到**这个活做出了什么**
+  check(
+    /x\.py/.test(ab.taskBriefFor(ab.recentDoneTask().dir, '帮我做个 x 的脚本')),
+    '★★ 追问判定的"活简介"里带上了产物名（模型才判得出在问哪件事）',
+    ab.taskBriefFor(ab.recentDoneTask().dir, '帮我做个 x 的脚本'),
+  );
   check(
     /x\.py/.test(ab.recentDoneNote()),
     '★★ 她的聊天上下文里会带上"最近做完的活 + 产物名"',
@@ -1619,6 +1708,58 @@ console.log('\n【33】★★ 群里必须 @ 她 + 群聊记录只是背景（20
   check(
     /建群文件夹失败（回头再找一遍）/.test(src33) && /^\s+log\.warn\(/m.test(src33),
     '★ 建群文件夹失败提到了 warn（不然"产物为什么散在群文件根目录"查不出来）',
+  );
+}
+
+console.log(
+  '\n【34】★★★ 任务面板**不留"被打断了"的僵尸记录**（2026-10-16 用户两次截图问）',
+);
+{
+  // 用户原话：「**看看为什么这个是被杀的状态，现在不应该有被杀掉的状态吧，
+  //   要么重启了之后自动继续，要么是做完了**」
+  //   ⚠️ 第二次截图（重启之后又出现）：真因是 `tidyStaleTasks` 的窗口 60 秒
+  //      —— 启动那一刻会把历史里的 `running` 全标成 `killed`（endedAt = 启动时刻），
+  //         而调用方是**启动后 45 秒**来收拾 ⇒ 45 < 60 ⇒ **被窗口挡掉** ⇒ 永远挂着 ✗
+  const idOld = ab.addPrivateHist({ by: '10000009', task: '旧的被打断的' });
+  ab.patchPrivateHist(idOld, { status: 'killed', endedAt: Date.now() - 30000 });
+  const idNew = ab.addPrivateHist({ by: '10000009', task: '刚刚被打断的' });
+  ab.patchPrivateHist(idNew, { status: 'killed', endedAt: Date.now() });
+  const idLive = ab.addPrivateHist({ by: '10000008', task: '其实还在跑的' });
+  ab.patchPrivateHist(idLive, { status: 'killed', endedAt: Date.now() - 30000 });
+  const idAsk = ab.addPrivateHist({ by: '10000009', task: '当时在问他' });
+  ab.patchPrivateHist(idAsk, { status: 'asking' });
+
+  const n = ab.tidyStaleTasks((t) => String(t.by) === '10000008');
+  const find = (id) => ab.taskHistory(200).find((x) => x.id === id) || {};
+  check(
+    find(idOld).status === 'done',
+    '★★★ 半分钟前那条"被打断了" ⇒ 收拾成"做好了"（面板不留僵尸 ✓）',
+    find(idOld).status,
+  );
+  check(
+    find(idLive).status === 'running',
+    '★★ 其实**还在跑**的那条 ⇒ 标回"正在做"（不许误标成做好了 ✓）',
+    find(idLive).status,
+  );
+  check(find(idNew).status === 'killed', '★ 刚刚（10 秒内）那条先别动（可能正要自己标 done ✓）', find(idNew).status);
+  check(find(idAsk).status === 'asking', '★ "当时在问他"那种一个字都不动（它不是在跑 ✓）', find(idAsk).status);
+  check(n >= 1, '★ 返回"收拾了几条"（日志里要看得出 ✓）', String(n));
+
+  const s34 = readFileSync(join(ROOT, 'src', 'agent-bridge.js'), 'utf8');
+  check(
+    /minAgeMs = 10000/.test(s34),
+    '★★★ 窗口是 **10 秒**（60 秒会把"启动时标的那批"漏掉 ⇒ 面板永远挂着 ✗）',
+  );
+  const p34 = readFileSync(join(ROOT, 'src', 'private-work.js'), 'utf8');
+  check(
+    // ⚠️ 2026-10-20：45 秒 → **120 秒**（用户：「为什么视频没发出但人物显示完成」）——
+    //    resume（60 秒）必须先跑，tidy 收尾（标 done）只能在它后面 ⇒ 120 秒 ✓
+    /setTimeout\(tidyOnce, 120000\)/.test(p34) && /setInterval\(tidyOnce, 10 \* 60 \* 1000\)/.test(p34),
+    '★★ 开机 120 秒收拾一次（**必须晚于 60 秒那条 resume**，不然被打断的单还没接上就被标 done ✗）+ 之后**每 10 分钟**再收拾一遍 ✓',
+  );
+  check(
+    /if \(tidyTimer\) clearInterval\(tidyTimer\)/.test(p34),
+    '★ `stop()` 会把那个定时器清掉',
   );
 }
 

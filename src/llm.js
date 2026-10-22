@@ -65,8 +65,32 @@ const isNetErr = (e) =>
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** ⚠️ 这个地址是不是**本机**（本机服务绝不许走代理） */
+const isLocalUrl = (u) => {
+  try {
+    const h = new URL(String(u)).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '0.0.0.0';
+  } catch {
+    return false;
+  }
+};
 /** 用指定出口发一次请求 */
 function rawFetch(url, opts, mode) {
+  // ⚠️⚠️ 2026-10-17 修（真 bug：**回归里 12 个套件全挂**）——
+  //    **本机地址一律直连**，不管出口选的是代理还是直连 ✗
+  //
+  //    现场：套件跑的是"假模型"，地址 `http://127.0.0.1:39xxx/v1` ——
+  //    而 `applyEgress()` 探到 7890 在听（Clash 常驻）⇒ 把**全局 dispatcher**
+  //    换成了 `ProxyAgent` ⇒ 连**打本机假模型**的请求也丢给代理 ⇒ 打不到 ✗
+  //    ⇒ 机器人回的是兜底句「刚卡了一下，你再说一遍行吗」⇒ 12 套全红 ✗
+  //
+  //    ⚠️ `_run-bot.bat` 里那个 `NO_PROXY=127.0.0.1` 管的是 **Node 自己的
+  //      EnvHttpProxyAgent**，管不着这里手装的 `ProxyAgent` ✗（两套东西）
+  //    ⚠️ 生产也受益：`baseURL` 配成**本机中转站**的人，以前会被代理砸掉 ✗
+  if (isLocalUrl(url)) {
+    directAgent ??= new Agent();
+    return undiciFetch(url, { ...opts, dispatcher: directAgent });
+  }
   if (mode === 'proxy') {
     proxyAgent ??= new ProxyAgent(PROXY_URL);
     return undiciFetch(url, { ...opts, dispatcher: proxyAgent });
@@ -192,17 +216,29 @@ async function requestWithEgress(url, opts = {}) {
   try {
     return await rawFetch(url, opts, first);
   } catch (e) {
+    /* ⚠️ 2026-10-22：**两个出口都试不通 ⇒ 说明这家服务真的连不上** ⇒ 触发降级
+     *   （用户：「优先级在前的模型不可用，兜底自动使用后一级的模型 10 分钟」）
+     *   ⚠️ 只在**最终**失败时降（下面那个 `throw e` 之前），中间换出口那次不算 ✗ */
     if (!isNetErr(e)) throw e;
     const other = first === 'proxy' ? 'direct' : 'proxy';
-    if (other === 'proxy' && !(await proxyAlive(true))) throw e; // 代理本来就不通，别白试
+    if (other === 'proxy' && !(await proxyAlive(true))) {
+      noteLlmFailure(`网络：${e?.cause?.code || e?.message}`);
+      throw e;
+    }
     log.warn(
       `[网络] ${first === 'proxy' ? '代理' : '直连'}失败（${e?.cause?.code || e?.message}）→ 换` +
         `${other === 'proxy' ? '代理' : '直连'}重试一次（运行中自动切换，2026-09-16）`,
     );
-    const res = await rawFetch(url, opts, other);
-    // ⚠️ 必须走 `applyEgress`（它会把全局 dispatcher 一起换掉），别只赋 `egress`
-    applyEgress(other);
-    return res;
+    try {
+      const res = await rawFetch(url, opts, other);
+      // ⚠️ 必须走 `applyEgress`（它会把全局 dispatcher 一起换掉），别只赋 `egress`
+      applyEgress(other);
+      return res;
+    } catch (e2) {
+      // 换出口也失败 ⇒ 这家确实连不上 ⇒ 降级
+      if (isNetErr(e2)) noteLlmFailure(`网络：${e2?.cause?.code || e2?.message}`);
+      throw e2;
+    }
   }
 }
 
@@ -279,7 +315,307 @@ export function llmFetch(url, opts = {}) {
 
 // 注意：不要在模块顶层解构 config.llm —— 那样会把配置固化在加载时，
 // 管理界面改了模型或 Key 之后就不生效了。统一在函数里现读。
-const llmCfg = () => config.llm;
+/* ══════════════════════════════════════════════════════════════════
+ * ⚠️⚠️ 2026-10-22 加：**模型故障转移**（用户原话：
+ *   「如果优先级在前的模型不可用，要**兜底自动使用后一级的模型 10 分钟**，
+ *     **10 分钟之后自动重试**」）
+ *
+ * ## 规则
+ *   1. 正常用**优先级最高**的那个（`llm.providers[0]`，或者没配列表时用扁平字段那套）
+ *   2. 调用**失败**（连不上 / 401 / 403 / 429 / 5xx / 超时）⇒
+ *      立刻**降一级**，并且**这个降级状态保持 10 分钟**
+ *   3. 10 分钟到 ⇒ **自动回到主模型重试**（主模型要是又挂了，再降一次，如此往复）
+ *
+ * ## 为什么要"保持 10 分钟"而不是每次现试
+ *   主模型挂的时候，每个请求都先试主、超时、再试备 ⇒ 每条消息白等一个超时 ✗
+ *   ⇒ 记住"刚挂过"，接下来 10 分钟**直接走备的**，不再浪费一次失败 ✓
+ *
+ * ## ⚠️ 别改的地方
+ *   `llmCfg()` 是**所有调用点的唯一入口**（`streamChat` / `phrase` / `ping` / `quickAck`…）
+ *   ⇒ 只在这一层做切换，调用链一行都不用动 ✓
+ * ══════════════════════════════════════════════════════════════════ */
+
+/** 降级状态（**内存**，重启就清 —— 重启本身就是一次"重试"，不用持久化） */
+const FO = {
+  /** 降级到第几个提供商（0 = 没降级；1 = 用 providers[1]，以此类推） */
+  level: 0,
+  /* ⚠️⚠️ 2026-10-22 加（用户：「**那个主模型如果是被限流报错的话，先换相同供应商正常模型**」）
+   *    背景：主模型现在是中转站上的 `kimi-k3`，今天日志里已经出现过 `HTTP 429 upstream rate limit`
+   *    ⇒ 老逻辑直接**跳到下一家供应商**（DeepSeek 官方）—— 可同一家明明还有十几个能用的模型
+   *      （kimi-k2.8-preview / glm-5.3 / gpt-5.6-terra …），换一家等于把上下文风格也换了 ✗
+   *    ⇒ 现在多一层：**限流时先在同一个 baseURL + 同一个 key 下换模型**，
+   *      这一家的备用模型都试完了，才跨到下一家 ✓
+   *    ⚠️ 只有**限流（429）**才走这条路；401/403（密钥错）和 5xx 换模型没用，直接跨家 ✓ */
+  modelIdx: 0,
+  /** 这个时刻之前都保持降级（毫秒时间戳）；到点自动回主模型重试 */
+  until: 0,
+  /** 最近一次失败的原因（给日志/界面看） */
+  lastErr: '',
+  /** 连续失败次数 */
+  fails: 0,
+};
+
+/** 降级保持多久（用户要求 10 分钟） */
+const FALLBACK_HOLD_MS = 10 * 60 * 1000;
+
+/** 现在的"优先级列表"：providers 数组（**顺序 = 优先级，第 0 个就是主模型**） */
+function providerChain() {
+  const l = config.llm || {};
+  const list = (Array.isArray(l.providers) ? l.providers : [])
+    .filter((p) => p && p.baseURL)
+    .map((p) => ({
+      id: String(p.id || ''),
+      name: String(p.name || ''),
+      baseURL: String(p.baseURL || ''),
+      apiKey: String(p.apiKey || ''),
+      model: String(p.model || ''),
+      /* ⚠️ 2026-10-22 加：**这一家的备用模型**（同一个 baseURL + 同一个 key，只换 model 名）。
+       *   限流时按顺序试；试完才跨到下一家供应商 ✓
+       *   ⚠️ 字段名 `fallbackModels`（数组），界面上是逗号分隔的一行 ✓ */
+      fallbackModels: (Array.isArray(p.fallbackModels) ? p.fallbackModels : [])
+        .map((x) => String(x || '').trim()).filter(Boolean),
+      /* ⚠️ 2026-10-22 加（用户：「**把大模型那里本来有的设置直接全部剪切过来**」）——
+       *    温度 / 单次最大 token / 超时原来只存在**扁平**字段里，提供商卡片里没有 ⇒
+       *    切成别的提供商之后，这三项还是用全局那套，等于没切干净 ✗
+       *    ⇒ 每个提供商都可以带自己的一套（**没填就沿用扁平值**）✓ */
+      temperature: Number.isFinite(p.temperature) ? p.temperature : null,
+      maxTokens: Number.isFinite(p.maxTokens) ? p.maxTokens : null,
+      timeout: Number.isFinite(p.timeout) ? p.timeout : null,
+    }));
+  // ⚠️ 列表为空 ⇒ 只有一份（扁平字段），不存在降级
+  return list;
+}
+
+/**
+ * **现在该用哪套配置**
+ * @returns {object} 形如 `{ baseURL, apiKey, model, temperature, maxTokens, timeout, ... }`
+ */
+function llmCfg() {
+  const l = config.llm || {};
+  const chain = providerChain();
+
+  // 降级到期 ⇒ 自动回主模型重试（用户要求"10 分钟之后自动重试"）
+  if ((FO.level > 0 || FO.modelIdx > 0) && Date.now() >= FO.until) {
+    try {
+      log.info(`[模型] 降级 ${Math.round(FALLBACK_HOLD_MS / 60000)} 分钟到 ⇒ 回到主模型重试`);
+    } catch { /* ignore */ }
+    FO.level = 0;
+    FO.modelIdx = 0;
+    FO.until = 0;
+    FO.fails = 0;
+  }
+
+  // 没配提供商列表 ⇒ 老行为（扁平字段）
+  if (!chain.length) return l;
+
+  const idx = Math.min(FO.level, chain.length - 1);
+  const p = chain[idx];
+  /* ⚠️ 2026-10-22：**同家备用模型**（限流时换的那个）。
+   *    `FO.modelIdx` = 0 表示用主模型名；1 表示 fallbackModels[0]，以此类推 ✓ */
+  const fb = p.fallbackModels || [];
+  const useFb = FO.modelIdx > 0 && fb[FO.modelIdx - 1];
+  // ⚠️ 把提供商的值**盖在扁平配置上**：提供商没填的项（温度/超时/maxTokens）沿用全局的 ✓
+  return {
+    ...l,
+    baseURL: p.baseURL,
+    apiKey: p.apiKey || l.apiKey,
+    model: useFb || p.model || l.model,
+    temperature: p.temperature ?? l.temperature,
+    maxTokens: p.maxTokens ?? l.maxTokens,
+    timeout: p.timeout ?? l.timeout,
+    _provider: p.name || p.id,
+    _level: idx,
+    _modelIdx: FO.modelIdx,
+  };
+}
+
+/**
+ * **记一次失败 ⇒ 先在同家换模型，再跨家降级**（由调用点在自己的 catch 里调）
+ *
+ * ## ⚠️⚠️ 2026-10-22 改（用户：「**那个主模型如果是被限流报错的话，先换相同供应商正常模型**」）
+ *
+ * 老逻辑：只要失败就 `level += 1`（跳到**下一家供应商**）。
+ * 问题：主模型是中转站上的 `kimi-k3`，一被限流（`HTTP 429 upstream rate limit`）
+ * 就直接切到 DeepSeek 官方 —— 可同一家还有十几个能用的模型
+ * （kimi-k2.8-preview / glm-5.3 / gpt-5.6-terra …），换家等于把上下文风格也换了 ✗
+ *
+ * ⇒ 现在两级：
+ *   ① **限流（429）且这家还有没试过的备用模型** ⇒ `modelIdx += 1`（**同一个 baseURL + 同一个 key**）✓
+ *   ② 这家试完了 / 不是限流（401/403 密钥错、5xx 服务挂、网络不通）⇒ 才 `level += 1` 跨家 ✓
+ *
+ * ⚠️ 为什么 401/403/5xx **不**换模型：密钥错了换哪个模型都一样错；5xx 是这家服务挂了，
+ *    换模型也救不回来 —— 换家才有意义 ✓
+ *
+ * @param {string} why 失败原因（日志用）
+ * @param {'rate'|'other'} kind 失败类型 —— 只有 `rate`（限流）才会同家换模型
+ * @returns {boolean} 降级/换模型了吗（false = 已经在最后一家且模型也试完了）
+ */
+export function noteLlmFailure(why = '', kind = 'other') {
+  const chain = providerChain();
+  if (!chain.length) return false;
+  FO.lastErr = String(why || '').slice(0, 200);
+  FO.fails += 1;
+
+  const curIdx = Math.min(FO.level, chain.length - 1);
+  const cur = chain[curIdx];
+  const fb = cur?.fallbackModels || [];
+
+  // ① 限流 ⇒ 先在**同一家**换个模型（用户要求的那一层）
+  if (kind === 'rate' && FO.modelIdx < fb.length) {
+    FO.modelIdx += 1;
+    FO.until = Date.now() + FALLBACK_HOLD_MS;
+    try {
+      log.warn(
+        `[模型] ⚠️ 限流：${FO.lastErr} ⇒ 同一家（${cur.name || cur.id}）换成备用模型「${fb[FO.modelIdx - 1]}」，` +
+          `接下来 ${Math.round(FALLBACK_HOLD_MS / 60000)} 分钟用它`,
+      );
+    } catch { /* ignore */ }
+    return true;
+  }
+
+  // ② 只有一个提供商 ⇒ 没得跨家（模型也试完了就真的没辙）
+  if (chain.length < 2) {
+    FO.until = Date.now() + FALLBACK_HOLD_MS;
+    try {
+      if (fb.length) log.warn(`[模型] ${cur?.name || ''} 这一家的模型都试过了（${FO.lastErr}）⇒ 没有下一家可换`);
+    } catch { /* ignore */ }
+    return false;
+  }
+
+  if (FO.level >= chain.length - 1) {
+    // ⚠️ 已经在最低一级：**不重置计时**，但也不越界
+    FO.until = Date.now() + FALLBACK_HOLD_MS;
+    try { log.warn(`[模型] 最低一级也失败了（${FO.lastErr}）⇒ 10 分钟后再试主模型`); } catch { /* ignore */ }
+    return false;
+  }
+  FO.level += 1;
+  FO.modelIdx = 0;   // ⚠️ 换家必须把模型序号清零（不然会去拿上一家的备用模型名）
+  FO.until = Date.now() + FALLBACK_HOLD_MS;
+  const nxt = chain[FO.level];
+  try {
+    log.warn(`[模型] ⚠️ 降级：${FO.lastErr} ⇒ 接下来 ${Math.round(FALLBACK_HOLD_MS / 60000)} 分钟改用「${nxt?.name || nxt?.id}」（${nxt?.model}）`);
+  } catch { /* ignore */ }
+  return true;
+}
+
+/** 一次成功 ⇒ 清掉失败计数（⚠️ **不立刻回主模型**：用户要的是"10 分钟后再试"） */
+export function noteLlmOk() {
+  if (FO.fails) FO.fails = 0;
+}
+
+/** 给界面看：现在是不是降级中、降的是谁、还有多久回主 */
+export function llmFallbackStatus() {
+  const chain = providerChain();
+  // ⚠️ 2026-10-22：**同家换模型也算"降级中"** —— 不然界面显示"没降级"，
+  //    可实际用的已经不是主模型了（用户会以为模型没切过去）✗
+  const degraded = FO.level > 0 || FO.modelIdx > 0;
+  const left = degraded ? Math.max(0, Math.round((FO.until - Date.now()) / 1000)) : 0;
+  const cur = chain[Math.min(FO.level, Math.max(0, chain.length - 1))];
+  const fb = cur?.fallbackModels || [];
+  const usingFb = FO.modelIdx > 0 && fb[FO.modelIdx - 1];
+  return {
+    level: FO.level,
+    modelIdx: FO.modelIdx,
+    total: chain.length,
+    activeName: cur?.name || '',
+    mainName: chain[0]?.name || '',
+    /** 现在实际在用的模型名（界面直接显示这个最直观） */
+    activeModel: usingFb || cur?.model || '',
+    /** 是不是"同一家换了个模型"（而不是换了家供应商）——
+     *  ⚠️ 只判 `modelIdx > 0`：**降级到第 2 家之后再在它自己家换模型，也算同家换** ✓
+     *     （原来写成 `level === 0 && modelIdx > 0`，第 2 家换模型时界面会误显示成"换家"✗） */
+    sameVendor: FO.modelIdx > 0,
+    /** 这一家还剩几个备用模型没试 */
+    fbLeft: Math.max(0, fb.length - FO.modelIdx),
+    secondsLeft: left,
+    lastErr: FO.lastErr,
+    fails: FO.fails,
+    holdMinutes: Math.round(FALLBACK_HOLD_MS / 60000),
+  };
+}
+
+/** 手动复位（界面上"立刻回主模型"用） */
+export function llmFallbackReset() {
+  FO.level = 0;
+  FO.modelIdx = 0;
+  FO.until = 0;
+  FO.fails = 0;
+  FO.lastErr = '';
+}
+
+/**
+ * **统一的"这次调用算不算硬失败"判据**（2026-10-22）
+ *
+ * ⚠️ 只在**这些**情况降级：
+ *   · 网络层彻底失败（连不上 / DNS / 超时）—— 说明这家服务挂了
+ *   · 401 / 403（key 失效或没权限）
+ *   · 429（限流 —— 换一家能继续用）
+ *   · 5xx（对方服务端故障）
+ * 🚫 **不降**：400（多半是自己请求体写错，换模型一样错）、内容层面的截断/空回复
+ */
+function isHardFail(e) {
+  const msg = String(e?.message || '');
+  if (/^(LLM 接口返回 (401|403|429|5\d\d))/.test(msg)) return true;
+  const code = String(e?.cause?.code || e?.code || '');
+  if (/^(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR)/.test(code)) return true;
+  if (/fetch failed|timeout|超时|socket hang up/i.test(msg)) return true;
+  return false;
+}
+
+/**
+ * **这次失败是不是"被限流"**（2026-10-22 加）
+ *
+ * ⚠️ 只有限流才走"**同一家换个模型**"那条路（用户要求：「**那个主模型如果是被限流
+ *   报错的话，先换相同供应商正常模型**」）——
+ *   · 401/403：密钥错/没权限 ⇒ 换哪个模型都一样错，必须换家
+ *   · 5xx：这家服务挂了 ⇒ 换模型救不回来，必须换家
+ *   · 网络不通 ⇒ 同上
+ *   ⇒ 只有 **429 / rate limit** 属于"这个模型这会儿用不了，但这家别的模型还能用" ✓
+ */
+function isRateLimit(e) {
+  const msg = String(e?.message || '');
+  if (/(^|[^0-9])429([^0-9]|$)/.test(msg)) return true;
+  return /rate.?limit|too many requests|限流|频率超限/i.test(msg);
+}
+
+/** 这次失败该按什么类型记账（给 `noteLlmFailure` 的第二个参数） */
+const failKind = (e) => (isRateLimit(e) ? 'rate' : 'other');
+
+/**
+ * **包一层：失败就降级、成功就记一笔**（2026-10-22）
+ *
+ * ⚠️ 所有非流式调用点（`phrase` / `quickAck` / `ping` …）都套这个，
+ *   省得每处都写一遍 try/catch —— 也保证"降级判据"只有一份 ✓
+ *
+ * @param {() => Promise<any>} fn
+ * @param {string} label 日志里显示是哪个调用
+ */
+export async function withFallback(fn, label = '') {
+  try {
+    const r = await fn();
+    noteLlmOk();
+    return r;
+  } catch (e) {
+    if (isHardFail(e)) {
+      const changed = noteLlmFailure(`${label ? label + '：' : ''}${e.message}`, failKind(e));
+      // ⚠️ 刚降级 ⇒ **立刻用新的一级重试一次**（别让用户白等这一条）
+      if (changed) {
+        try {
+          const r = await fn();
+          noteLlmOk();
+          return r;
+        } catch (e2) {
+          if (isHardFail(e2)) noteLlmFailure(`${label}（重试）：${e2.message}`, failKind(e2));
+          throw e2;
+        }
+      }
+    }
+    throw e;
+  }
+}
+
+/** 兼容老写法：原来 `llmCfg` 是常量箭头函数，别处可能直接引用 */
+const _llmCfgCompat = llmCfg;
 
 /**
  * 调用 OpenAI 兼容接口，流式产出文本增量。
@@ -364,6 +700,11 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   const usingMainBase =
     useBase.replace(/\/+$/, '') === String(llm.baseURL ?? '').replace(/\/+$/, '');
 
+  // ⚠️ 2026-10-19：思考链**每次调用重新攒** —— 同一个 `report` 对象会被"重跑/切备选"
+  //    复用（见 `bot.js` 的 `_genOnce`），不清空就会把两次的思考拼在一起 ⇒
+  //    上一次写过的工具暗号会被**执行两遍** ✗
+  if (opts.report) opts.report.reasoning = '';
+
   try {
     const res = await llmFetch(`${useBase.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
@@ -374,7 +715,12 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
       body: JSON.stringify({
         model: useModel,
         messages,
-        temperature: llm.temperature,
+        // ⚠️ 2026-10-20 加（用户：「**把备用模型也加个模型温度的调整框吧**」）：
+        //    备选模型（Gemini 那类）可以有自己的温度 —— `opts.temperature` 有值就用它，
+        //    没有就照旧用主模型那个（**老配置一个字都不变**）✓
+        temperature: Number.isFinite(Number(opts.temperature))
+          ? Number(opts.temperature)
+          : llm.temperature,
         max_tokens: maxTokens,
         ...(usingMainBase ? reasoningField() : {}),
         // ⚠️ 关掉思考链（2026-09-18）：flash 的**思考链计入 completion_tokens**，
@@ -433,6 +779,14 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
+      /* ⚠️ 2026-10-22：**主模型不可用 ⇒ 触发降级**（用户：「优先级在前的模型不可用，
+       *   兜底自动使用后一级的模型 10 分钟，10 分钟之后自动重试」）
+       *   ⚠️ 只在"确实是服务端/鉴权/限流"这类**硬失败**时降级；
+       *     400（参数错）多半是自己请求体写错了，换模型也一样错 ⇒ 不降 ✓ */
+      if (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500) {
+        // ⚠️ 2026-10-22：**429 单独记成 rate** ⇒ 同一家换个模型（用户要求），其余照旧跨家
+        noteLlmFailure(`HTTP ${res.status}`, res.status === 429 ? 'rate' : 'other');
+      }
       throw new Error(`LLM 接口返回 ${res.status} ${res.statusText}${body ? ` :: ${body.slice(0, 400)}` : ''}`);
     }
     if (!res.body) throw new Error('LLM 接口没有返回响应体');
@@ -488,6 +842,18 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
           if ((typeof delta.reasoning_content === 'string' && delta.reasoning_content)
             || (typeof delta.reasoning === 'string' && delta.reasoning)) {
             sawReasoning = true;
+            // ⚠️⚠️ 2026-10-19 加（用户：「**直接只在思考链输出调用工具的信息吧，正文一概不输出，
+            //    和 dsh 一模一样**」）：
+            //    工具调用要从**思考链**里读 ⇒ 这里必须把它**攒下来**交给调用方 ✓
+            //    （原来只记了个布尔 `sawReasoning`，思考链的内容**直接扔掉**了）
+            //    ⚠️ 落点：`opts.report.reasoning` —— 和 `truncated` 同一个"按次隔离"的对象，
+            //      不用模块级全局变量（并发两条请求会互相串 ✗）
+            //    ⚠️ 上限 20000 字：思考链一般两三千 token，够用；真超了留**尾部**
+            //      （暗号多半写在"决定动手"那一段，靠近末尾 ✓）—— 也防止把内存吃爆。
+            if (opts.report) {
+              const r = String(opts.report.reasoning ?? '') + delta.reasoning_content;
+              opts.report.reasoning = r.length > 20000 ? r.slice(-20000) : r;
+            }
           }
           const text = delta.content;
           if (typeof text === 'string' && text) {
@@ -730,45 +1096,93 @@ export async function phrase(p = {}) {
   const maxTokens = Math.max(60, Math.min(900, Number(p.maxTokens) || 220));
   const timeoutMs = Math.max(3000, Number(p.timeoutMs) || Number(llm.phraseTimeoutMs) || 15000);
 
-  try {
-    const res = await llmFetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llm.apiKey}` },
-      body: JSON.stringify({
-        model: llm.model,
-        messages: [
-          { role: 'system', content: sys },
-          { role: 'user', content: user },
-        ],
-        temperature: 1.0,
-        max_tokens: maxTokens,
-        ...thinkingField(),
-        ...reasoningField(),
-        stream: false,
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
+  // ⚠️⚠️ 2026-10-22 加（用户：「为什么吐槽不起作用」+「备用已经填了，直接调用就行」）：
+  //    实测根因：润色（吐槽/报账/教学回执）走的是**主模型**，而 429/503 时
+  //    这里**没有重试、也没有备用模型兜底** —— 日志里一天 52 次 `润色失败 HTTP 429`、
+  //    成功 0 次 ⇒ 吐槽永远发不出来 ✗
+  //    ⇒ 和 `bot.js` 主聊天那套「主模型挂了 ⇒ 备选顶上」对齐：
+  //      ① 主模型 429 / 5xx / 网络错误 / 超时 → **自动用 `llm.backup` 重试一次**；
+  //      ② 备用**不看** `backup.for` 那三个勾（那三个是"主动想用才用"，这里是保险）；
+  //      ③ 走备用 base 时**不带** `thinking` / `reasoning`（Gemini 兼容层不认，会 400）；
+  //      ④ 记账用**实际用的模型名**（不然账单里两个模型混一起）。
+  const bk = llm.backup ?? {};
+  const attempts = [
+    { model: String(llm.model ?? ''), baseURL: String(llm.baseURL ?? ''), apiKey: String(llm.apiKey ?? '') },
+  ];
+  if (bk.baseURL && bk.model) {
+    attempts.push({
+      model: String(bk.model),
+      baseURL: String(bk.baseURL),
+      apiKey: String(bk.apiKey ?? ''),
     });
-    if (!res.ok) {
-      log.warn(`润色失败 HTTP ${res.status}`);
-      return '';
-    }
-    const json = await res.json();
-    if (json.usage) {
-      try {
-        spend.record({ model: llm.model, usage: json.usage });
-      } catch {}
-    }
-    const t = String(json.choices?.[0]?.message?.content ?? '')
-      .replace(/```[a-z]*\n?/gi, '')
-      .replace(/\*\*/g, '')
-      .replace(/^["'「『]|["'」』]$/g, '')
-      .trim();
-    if (t) log.debug(`润色：「${t.replace(/\s+/g, ' ').slice(0, 80)}」`);
-    return t;
-  } catch (e) {
-    log.warn(`润色出错：${e.message}`);
-    return '';
   }
+
+  let lastErr = '';
+  for (let i = 0; i < attempts.length; i++) {
+    const a = attempts[i];
+    const base = a.baseURL.replace(/\/+$/, '');
+    const isMain = base === String(llm.baseURL ?? '').replace(/\/+$/, '');
+    try {
+      const res = await llmFetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${a.apiKey}` },
+        body: JSON.stringify({
+          model: a.model,
+          messages: [
+            { role: 'system', content: sys },
+            { role: 'user', content: user },
+          ],
+          temperature: 1.0,
+          max_tokens: maxTokens,
+          ...(isMain ? { ...thinkingField(), ...reasoningField() } : {}),
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!res.ok) {
+        lastErr = `HTTP ${res.status}`;
+        if (
+          isMain &&
+          (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500)
+        ) {
+          noteLlmFailure(`phrase ${lastErr}`, res.status === 429 ? 'rate' : 'other');
+        }
+        // 只有 429 / 5xx 值得换备用重试；401/400 换也没用，直接放弃
+        if (res.status === 429 || res.status >= 500) {
+          log.warn(`润色主模型 ${lastErr}${isMain ? ' → 试备用模型' : ''}`);
+          continue;
+        }
+        log.warn(`润色失败 ${lastErr}`);
+        return '';
+      }
+      const json = await res.json();
+      if (json.usage) {
+        try {
+          spend.record({ model: a.model, usage: json.usage });
+        } catch {}
+      }
+      const t = String(json.choices?.[0]?.message?.content ?? '')
+        .replace(/```[a-z]*\n?/gi, '')
+        .replace(/\*\*/g, '')
+        .replace(/^["'「『]|["'」』]$/g, '')
+        .trim();
+      if (t) {
+        if (!isMain) log.warn(`[备用模型] 润色已顶上（${a.model}）`);
+        log.debug(`润色：「${t.replace(/\s+/g, ' ').slice(0, 80)}」`);
+        return t;
+      }
+      // 200 但正文为空（思考链把 token 吃光那种）⇒ 也换备用试一次
+      lastErr = '空正文';
+      continue;
+    } catch (e) {
+      lastErr = String(e?.message ?? e).slice(0, 80);
+      log.warn(`润色出错：${lastErr}${isMain ? ' → 试备用模型' : ''}`);
+      if (isMain && isHardFail(e)) noteLlmFailure(`phrase：${lastErr}`);
+      continue;
+    }
+  }
+  log.warn(`润色彻底失败（${lastErr}）`);
+  return '';
 }
 
 /**
@@ -977,11 +1391,20 @@ export function cjkNum(num) {
 }
 
 /**
- * 非流式调用，用于自检。
+ * 非流式调用，用于自检 / 界面上「测试连通性」。
+ *
+ * @param {object|null} over 想**临时覆盖**的那套配置（`{baseURL, apiKey, model, timeout}`）
+ *   ⚠️⚠️ 2026-10-22 加这个参数的原因（真 bug，用户当场被误导）：
+ *     原来不管传什么，内部一律走 `llmCfg()`，而 `llmCfg()` 在 `providers` 非空时会用
+ *     **chain[0] 的 baseURL/model 盖掉**传入的值 ⇒ 界面上"测试第二个提供商"其实测的是
+ *     **第一个**，甚至因为降级测的是第三个 ✗
+ *     实测就是：用户填了个免费账号用不了的模型（gemini-3.8-flash），点「测试连通性」
+ *     居然全绿 —— 因为请求根本没发到他填的那个模型上 ✓ 假绿灯比红灯更害人。
+ *   ⇒ 传了 `over` 就**完全按它来**，不碰 `llmCfg()`、不碰降级状态 ✓
  * @returns {Promise<string>}
  */
-export async function ping() {
-  const llm = llmCfg();
+export async function ping(over = null) {
+  const llm = over ? { ...llmCfg(), ...over } : llmCfg();
   const res = await llmFetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -998,7 +1421,7 @@ export async function ping() {
       ...reasoningField(),
       stream: false,
     }),
-    signal: AbortSignal.timeout(llm.timeout),
+    signal: AbortSignal.timeout(llm.timeout || 60000),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');

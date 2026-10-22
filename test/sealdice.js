@@ -99,21 +99,17 @@ console.log('\n【1】★★ 配置与开关');
   config.sealdice.baseUrl = saved;
 }
 
-console.log('\n【2】★★ 算骰（群里打 .ra 小祥能答）');
+console.log('\n【2】★★ ask/roll 已退役（2026-10-22，用户选 B）');
 {
-  hits = [];
-  const out = await S.ask('.ra 3d6');
-  const exec = hits.find((h) => h.url === '/sd-api/dice/exec');
-  const recent = hits.find((h) => h.url === '/sd-api/dice/recentMessage');
-  check(!!exec, '★ 调了 dice/exec');
-  check(!!recent, '★ 接着取了 recentMessage（结果不在 exec 的返回里）');
-  check(exec?.method === 'POST', 'exec 是 POST');
-  check(exec?.token === 'TEST-TOKEN', '★ 带上了 token 请求头');
-  check(out.includes('42'), '★ 拿到了结果文本', `实得「${out}」`);
+  for (const name of ['ask', 'roll', 'setName', 'takeResult', 'shouldRelay']) {
+    check(typeof S[name] === 'undefined', `★★ 不再导出 ${name}()`);
+  }
+}
 
 console.log('\n【3】★★ 容错：海豹不在 / 出错都不能拖住小祥');
 {
   hits = [];
+  config.sealdice.baseUrl = `http://127.0.0.1:${port}`;
   const bad = await S.storyLogs({ pageNum: 1, pageSize: 10 });
   check(Array.isArray(bad.list) && bad.total >= 0, '★ 正常路径返回结构化结果', `total=${bad.total}`);
 
@@ -122,16 +118,20 @@ console.log('\n【3】★★ 容错：海豹不在 / 出错都不能拖住小祥
   config.sealdice.baseUrl = 'http://127.0.0.1:1'; // 没人听的端口
   const t0 = Date.now();
   let threw = false;
-  try { await S.ask('.r'); } catch { threw = true; }
+  try { await S.storyLogs({}); } catch { threw = true; }
   const dt = Date.now() - t0;
   check(!threw, '★★ 连不上时**不抛异常**（它在消息处理链路上）');
   check(dt < 3000, '★ 连不上很快就返回（没有把消息处理卡住）', `${dt}ms`);
   config.sealdice.baseUrl = savedUrl;
 }
 
+
 console.log('\n【4】★ 跑团记录（用户要求独立分支，不塞 observe/）');
 {
   hits = [];
+  // ⚠️ 2026-10-22：测试环境的 `sealdice.baseUrl` 会被真实 `accounts/<号>.yml` 覆盖（实测 3211），
+  //    这里**强制**指回假服务，否则断言全打真海豹、`hits` 永远是空的。
+  config.sealdice.baseUrl = `http://127.0.0.1:${port}`;
   const { list, total } = await S.storyLogs({ pageNum: 2, pageSize: 30 });
   const u = hits.find((h) => h.url.startsWith('/sd-api/story/logs/page'));
   check(!!u, '★ 调了 story/logs/page');
@@ -181,118 +181,39 @@ console.log('\n【5】★★ 方案约束：同号接 IM 的三条「硬约束�
     '★★ 海豹和 onebot 配置不相邻（防止有人把两者塞进同一段）',
   );
 
-  // ⚠️ 防「两条结果」：海豹自己接 IM 时小祥必须闭嘴，但仍要**消费掉**那条指令
+  // ⚠️⚠️ 2026-10-22 改（用户选 B：骰点唯一入口改成骰桥，`sealdice.ask()` 退役）：
+  //    handleDiceMode 里**不该再出现任何 sealdice 调用** —— 骰点指令一律消费掉，
+  //    由桥把消息转给海豹、桥再决定「在骰娘模式就转 /api/seal-say」。
   const h = botjs.slice(botjs.indexOf('async handleDiceMode'), botjs.indexOf('async handleDiceMode') + 3000);
-  check(
-    /sealdice\.shouldRelay\(/.test(h),
-    '★★ handleDiceMode 里用 shouldRelay() 判「这条要不要由我转述」',
-  );
-  check(
-    /shouldRelay[\s\S]{0,400}?return true/.test(h),
-    '★★ 不转述时**照样 return true**（消费掉指令，别掉进 decide() 让她评论骰点）',
-  );
+  // ⚠️ 先剥注释再查（注释里自己就写着「绝不能再调 sealdice.ask()」）
+  const hCode = h
+    .split(/\r?\n/)
+    .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+    .join('\n');
+  check(!/sealdice\.(ask|shouldRelay|enabled)\(/.test(hCode), '★★ handleDiceMode 不再调 sealdice（骰点交给桥）');
+  check(/diceMode\.isDiceCommand\([\s\S]{0,200}?return true/.test(h), '★★ 骰点指令**照样 return true**（消费掉，别掉进 decide()）');
 
   const ex = readFileSync(join(ROOT, 'config.example.yml'), 'utf8');
   check(/token: ''/.test(ex), '★★ 模板里 token 是空的 ⇒ 照模板配的人不会被意外启用');
-  check(/^\s*relay:\s*true\s*$/m.test(ex), '★★ 模板里 relay 默认 true（不改变现有行为）');
 }
 
-console.log('\n【6】★★ relay 开关：海豹接了同号 IM 时不许重复回（2026-10-06）');
+console.log('\n【6】★★ 旧 relay/ask 那套已退役（2026-10-22，用户选 B）');
 {
-  // ⚠️ 这是「重复处理」那条**唯一真实**的副作用的对策，必须钉住行为本身，
-  //    不能只靠注释。上游 12 行断言只验了「代码里写了 shouldRelay」，
-  //    这里验的是**三种模式各自返回什么**。
-  const savedRelay = config.sealdice.relay;
-
-  // ① 默认 / true = 海豹不接 IM ⇒ 小祥转述
-  config.sealdice.relay = true;
-  check((await S.shouldRelay('group')) === true, '★★ relay=true ⇒ 由小祥转述（海豹不接 IM）');
-
-  // ② false = 海豹自己收发 ⇒ 小祥闭嘴。⚠️ 这一条是防「两条结果」的核心。
-  config.sealdice.relay = false;
-  check(
-    (await S.shouldRelay('group')) === false,
-    '★★ relay=false ⇒ **小祥不转述**（否则海豹自己回一次 + 小祥回一次 = 两条）',
-  );
-  // ⚠️ 关键：不转述时**绝不能打海豹**。探一下有没有发网络请求。
-  hits = [];
-  await S.shouldRelay('group');
-  check(hits.length === 0, '★★ relay=false 时一次网络请求都不发（不做在线探针，白跑一趟）');
-
-  // ③ fallback = 海豹接了 IM，但离线时小祥兜底
-  config.sealdice.relay = 'fallback';
-  // 假海豹在线（上面加了 /sd-api/preInfo）⇒ 让位给海豹
-  check((await S.shouldRelay('group')) === false, '★★ fallback + 海豹在线 ⇒ 让位，小祥不转述');
-  hits = [];
-  await S.shouldRelay('group');
-  check(
-    hits.some((h) => h.url === '/sd-api/preInfo'),
-    '★ fallback 是靠打 /sd-api/preInfo 探在线的',
-  );
-  // ⚠️ 海豹探不通 ⇒ 兜底转述（宁可多转述，也别让群里的骰点没人应）
-  const savedUrl2 = config.sealdice.baseUrl;
-  config.sealdice.baseUrl = 'http://127.0.0.1:1';
-  check((await S.shouldRelay('group')) === true, '★★ fallback + 海豹探不通 ⇒ 小祥兜底转述');
-  config.sealdice.baseUrl = savedUrl2;
-
-  // ⚠️ 没配这个键（老部署）必须还是转述，否则升级即回归
-  delete config.sealdice.relay;
-  check((await S.shouldRelay('group')) === true, '★★ 没配 relay（老配置）⇒ 仍转述，不回归');
-  config.sealdice.relay = savedRelay;
-
-  check(typeof S.shouldRelay === 'function', '★ 导出 shouldRelay()（bot.js 的唯一判定入口）');
-}
-
-console.log('\n【6.5】★★ relay 做进了 WebUI（2026-10-06）');
-{
+  for (const name of ['shouldRelay', 'ask', 'roll', 'setName', 'takeResult']) {
+    check(typeof S[name] === 'undefined', `★★ sealdice.js 不再导出 ${name}()`);
+  }
+  // 桥是唯一入口：它必须问小祥「在不在骰娘模式」
+  const bj = readFileSync(join(ROOT, 'src', 'seal-bridge.js'), 'utf8');
+  check(/api\/dice-mode/.test(bj), '★★ 骰桥会查 /api/dice-mode（决定发不发）');
+  check(/diceModeOn|不在骰娘模式/.test(bj), '★★ 桥有「不在骰娘模式就拦住不发」的分支');
+  check(/放行海豹的/.test(bj), '★★ 私聊**放行**（骰娘模式只管群，用户 2026-10-22 定）');
+  // 小祥提供查询接口
   const wj = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
+  check(/'GET \/api\/dice-mode'/.test(wj), '★★ 小祥有 GET /api/dice-mode');
+  // 界面上的 relay 开关已删
   const wh = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
-
-  // ⚠️ 「存得进去、显示不出来」的坑踩过一次（webui.js 自己注释里写了）：
-  //    configForUi（读）和 saveConfig（写）**必须成对**。缺一个就是那种诡异 bug。
-  const ui = wj.slice(wj.indexOf('function configForUi'), wj.indexOf('function saveConfig'));
-  const sv = wj.slice(wj.indexOf('function saveConfig'), wj.indexOf('function saveConfig') + 6000);
-  check(/sealdice:\s*\{/.test(ui), '★★ configForUi 里有 sealdice 段（界面读得到）');
-  check(/relay/.test(ui), '★★ configForUi 回填 relay');
-  check(/raw\.sealdice\.relay/.test(sv), '★★ saveConfig 里写 sealdice.relay（界面存得进去）');
-
-  // ⚠️⚠️ **token 绝不能进界面**：`/api/config` 是明文 JSON，
-  //    把本机密钥吐出去等于泄密。两处都要守住。
-  //
-  // ⚠️⚠️ 这两条断言**必须先剥掉注释行**再查 —— 否则它们会匹配到注释里
-  //    自己写的「绝不能带 token」「别写 put('sealdice', …)」这些字，
-  //    测出一个假的失败。（真踩过：第一次写没剥，红了，去掉才发现代码本来就是干净的。）
-  //    代码里没有，但注释里有 —— 那正是要守住的东西，所以只查代码。
-  const stripComments = (s) =>
-    s.split(/\r?\n/).filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n');
-  const uiCode = stripComments(ui);
-  const svCode = stripComments(sv);
-  check(!/token/.test(uiCode), '★★ configForUi **不含 token**（密钥不进 /api/config）');
-  check(
-    !/put\(\s*'sealdice'/.test(svCode),
-    '★★⚠️ saveConfig 不用 `put(\'sealdice\', …)`（那等于让请求体覆盖 token）',
-  );
-  // ⚠️ 反向也钉一下：sealdice 段确实被写了（别为了躲上一条把功能删了）
-  check(
-    /raw\.sealdice\.relay/.test(svCode),
-    '★★ 但 sealdice.relay 确实被写进去了（白名单式，不是没写）',
-  );
-  check(/=== false \? false/.test(svCode), '★★ 写入前归一化到三态（非法值不落 yaml）');
-
-  // ⚠️ 三个选项都要在，且 fallback 是推荐项
-  check(/id="sd-relay"/.test(wh), '★ 界面有 relay 的 select');
-  check(/value="true"/.test(wh) && /value="false"/.test(wh) && /value="fallback"/.test(wh),
-    '★★ 三个选项都在（true / false / fallback）');
-  check(/saveSealdiceRelay/.test(wh) && /renderSealdiceRelay/.test(wh),
-    '★ 保存 / 放弃修改两个按钮的函数都在');
-  check(/dataset\.tab === 'groups'[\s\S]{0,200}renderSealdiceRelay/.test(wh),
-    '★★ 进 groups 页时会调 renderSealdiceRelay（漏了就显示不出当前值）');
-  // ⚠️ 独立一张卡：共用 save 会变成「改触发词顺带改了海豹开关」
-  check(
-    (wh.match(/onclick="saveDiceMode\(\)"/g) || []).length === 1
-      && (wh.match(/onclick="saveSealdiceRelay\(\)"/g) || []).length === 1,
-    '★★ 骰娘卡和海豹卡各自独立保存（不会顺带改对方）',
-  );
+  check(!/id="sd-relay"/.test(wh), '★★ 界面不再有 relay 的 select');
+  check(!/saveSealdiceRelay/.test(wh), '★★ 前端不再有 saveSealdiceRelay');
 }
 
 console.log('\n【7】★★ 触发词在界面上可改（用户要求）');
@@ -552,12 +473,6 @@ console.log('\n【7】★★★ 跑团记录：独立分支 + 分群 + 增量读
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
-  // ⚠️ 钉住「前导点和命令名要原样传」—— 小祥只是转发，不能自己改写
-  const b = JSON.parse(exec.body);
-  check(b.message === '.ra 3d6', '★ 消息原样传给海豹（不吞掉前导点）', `实得「${b.message}」`);
-  check(b.messageType === 'group', '★ messageType 传了 group');
-  check(!!b.id, '★ 带上了 scopeId（海豹用它决定发到哪、记到哪）');
-}
 // ── 配置必须在 import src/* 之前就位 ────────────────────
 
 

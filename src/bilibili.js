@@ -1,7 +1,7 @@
 /**
  * B站数据（2026-09-13 加）。
  *
- * 用户要求：「既然能用 B站了，可以让机器人**记下我的 B站 uid 是 30000001**，
+ * 用户要求：「既然能用 B站了，可以让机器人**记下我的 B站 uid 是 394060600**，
  * 这样以后还可以询问**我的视频播放量最近怎么样**之类的信息」。
  *
  * ## ⚠️ 为什么这个文件里到处是"缓存 + 限流"
@@ -241,7 +241,7 @@ export function looksLikeVideoQuestion(text, isOwner, uid = '') {
   if (!t || t.length > 50) return false;
 
   // ⚠️ 「报了他 UID」本身就是最强的话题信号 —— 直接算命中
-  //    （「30000001 最近怎么样」这种没有"视频"两个字，但意思很明确）
+  //    （「394060600 最近怎么样」这种没有"视频"两个字，但意思很明确）
   const byUid = !!uid && t.includes(String(uid));
 
   // ⚠️ 基础话题词：完全不提视频/B站（也没报 UID）→ 肯定不是问这个
@@ -357,6 +357,32 @@ function topicOpts(keyword) {
  * ⚠️ 用户 2026-09-15 追加要求：「可以问她最近 mc 或者籽岷有什么比较火的视频吗」。
  * ⚠️ **不抢**"问他自己投稿"那种（`我的视频播放量`）—— 那是 `ownerVideoFacts` 的活。
  */
+/**
+ * ⚠️⚠️⚠️ 2026-10-20 加（用户：「**难道b站工具又是用关键词判断吗？说了多少遍不要用关键词判断了**」）——
+ * `hotQuery()` 全是关键词正则（/视频|投稿/、/有什么|有没有/、TOPICS 题材表…），
+ * 换个说法就漏、撞上就误触 ✗（今晚现场：「继续把刚才的视频做完」撞「的视频」被丢去搜 B 站）
+ * ⇒ 关键词只当**粗筛**（省模型调用）；命中后**必须再过一次模型**确认
+ *   「这句到底是在问 B 站的视频/UP主，还是别的指令/闲聊」—— 不是就不查 ✓
+ */
+export async function confirmBiliQuery(text, ask) {
+  try {
+    const raw = await ask({
+      system: [
+        '判断这句话是不是在**问 B 站（或某个 UP 主）有什么视频/投稿**。',
+        '· 在问 ⇒ 答「是」；',
+        '· 是让她做某件事（继续/做完/写个/做个/发一下）、或闲聊、或问别的 ⇒ 答「否」。',
+        '只答一个字：是 或 否。',
+      ].join('\n'),
+      user: String(text ?? '').slice(0, 200),
+      maxTokens: 6,
+      timeoutMs: 6000,
+    });
+    return /^[\s"「]*是/.test(String(raw ?? '').trim());
+  } catch {
+    return false; // ⚠️ 判不出来 ⇒ 不查（宁可漏，别误触）
+  }
+}
+
 export function hotQuery(text) {
   // ⚠️⚠️ 先**把开头的 @某某 去掉**（2026-09-15 实测踩到）：
   //    QQ 里 @她时那串名字会**一起进到消息文本**里，实测她收到的是
@@ -370,6 +396,10 @@ export function hotQuery(text) {
     .trim();
   if (!t || t.length > 80) return null;
   if (/我的(视频|投稿)|我发的/.test(t)) return null;
+  // ⚠️⚠️ 2026-10-20 加（真事故：群里 @ 她说「**继续把刚才的视频做完**」，撞上
+  //    「的视频」⇒ 被丢给 B 站搜索 ⇒ 90 秒超时、被打断的任务没接上 ✗）——
+  //    ⇒ **指令类**（让她做某件事）一律不是"问 B 站"：继续/接着做/做完/刚才那个 ✗
+  if (/继续|接着做|做完|把它|把这个|刚才那|之前那/.test(t)) return null;
   const aboutBili = /b\s*站|bilibili|哔哩|小破站/i.test(t);
   const hotish = /热榜|热门|排行|火的|最火|比较火|最近火|炸裂|精彩|什么好看|有什么好看|好玩|播放(量)?高/.test(t);
   const videoNoun = /视频|投稿|作品/.test(t);
@@ -419,6 +449,38 @@ function cleanSearchTitle(s) {
  *    **`HTTP 412`**（风控，`order=pubdate` 必踩）。随便一个随机值就够用。
  */
 let biliCookie = null;
+let buvidPending = null;
+
+/**
+ * 去 B 站要一个**真的** `buvid3 / buvid4`（整个进程只要一次，拿到就缓存住）。
+ *
+ * ⚠️⚠️ 2026-10-19 修（真事故：`node tools/bili.mjs hot` 一直报「热门榜返回空」）——
+ *    `cookieHeader()` 原来拿的是**随手拼的假 buvid3**（`randomUUID` 那种）。
+ *    搜索接口容忍假的，但**热门榜（`x/web-interface/popular`）和排行榜会直接 `-352` 风控** ✗
+ *    实测：带上从 `x/frontend/finger/spi` 拿的**真 buvid** ⇒ `code:0` 正常返回 ✓
+ */
+async function ensureBuvid() {
+  if (biliCookie) return biliCookie;
+  if (buvidPending) return buvidPending;
+  buvidPending = (async () => {
+    try {
+      const r = await fetch('https://api.bilibili.com/x/frontend/finger/spi', {
+        headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com/' },
+        signal: AbortSignal.timeout(8000),
+      });
+      const j = await r.json();
+      const b3 = String(j?.data?.b_3 ?? '').trim();
+      const b4 = String(j?.data?.b_4 ?? '').trim();
+      if (b3) biliCookie = b4 ? `buvid3=${b3}; buvid4=${b4}` : `buvid3=${b3}`;
+    } catch {
+      /* 拿不到就算了 —— `cookieHeader()` 会退回那个假的（搜索接口照样能用） */
+    }
+    buvidPending = null;
+    return biliCookie;
+  })();
+  return buvidPending;
+}
+
 function cookieHeader() {
   if (!biliCookie) {
     biliCookie = `buvid3=${randomUUID().replace(/-/g, '').toUpperCase()}infoc`;
@@ -528,6 +590,7 @@ const SEARCH_ORDERS = ['totalrank', 'click', 'pubdate', 'dm', 'stow', 'scores'];
 async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pageSize = 30 }) {
   const kw = String(keyword ?? '').trim();
   if (!kw) throw new Error('没给关键词');
+  await ensureBuvid(); // 真 buvid（见 ensureBuvid 上面的注释）
   const url =
     'https://api.bilibili.com/x/web-interface/search/type?search_type=video' +
     `&page_size=${Math.max(1, Math.min(50, pageSize))}` +
@@ -653,6 +716,7 @@ export async function upVideos(name, { limit = 8 } = {}) {
     recent = recent.concat(got);
     if (recentEnough(recent) || recentEnough(hot)) break;
     biliCookie = null;
+  buvidPending = null;
   }
   const all = [...recent, ...hot];
   if (!all.length) throw new Error(`搜「${wanted}」没结果`);
@@ -694,6 +758,8 @@ let hotCache = null;export async function hotVideos({ limit = 8, force = false }
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       Referer: 'https://www.bilibili.com/',
+      // ⚠️ 2026-10-19 补：**原来这儿没带 cookie** ⇒ 热门榜必然 `-352` ✗（见 `ensureBuvid`）
+      Cookie: cookieHeader(),
     },
     signal: AbortSignal.timeout(15000),
   });

@@ -47,8 +47,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * 只检查首屏 body（脚本和注释先剥掉），不执行页面脚本。
  */
 function inspectWebuiMarkup(html) {
-  const body = html.slice(html.indexOf('<body>'), html.indexOf('<script>'));
-  const clean = body.replace(/<!--[\s\S]*?-->/g, '');
+  const bodyStart = html.indexOf('<body>');
+  const bodyEnd = html.indexOf('</body>', bodyStart);
+  const body = html.slice(bodyStart, bodyEnd < 0 ? html.length : bodyEnd);
+  const clean = body
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
   const stack = [];
   const tabButtons = new Set(
     [...clean.matchAll(/<button\b[^>]*\bdata-tab="([^"]+)"/g)].map((m) => m[1]),
@@ -535,7 +539,10 @@ async function main() {
     check(getJson.ok === true, '★ GET 返回 ok:true');
     check(!!getJson.config, '★ GET 返回 config 段');
     // ⚠️ GET 是**只读**的：不带 body、不碰 config.yml，也绝不能吐出 token
-    check(!/CqjoX1z4|"token"/.test(getText), '★★ GET 不泄露 sealdice token（只读、密钥不进 JSON）');
+    // ⚠️ 2026-10-22：原来这里写死了**真实 token 的前 8 位**（用来做精确断言），
+    //    断言本身没错，但**公开仓库里不该出现真凭据前缀** ✗
+    //    ⇒ 改成按**字段名**判：只要出现 `"token":` 就算泄露，比抓某个具体值更通用 ✓
+    check(!/"token"\s*:/.test(getText), '★★ GET 不泄露 sealdice token（只读、密钥不进 JSON）');
   }
 
   console.log('\n[3] 改模型配置 → 热重载生效');

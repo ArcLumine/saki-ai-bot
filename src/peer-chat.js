@@ -133,16 +133,32 @@ export function pickPeer(gid, peers, rng = Math.random) {
   return pool[Math.floor(rng() * pool.length) % pool.length];
 }
 
-/** 记一次"主动过了"（冷却 + 当日计数），供发送成功后调用 */
+/**
+ * 记一次"主动过了"（冷却 + 当日计数），供发送成功后调用。
+ *
+ * ⚠️⚠️ 2026-10-16 修（用户截图：「**这个 @ 一下虽然显示发送失败，但是实际发送出去了**」，
+ *    报错就是 `没成: Invalid time value`）——
+ *    现场：界面那个「立刻试一次」调的是 `note(gid, peer, text)`，
+ *    而本函数的第三个参数是 **`now`（时间戳）**、第四个才是 `text` ✗ ⇒
+ *    时间戳变成了那句中文话 ⇒ `new Date('…').toISOString()` 直接抛
+ *    `RangeError: Invalid time value` ⇒ **消息明明发出去了，界面却报"没成"** ✗✗
+ *    （调用处已经改对了；这里再兜一道：**参数不是有效时间戳就按"现在"算**，
+ *      以后谁再传错也不会把一次成功的发送变成"失败" ✓）
+ */
 export function note(gid, peer, now = Date.now(), text = '') {
-  const d = dayOf(now);
+  const t0 = Number(now);
+  const at = Number.isFinite(t0) && t0 > 0 ? t0 : Date.now();
+  const d = dayOf(at);
   if (state.day !== d) {
     state.day = d;
     state.counts = {};
   }
   state.counts[String(gid)] = Number(state.counts?.[String(gid)] ?? 0) + 1;
-  state.lastAt[String(gid)] = now;
+  state.lastAt[String(gid)] = at;
   state.lastPeer[String(gid)] = String(peer ?? '');
+  // ⚠️ 有人把 `text` 传在第三位时（老写法）⇒ 顺手把话也一起记下来，别把它当时间戳丢掉 ✓
+  const maybeText = typeof now === 'string' ? now : '';
+  text = String(text ?? '').trim() || maybeText;
   // ⚠️ 2026-10-13：记下**最近发过的原话**（只留 5 条）—— 下次拼提示词时摆给她看，
   //    提醒"别再问同一件事"（她跟同一个号的对话就那么几个话题，不摆出来会天天问同一句）。
   const t = String(text ?? '').replace(/\s+/g, ' ').trim();
@@ -278,6 +294,11 @@ export async function compose(gid, peer, idleMs, timeoutMs = 25000, opts = {}) {
     '· 🚫 别用破折号（——）、别用书面标点；',
     '· 🚫 别解释「我为什么找你」；',
     `· 🚫 **别提她名字**（「${name}」这三个字不用写）—— @ 由代码加，你写了就重复了。`,
+    // ⚠️⚠️ 2026-10-20 加（用户：「为什么老是说『她怎么怎么样』，而不是直接说『你怎么怎么样』」）：
+    //    上面那些"找她 / 约她"是**给她的说明**，但输出那句话是**对着对方说的** ⇒
+    //    称呼必须是「你」。实测漏了这条时，生成出来是「问她周末有没有空」这种转述口气 ✗
+    '· ✅ **那句话是直接对她说的话 ⇒ 称呼用「你」**（「你周六有空吗」「你最近练得怎么样」）。',
+    '· 🚫 别用「她 / 他 / 对方」指代她（那是跟第三方谈论的口气 ✗）。',
     '直接给那句话本身 —— 🚫 **不要自己加 @**（@ 由代码来加）。',
   ]
     .filter(Boolean)
