@@ -2202,6 +2202,27 @@ function load() {
     7 * 24 * 3600 * 1000,
     Math.max(0, Number(cfg.diceMode.durationMs) || 0),
   );
+  /**
+   * 骰娘模式下**允不允许偶尔吐槽**（2026-10-20 用户要求）。
+   *
+   * 用户原话：「海豹启用的时候，在进入骰娘模式之后小祥会安静或者降低说话频率但是吐槽」。
+   * ⇒ 从"全程静默"改成"**低频但能冒一句**"：
+   *   · 非骰点的**主动接话**按 `banterChance` 放行，其余照旧不接；
+   *   · **显式召唤**（@ 她 / 引用她 / 叫名字）不受这个概率限制 —— 被点名不理像坏了；
+   *   · `banter: false` = 回到老行为（骰娘模式里**一句闲聊都不接**）。
+   */
+  cfg.diceMode.banter = cfg.diceMode.banter !== false;
+  // ⚠️ 2026-10-21 改（用户：「进骰娘模式微调一下接话判定」+「A，直接 2 吧一步到位」）：
+  //    **按相关度分两档** —— 跟本局相关（检定/角色/剧情，或提到本局记录里的人）用高的那档，
+  //    无关闲聊用低的那档。判据见 `bot.js` 的 `diceRelated()`。
+  const banterChance = Number(cfg.diceMode.banterChance);
+  cfg.diceMode.banterChance = Number.isFinite(banterChance)
+    ? Math.min(1, Math.max(0, banterChance))
+    : 0.05;
+  const banterRelated = Number(cfg.diceMode.banterChanceRelated);
+  cfg.diceMode.banterChanceRelated = Number.isFinite(banterRelated)
+    ? Math.min(1, Math.max(0, banterRelated))
+    : 0.45;
 
   // ── 跑团记录（2026-09-30）──────────────────────────────
   // ⚠️ 与 `observe/`、`storyline/` **并列的第三个分支** —— 用户明确要求独立，

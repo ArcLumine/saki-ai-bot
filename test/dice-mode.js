@@ -141,10 +141,23 @@ console.log('\n【5】★★★★ 三处拦截点全都在（最要紧的一组
     '★★ 放在「骂她妈妈」那条**之前**（用户显式下的令高于自动判定）',
     `[isDiceMode@${modeAt - decAt}, swearAtMom@${swearAt - decAt}]`,
   );
+  // ⚠️ 2026-10-20 改：不再是"非骰点一律 null"，而是三层 ——
+  //    骰点 / 显式召唤（@、引用、叫名字、戳一戳）/ 按概率摇中的吐槽。
+  // ⚠️ 2026-10-21：`related`/`chance` 那段注释把距离又拉长了，窗口放到 2400
   check(
-    /isDiceCommand\([\s\S]{0,300}?return null/.test(dec),
-    '★★ 判完「不能开口」就 return null',
+    /isDiceCommand\([\s\S]{0,2400}?return null/.test(dec),
+    '★★ 骰点之外仍然会 return null（没摇中就该静默）',
   );
+  check(/banterChanceRelated/.test(dec), '★★ 相关度分两档：相关用 `banterChanceRelated`');
+  check(/diceRelated\(/.test(dec), '★★ 判定走 `diceRelated()`（跑团记录 + 通用词）');
+  check(/banterChance/.test(dec), '★★ 非骰点的主动接话按 `banterChance` 放行（不是全静默）');
+  check(/_diceBanter/.test(dec), '★ 放行时打 `_diceBanter` 标记（说话判断 / 提示词据此换口径）');
+  check(
+    /const noAt = segments\.filter\(/.test(dec) &&
+      dec.indexOf('noAt') < dec.indexOf('diceMode.isDiceCommand('),
+    '★★ 判骰点前**先剥 @ 段**（「@小祥 .r 1d100」不能被当成闲聊）',
+  );
+  check(/_poke/.test(dec), '★ 戳一戳也算显式召唤（骰娘模式下戳她不能静默）');
 
   // ② 复读：复读也是"说话"
   // ⚠️ 用 `Math.random() < v.chance` 这段整块来找（`v.join && v.say` 会被注释行切到）
@@ -171,8 +184,11 @@ console.log('\n【5】★★★★ 三处拦截点全都在（最要紧的一组
   const h = bj.slice(bj.indexOf('async handleDiceMode'), bj.indexOf('async handleDiceMode') + 3200);
   check(/this\.canTeach\(event\)/.test(h), '★★ handleDiceMode 用 canTeach() 判权限（同安静指令）');
 
-  // 转述：只在骰娘模式下做
-  check(/if \(!this\.isDiceMode\(event\)\) return false;/.test(h), '★★ 不在骰娘模式 ⇒ 不转述骰点');
+  // 转述：骰娘模式下走 sealdice.ask()；**日常模式**下交给海豹（2026-10-20 加）
+  check(
+    /if \(!this\.isDiceMode\(event\)\)[\s\S]{0,700}?shouldRelay\('group'\)/.test(h),
+    '★★ 日常模式：海豹接了 IM 时把骰点**消费掉**（她不接嘴，2026-10-20）',
+  );
   check(/sealdice\.ask\(/.test(h), '★ 转述走 sealdice.ask()');
   // ⚠️ 海豹没配时也必须**消费掉**这条，否则它会当普通消息走 decide
   check(/if \(!sealdice\.enabled\(\)\)/.test(h), '★ 海豹没启用时有专门分支');

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 「同类机器人」主动搭话 —— 群里**冷场**时，她 @ 一下同类池里的号说一句。
  *
  * ## 用户需求
@@ -408,7 +408,7 @@ export async function tick(bot, now = Date.now()) {
       continue;
     }
     try {
-      await bot.sendToGroup(gid, text, { at: peer, atName: names.of(peer, gid) || '' });
+      await bot.sendToGroup(gid, text, { at: peer, atName: names.of(peer, gid) || '', proactive: true });
       // ⚠️ 2026-10-13：把**原话**一起记下来（下次提示词里摆出来，别重复同一件事）
       note(gid, peer, now, text);
       log.info(`[同类] 群里冷场 → 她主动找「${names.of(peer, gid) || peer}」搭话：「${text}」`);

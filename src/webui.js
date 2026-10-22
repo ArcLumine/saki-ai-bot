@@ -63,6 +63,8 @@ import { sensitiveRules } from './sensitive.js';
 import * as life from './life.js';
 // ⚠️ 2026-10-05 加：同类机器人搭话（「立刻试一次」那个按钮要用它的 compose / pickPeer）
 import * as peerChat from './peer-chat.js';
+// ⚠️ 2026-10-21 加：骰桥回调要把发出去的话**记进上下文**（她得记得自己报过什么）
+import * as recent from './recent.js';
 import * as persona from './persona.js';
 import * as personaAdmin from './persona-admin.js';
 import * as personaDraft from './persona-draft.js';
@@ -72,7 +74,7 @@ import * as storyline from './storyline.js';
 import * as friend from './friend.js';
 import * as affinity from './affinity.js';
 import * as names from './names.js';
-import { streamChat } from './llm.js';
+import { streamChat, phrase } from './llm.js';
 // ⚠️ 学习档案（`global.md` / `groups/<群号>.md` / `dm/<QQ号>.md`）的格式校验 ——
 //    它由代码解析维护，界面上直接改必须过这一关
 import { validateFile as learnedValidate, listEntries as learnedList } from './learned.js';
@@ -1862,6 +1864,94 @@ const routes = {
   //    ⚠️ 实现必须交给**独立进程**：这个路由所在的进程马上就要被它杀掉。
   //      `spawn(..., {detached:true}).unref()` + `cmd /c start` 两层保险。
   //      ⚠️ 别改成 `Start-Process` 或 `execFile` 同步等 —— 那会把自己等死。
+  // ⚠️ 2026-10-20 加（骰桥回调）：海豹算完的结果由这里发出去 ——
+  //
+  //    用户要求：「原样发，但是额外加一行吐槽」：
+  //      ```
+  //      张三的"敏捷5"检定结果为: D100=5/5 成功
+  //      （符合自己人设的吐槽）
+  //      ```
+  //    ⇒ **原文一个字都不改**（骰点数字要对得上），然后再单独发一句吐槽。
+  //
+  //    ⚠️ 为什么不让海豹自己发、小祥"看见后补一句"：协议端**不回推自己号发的消息**
+  //      （日志里 `[收到] …(机器人号)：` 命中 0），她根本看不见 ✗
+  //      ⇒ 所以由骰桥（`src/seal-bridge.js`）拦截海豹的 `send_*`，转到这里。
+  //    ⚠️ 失败要分开算：原文发失败 = 这条丢了（返回 500，让桥知道）；
+  //      吐槽生成失败 = 只是少一句，**不能**连累原文（所以单独 try）。
+  'POST /api/seal-say': async (req, res) => {
+    try {
+      const body = await jsonBody(req);
+      const gid = String(body.group_id ?? '').trim();
+      const uid = String(body.user_id ?? '').trim();
+      const text = String(body.text ?? '').trim();
+      if (!text) return send(res, 400, { ok: false, error: 'text 为空' });
+      if (!gid && !uid) return send(res, 400, { ok: false, error: '缺 group_id / user_id' });
+
+      const ev = {
+        message_type: gid ? 'group' : 'private',
+        group_id: gid ? Number(gid) : undefined,
+        user_id: Number(uid || 0),
+        self_id: bot.selfId,
+        message: [],
+      };
+
+      // ① 原样发（一个字都不改）
+      await bot.sendText(ev, text, { force: true });
+      // ⚠️ 2026-10-21 加（用户：「和骰桥联系起来」）：**记进她自己的上下文** ——
+      //    桥这条路原来完全不记，她不知道"自己刚报过这个骰"，接着跑团时会瞎猜。
+      try {
+        recent.rememberBot(ev, text);
+      } catch {}
+
+      // ② 吐槽：**一律生成**（用户 2026-10-21 定：「骰娘模式也 100%」）——
+      //    原来试过"跑团时按 banterChance 降频"，用户不要，所以这里不做概率判断。
+      {
+        try {
+          const say = await phrase({
+            system: [
+              `你是${persona.shortName()}，正在群里围观一局跑团。`,
+              '',
+              '系统刚把一条骰点结果**原样**发出去了。你的任务：顺口补一句吐槽。',
+              '',
+              '- **一句话**，口语，像真人随口说的；不超过 30 字。',
+              '- ⚠️ **整句必须用中文圆括号（）包起来**，括号里就是你的吐槽（代码那边也会再包一次，别加两套）。',
+              '- **不要重复数字**、不要解释规则、不要问"要不要继续"、别当主持人。',
+              '- 可以吐槽运气（大成功 / 大失败）、角色的惨状、玩家的操作。',
+              '- 拿不准就短一点（「……这运气」「好惨」也算）。',
+              '- 🚫 不要说「我看不到」「作为 AI」这类话。',
+            ].join('\n'),
+            user: `骰点结果：${text}`,
+            maxTokens: 120,
+            timeoutMs: 12000,
+          });
+          // ⚠️ 用户要求（2026-10-20）：「所有吐槽都要在（）里面」——
+          //    这里**代码层强制**再包一次，不靠模型听话：
+          //    先剥掉它可能自己加的括号/引号，再统一包一层中文圆括号，避免出现「（（…））」。
+          const one = String(say ?? '')
+            .trim()
+            .replace(/^["'「『（(]+|["'」』）)]+$/g, '')
+            .replace(/\s*\n+\s*/g, ' ')
+            .slice(0, 36)
+            .trim();
+          if (one) {
+            await bot.sendText(ev, `（${one}）`, { force: true });
+            // 吐槽也算她说过的话 —— 一起记进上下文（不然她"吐槽完就忘"）
+            try {
+              recent.rememberBot(ev, `（${one}）`);
+            } catch {}
+          }
+        } catch (e) {
+          log.debug(`[骰桥] 吐槽生成失败（结果已发，不影响）：${e.message}`);
+        }
+      }
+
+      send(res, 200, { ok: true });
+    } catch (e) {
+      log.warn(`[骰桥] 转发海豹结果失败：${e.message}`);
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
   'POST /api/bot/restart': async (_req, res) => {
     send(res, 200, {
       ok: true,
@@ -3077,6 +3167,11 @@ const routes = {
         '格式有硬要求：每条必须是 `## 主题` 开头，还要保留 `<!-- LEARNED:BEGIN -->` / `END` 两行标记 —— 保存时会校验，不合格会拒绝。' +
         '（⚠️ 群友教的不在这里，在 `groups/<群号>.md` 里，只在那个群算数）',
       'learned.md': '学习档案（**已废弃**：2026-09-27 起分层为 `global.md` + `groups/` + `dm/`，这里是老布局遗留）',
+      // ⚠️ 2026-10-21 加：群友问「骰点指令是什么」时她要能答，内容按海豹官方文档整理
+      //    （https://docs.sealdice.com/use/core.html 和 /use/coc7.html）。
+      //    不登记的话界面上只有文件名、没有说明，很难找。
+      'dice-commands.md':
+        '★ 骰点指令速查（海豹骰的常用指令 + 容易答错的点）· 群里问"怎么掷骰/指令是什么"时用',
     };
     try {
       // ⚠️ 动画库的名字**不能写死在这张表里** —— 库名是人设声明的（`anime/<库名>.md`），

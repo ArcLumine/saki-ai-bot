@@ -1310,6 +1310,22 @@
       </div>
       <div><label>备选 API Key</label><input type="password" id="llm-bkKey" placeholder="（Gemini 的 key）"></div>
       <div class="hint" id="bk-hint" style="margin:4px 0"></div>
+
+        <!-- ⚠️ 2026-10-20 加（用户要求：「要识图模型下拉」）——
+             识图用的是**另一个模型**（不是上面那个大模型）。以前只能手改 config.yml，
+             换错一次（下架 / 只在国内版出口 / 200 假成功）就得重启 + 群里发图才知道。 -->
+        <div style="margin-top:14px;font-weight:600">识图模型（看图用）</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <label style="margin:0">模型名</label>
+          <!-- 用 datalist：**能选也能手打**（拉取失败或想填列表外的名字时有退路） -->
+          <input type="text" id="vision-model" list="vision-model-list" style="flex:1;min-width:200px" placeholder="kimi-k3">
+          <datalist id="vision-model-list"></datalist>
+          <button class="ghost" onclick="loadVisionModels()" id="btn-vision-models" style="white-space:nowrap;padding:8px 12px">从 API 拉取</button>
+        </div>
+        <div class="hint" id="vision-hint" style="margin:4px 0">
+          看图走<b>另一个模型</b>。⚠️ 换之前先拉一次确认它在列表里，拉完<b>发张图试</b> ——
+          有些模型会<b>返回成功、正文却说"我无法查看图片"</b>（200 假成功，比报错更难查）。
+        </div>
       <div class="btns">
         <button class="act" onclick="saveModel()">保存</button>
         <button class="ghost" onclick="testLLM()">测试连通性</button>
@@ -3844,6 +3860,8 @@ async function reloadAll() {
 
   // 模型
   $('llm-baseURL').value = c.llm.baseURL || '';
+  // ⚠️ 2026-10-20 加：识图模型（`vision` 段在界面上原来没有入口）
+  if ($('vision-model')) $('vision-model').value = (c.vision && c.vision.model) || '';
   // 模型下拉框：先把当前值放进去，再尝试从 API 拉完整列表
   fillModelSelect([c.llm.model].filter(Boolean), c.llm.model);
   renderQzone();
@@ -4164,6 +4182,16 @@ function fillDatalist(id, models, current) {
 }
 
 /** 拉备选模型的列表（用的是备选那三个框 ✓） */
+/** 拉识图模型的列表 —— 和主模型同一个 API 地址 / Key，只是换个框 */
+function loadVisionModels() {
+  return loadModels({
+    selId: 'vision-model',
+    datalistId: 'vision-model-list',
+    hintId: 'vision-hint',
+    btnId: 'btn-vision-models',
+  });
+}
+
 function bkLoadModels() {
   return loadModels({
     baseId: 'llm-bkBase',
@@ -5550,7 +5578,15 @@ async function saveModel() {  const el = $('msg-llm');
       //    时间还是没有精确对应到」）：判据从"秒"换成"**条数**"。
       //    ⚠️ `slowQueueDropMs` 不再写（老配置里留着也无妨 —— 代码只拿它打日志）
       slowQueueDropCount: Math.max(1, Math.floor(Number($('llm-slowDropCount').value))) || 3,
-    }})
+    },
+    // ⚠️ 2026-10-20 加（用户要求：「要识图模型下拉」）——
+    //    识图模型以前只能手改 `config.yml`，换错一次（下架 / 出口不匹配 / 200 假成功）
+    //    就得重启 + 群里发图才知道。
+    //    ⚠️ `vision` 在 `config.js` 的 `SHARED_SECTIONS` 里 ⇒ 写进 `config.yml`、所有号共用 ✓
+    vision: {
+      model: $('vision-model').value.trim(),
+    },
+  })
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
   if (r.ok) reloadAll();

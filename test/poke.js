@@ -453,12 +453,12 @@ console.log('\n【10】★ 拍回去是「每戳 3 次一次」（用户 2026-09
 console.log('\n【11】★ 默认：攒够次数 → 换成"反击语气"（不再拍回去）');
 {
   // ⚠️⚠️ 2026-09-30 加（用户原话：「**戳三次以上可以把回戳机制换成刚才的反击语气机制**」）。
-  //    这一节盯三件事：
+  //    ⚠️ 2026-10-20 改（用户实测一个人连戳 6 下回了 6 条，拍板「**连戳只回一次**」）：
+  //      冷却闸**去掉了 `wantRetort` 例外** ⇒ 连戳期间一律不回；
+  //      "反击语气"只在**冷却过了之后**的下一次戳才生效。
+  //    这一节盯两件事：
   //      ① 攒够次数**不发 `send_poke`**（回戳机制已经被换掉了）
-  //      ② 那一次把 `_pokeRetort` 交给模型 —— 提示词才会换成"反击语气"那版
-  //      ③ **冷却必须给它让路**：他连戳三下就在几秒内，第 2、3 下必然落在
-  //         30 秒冷却里；要是被挡掉，反击提示词**永远没机会注入**，
-  //         这功能就等于没做（实现时确认过这条链，所以这里专门盯它）。
+  //      ② 连戳 3 下只回 **1** 次，且那次**不带** `_pokeRetort`
   const keepProvider = config.provider.name;
   const keepPer = config.poke.countPerBack;
   const keepBack = config.poke.backMode;
@@ -478,15 +478,14 @@ console.log('\n【11】★ 默认：攒够次数 → 换成"反击语气"（不�
     await b.pokeBack(notice(uid, SELF, GID));
     check(calls.length === 0, '★ 攒够 3 次也**不发包**（回戳机制换成了文字反击）');
     check(
-      routed.length === 2,
-      '★★ 中间那次被冷却挡掉、但**攒够那一次必须放行**（否则反击提示词没机会注入）',
+      routed.length === 1,
+      '★★ 连戳 3 下只回 **1** 次（冷却期内一律不回，2026-10-20 用户要求）',
       `${routed.length} 次进模型`,
     );
     check(
-      routed[0]?.event?._pokeRetort !== true && routed[1]?.event?._pokeRetort === true,
-      '★★ 只有攒够那一次带 `_pokeRetort`（提示词换成反击语气那版）',
+      routed[0]?.event?._pokeRetort !== true,
+      '★ 第一下**不带** `_pokeRetort`（反击语气留给冷却过后的下一次）',
     );
-    check(routed[1]?.event?._pokeTimes === 3, '★ 并带上次数（提示词要说得出"戳了你 3 次"）');
   } finally {
     config.provider.name = keepProvider;
     config.poke.countPerBack = keepPer;

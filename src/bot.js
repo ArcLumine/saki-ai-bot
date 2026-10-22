@@ -40,6 +40,8 @@ import * as observe from './observe.js';
 //   · `dice-mode` = 骰娘模式状态机（进入后「只应答骰点，别的全程静默」）
 import * as sealdice from './sealdice.js';
 import * as diceMode from './dice-mode.js';
+// ⚠️ 2026-10-21 加：骰娘模式下判「这句跟本局跑团有关吗」要看跑团记录（`diceRelated`）
+import * as diceLog from './dice-log.js';
 // ⚠️ 「他的资料」自动更新（2026-10-03 用户要求）：他私聊里聊到生活变化 → 自动改 owner.md
 import * as ownerUpdate from './owner-update.js';
 import { queryServer, describe } from './status.js';
@@ -148,6 +150,35 @@ const chunkCfg = () => ({
  * （在 `sendText()` 开头赋值：不管最后发没发出去，"她刚说的那段"就是它。）
  */
 let lastSentText = '';
+
+/**
+ * 骰娘模式下判「这句跟本局跑团有关」的**通用词**（`diceRelated` 用，2026-10-21 加）。
+ *
+ * ⚠️ 这是**兜底**：不依赖跑团记录，任何时候都能用。
+ *    真正准的判据是 `diceLog` 里的本局上下文（昵称 / 角色卡 / 技能名），见 `diceRelated`。
+ * ⚠️ 别把「骰」单独拆出来当关键词 —— 那样「骰娘好可爱」也会算相关，等于没判。
+ */
+const DICE_RELATED_WORDS =
+  /(检定|掷骰|骰子|大成功|大失败|理智|san\s*值|先攻|回合|行动轮|剧情|角色卡|体质|敏捷|力量|意志|教育|幸运|闪避|格斗|射击|侦查|聆听|潜行|投掷|伤害|血量|buff|debuff)/i;
+
+/**
+ * 骰点指令速查的全文（`knowledge/dice-commands.md`，带缓存）。
+ *
+ * ⚠️ 2026-10-21 加（用户实测她答「骰娘怎么用」时编出了 `.pcnew`、`.show` 这种不存在的指令）：
+ *    那份速查**常驻在 system 段里会被 4 万字人设淹没**（长上下文里中段最容易被忽略）。
+ *    ⇒ 改成**群友问指令时动态贴到 user 消息里**（离模型最近，压不过），她才肯照抄。
+ *    ⚠️ 只在那一条上贴，平时不占 token。
+ */
+let _diceHelpCache;
+function diceHelpText() {
+  if (_diceHelpCache !== undefined) return _diceHelpCache;
+  try {
+    _diceHelpCache = readFileSync(`${KNOWLEDGE_DIR}/dice-commands.md`, 'utf8');
+  } catch {
+    _diceHelpCache = '';
+  }
+  return _diceHelpCache;
+}
 
 export function chunkDelay() {
   // ⚠️⚠️ 2026-10-14 加（用户：「工作模式的消息分条逻辑改一下吧，就是**下一条消息的间隔要像
@@ -2986,6 +3017,9 @@ export class Bot {
 
       verdict = await judgeSpeak(event, {
         context,
+        // ⚠️ 2026-10-20：骰娘模式里"摇中吐槽"那 15% 才会带这个标记，
+        //    judge 拿到后会用「跑团中、只吐槽」的口径判（见 speak-judge.js）。
+        diceBanter: !!event._diceBanter,
         // ⚠️⚠️ 2026-10-15 加（用户：「699 群到中午开始疯狂回消息」）——
         //    上游 429/超时那阵子，「说话判断」每次都失败 ⇒ 它兜底"照常说"
         //    ⇒ **群里每条消息都接** ✗（一小时 40 条）
@@ -4340,6 +4374,16 @@ export class Bot {
         //    两件事都靠它：① 好感度只在"她刚说完话"的窗口内对回应加分
         //                  ② "回复她"这条判据要知道被回的是不是她发的
         if (event.message_type === 'group') this._markSpoke(event.group_id, r?.message_id);
+        // ⚠️ 2026-10-20（用户实测「协议端 6 条、日志只有 3 条」）：
+        //    `[发出气泡]` 原来**只打在 `sendChunk` 里**，而真正发消息的出口有三个：
+        //      · `sendChunk`（主回复，每条 chunk 最后都调到这里）
+        //      · `sendParts`（`sendChatLike` 分条 → 直接 `send_group_msg`，**绕开这里**）
+        //      · 直接调 `sendText`（骰点转述 / 海豹结果转发）
+        //    ⇒ 后两条一个字都不记，于是"她到底发了几条"永远对不上账 ✗
+        //    现在统一记在**这个真正的发送回调**里：只有它知道"确实发出去了"。
+        if (!(r && r.status === 'failed')) {
+          log.info(`[发出气泡] ${String(text ?? '').slice(0, 120)}`);
+        }
         if (r && r.status === 'failed') {
           // ⚠️ 2026-09-25：私聊撞上"请先添加对方为好友" ⇒ 把这个人记进"发不出去"名单，
           //    `friend.pickForToday()` 以后会跳过（省得每天白撞同一个人）。
@@ -5958,6 +6002,44 @@ export class Bot {
   }
 
   /**
+   * 骰娘模式下：这句**跟本局跑团有关吗**？（决定放行概率，2026-10-21 用户定）
+   *
+   * ⚠️ 为什么不用统一概率：跑团群里大部分消息是**跟这局无关的闲聊**
+   *    （「我去倒杯水」「这游戏真难」）—— 按统一概率她会在这些时候冒泡，
+   *    看着就像没在跟跑团；而「张三那个 5 太惨了」这种正相关的又会被一起掐掉。
+   *
+   * 判据两档：
+   *   ① **通用跑团词**（检定 / 骰 / 大成功 / 理智 / 先攻 / 回合 / 属性…）
+   *      —— 不依赖跑团记录，永远可用；
+   *   ② **本局上下文**（`diceLog` 的最近记录）：提到了记录里出现过的**昵称**，
+   *      或**引号里的名词**（角色卡 / 技能 / 道具名）→ 算相关。
+   *      ⚠️ ② 只在 `diceLog.enable` 且那个群配了 `groups` 时才有料；没料就只靠 ①。
+   *
+   * @returns {boolean} true = 跟本局相关（放行概率用高的那档）
+   */
+  diceRelated(gid, text) {
+    const t = String(text ?? '');
+    if (!t) return false;
+    if (DICE_RELATED_WORDS.test(t)) return true;
+    try {
+      const items = diceLog.recent(String(gid ?? ''), 40);
+      if (!items.length) return false;
+      // ① 提到本局里出现过的人（昵称）
+      for (const it of items) {
+        const who = String(it?.who ?? '').trim();
+        if (who.length >= 2 && t.includes(who)) return true;
+      }
+      // ② 提到本局记录里引号括起来的名字（角色卡 / 技能 / 道具）
+      const names = new Set();
+      for (const it of items) {
+        for (const m of String(it?.text ?? '').matchAll(/[「"『]([^」"』]{2,8})[」"』]/g)) names.add(m[1]);
+      }
+      for (const n of names) if (t.includes(n)) return true;
+    } catch {}
+    return false;
+  }
+
+  /**
    * 认「进 / 出骰娘模式」指令，**以及在骰娘模式下转述骰点**。
    *
    * **返回 true = 这条已被消费掉了**，别再往下走。
@@ -6010,7 +6092,22 @@ export class Bot {
     }
 
     // ② 骰娘模式下：转述骰点（这是她**唯一**的开口理由）
-    if (!this.isDiceMode(event)) return false;
+    //
+    // ⚠️⚠️ 2026-10-20 补（用户实测：群里打 `.r`，她回了「掷什么呀，光一个 .r 谁知道你要干嘛」）：
+    //    **日常模式**（没进骰娘模式）下，骰点指令原来根本不过这里 ⇒ 掉进 decide 被当成闲聊，
+    //    而海豹同时也收到并算了一遍 → 群里变成「她先插一句 + 海豹再回」✗
+    //    ⇒ 日常模式下只要**海豹在线**（它自己接了 IM），骰点就**消费掉**：交给海豹，她不接嘴。
+    //    ⚠️ 海豹没接（`relay: true`）时**保持原行为**（日常不转述）——
+    //      那种情况下她本来就不该对 `.r` 发表意见，但也不该假装自己能算。
+    if (!this.isDiceMode(event)) {
+      if (!diceMode.isDiceCommand(t, config.diceMode ?? {})) return false;
+      if (!sealdice.enabled()) return false;
+      if (!(await sealdice.shouldRelay('group'))) {
+        log.debug(`[骰娘] 日常模式：骰点交给海豹，小祥不接嘴：「${String(t).slice(0, 20)}」`);
+        return true;
+      }
+      return false;
+    }
     if (!diceMode.isDiceCommand(t, config.diceMode ?? {})) return false;
     if (!sealdice.enabled()) {
       // ⚠️ 海豹没配 —— 只 debug 不回话。她"当骰娘"却答不了，比不说话更让人困惑。
@@ -6133,11 +6230,66 @@ export class Bot {
     //      （`sayBotFarewell`），把这段闸门挤到了 2600 字符之外 ⇒
     //      `test/dice-mode.js`【5】组 4 项失败。**闸门必须留在最前面**：
     //      骰娘模式下连收尾话都不该说（她「在当骰娘」就是全程静默）。
+    // ⚠️⚠️ 2026-10-20 改（用户要求：「骰娘模式下安静 / 降低频率，但要能吐槽」）——
+    //    原来是「不是骰点就一律 null」，现在分三层：
+    //      ① **骰点**（含 `@小祥 .r 1d100` 这种）→ 交给海豹，小祥不下场；
+    //      ② 非骰点 + **显式召唤**（@ / 引用她 / 叫她名字）→ 照常回（被点名不理像坏了）；
+    //      ③ 非骰点 + 主动接话 → 按 `diceMode.banterChance` 放行（默认 15%），
+    //         放行时打 `_diceBanter` 标记，提示词/说话判断按"跑团里只吐槽"的口径走。
+    //    ⚠️⚠️ 第 ① 条必须**先剥掉 @ 段再判**：`isDiceCommand()` 要求开头就是 `.` 或 `/`，
+    //      而群友常写「@小祥 .r 1d100」—— 不剥的话它会被判成"闲聊"，
+    //      一旦 ② 放开"@ 就回"，这类消息就会被回一句嘴、跟海豹的结果撞车 ✗
     if (this.isDiceMode(event)) {
-      const t = msg.tidy(msg.extractText(segments));
-      if (!diceMode.isDiceCommand(t, config.diceMode)) {
-        log.debug(`[骰娘] 这个群在骰娘模式，这句不是骰点 → 静默：「${String(t).slice(0, 24)}」`);
-        return null;
+      const noAt = segments.filter(
+        (s) =>
+          !(
+            s?.type === 'at' &&
+            (String(s.data?.qq ?? '') === String(this.selfId) || s.data?.qq === 'all')
+          ),
+      );
+      const t = msg.tidy(msg.extractText(noAt));
+      if (diceMode.isDiceCommand(t, config.diceMode)) {
+        log.debug(`[骰娘] 骰点指令 → 交给海豹：「${String(t).slice(0, 24)}」`);
+      } else {
+        // ⚠️ 2026-10-20：显式召唤的判据要**把戳一戳也算上** ——
+        //    它是"明确在找她"（`decide` 里 `_poke` 本来就直接判召唤），
+        //    漏掉的话骰娘模式下戳她会被静默（`voluntary` 为空 ⇒ 不走吐槽概率那条）。
+        //    · @ 她 / 引用她 / 正文叫她名字 / **戳一戳**
+        //    · 关键词命中、服务器问题走的是"非自愿"那条路（`!voluntary`）⇒ 自动放行，
+        //      那是她的本职，不该被跑团挡住。
+        //    · 别人 @ 别人**不算**（`isAt` 只认 @ 她自己的号）。
+        const called =
+          !!event._poke ||
+          !!(this.selfId && msg.isAt(segments, this.selfId)) ||
+          this.isQuoteOfMe(event, segments) ||
+          this.calledByName(msg.extractText(segments));
+        // ⚠️ 2026-10-21 改（用户：「进骰娘模式的话微调一下接话判定」+「A，直接 2 吧一步到位」）：
+        //    **按跟本局的相关度分两档**，不再统一概率 ——
+        //    · 相关（检定 / 角色 / 剧情词，或提到本局记录里的人）→ `banterChanceRelated`（默认 45%）
+        //    · 无关闲聊（「我去倒杯水」这种）→ `banterChance`（默认 5%）
+        //    ⚠️ 跑团群里大部分消息是无关闲聊 —— 统一概率会让她在这些时候冒泡，看着没在跟跑团。
+        const related = this.diceRelated(event.group_id, t);
+        const chance =
+          config.diceMode?.banter === false
+            ? 0
+            : related
+              ? Number(config.diceMode?.banterChanceRelated ?? 0.45)
+              : Number(config.diceMode?.banterChance ?? 0.05);
+        const banter = !!voluntary && Math.random() < chance;
+        if (!called && !banter) {
+          log.debug(
+            `[骰娘] 非骰点、${
+              voluntary ? `主动接话没摇中（${related ? '相关' : '闲聊'} ${Math.round(chance * 100)}%）` : '也不是在叫她'
+            } → 静默：「${String(t).slice(0, 24)}」`,
+          );
+          return null;
+        }
+        event._diceBanter = true;
+        log.info(
+          `[骰娘] 非骰点但${
+            called ? '被点名 / 引用' : `摇中吐槽（${related ? '相关' : '闲聊'} ${Math.round(chance * 100)}%）`
+          } → 放行：「${String(t).slice(0, 24)}」`,
+        );
       }
     }
 
@@ -8768,6 +8920,17 @@ export class Bot {
       );
     }
 
+    // ⚠️ 2026-10-21 加（用户实测她答「骰娘怎么用」时编出了 `.pcnew`、`.show` 这种不存在的指令）：
+    //    群友问**指令 / 怎么用 / 建卡**时，把速查**贴到 user 消息尾部**。
+    //    常驻在 system 段会被 4 万字人设淹没（长上下文里中段最容易被忽略）；
+    //    贴在 user 消息里离模型最近，她才肯照抄。
+    //    ⚠️ 只在命中的那一条上贴，平时不占 token。
+    const diceHelpBlock = /(指令|怎么用|怎么掷|骰娘怎么|建卡|角色卡|成长检定|技能成长|\.r\b|\.ra\b|\.st\b|\.pc\b)/.test(
+      String(text ?? ''),
+    )
+      ? `\n\n（⚠️ 群友在问骰点指令 —— 下面是**权威速查**，照它答；**别自己编指令**，编了群友照着打没反应）\n\n${diceHelpText()}`
+      : '';
+
     const messages = [
       { role: 'system', content: sysPrompt },
       ...history.getHistory(key),
@@ -8782,10 +8945,11 @@ export class Bot {
         // ⚠️ 2026-10-04：`senderName` 现在是 `昵称(QQ号)`（见 `who.js` 的 `senderTag`）。
         //    私聊以前**只有昵称** —— 模型不知道发件人是谁，才会去猜「这是他另一个号」。
         //    ⇒ 当前这一条也必须带号，不能只靠 system 段的身份块。
-        content: lateMs
-          ? `${senderName}**${Math.max(1, Math.round(lateMs / 60000))} 分钟前**发来的消息` +
-            `（机器人那会儿掉线了，现在才看到）：「${text}」`
-          : `${senderName}刚发来的消息：「${text}」`,
+        content:
+          (lateMs
+            ? `${senderName}**${Math.max(1, Math.round(lateMs / 60000))} 分钟前**发来的消息` +
+              `（机器人那会儿掉线了，现在才看到）：「${text}」`
+            : `${senderName}刚发来的消息：「${text}」`) + diceHelpBlock,
       },
     ];
 
@@ -11989,7 +12153,16 @@ export class Bot {
       );
     }
 
-    if (cooling && !wantRetort) {
+    // ⚠️ 2026-10-20 改（用户实测：一个人连戳 6 下，她回了 6 条，拍板要「连戳只回一次」）：
+    //
+    //    原来这里是 `if (cooling && !wantRetort)` —— **"攒够 N 次"那一下故意绕过冷却**，
+    //    于是连戳时会多回一条（"第三下啦"）；再加上"生成期间又收到 → 合并重生成"时
+    //    前一条已经发出的不会被收回 ⇒ 12 秒里回了 6 条 ✗
+    //
+    //    现在：**冷却期内一律不回**（`wantRetort` 也不再例外）——
+    //    连戳只回第一下，后面的戳只记上下文（上面已经 `recent.remember` 过了）。
+    //    ⚠️ `wantRetort`（反击语气）仍保留：冷却**过了**之后的下一次戳照样会走它。
+    if (cooling) {
       log.debug(
         `[戳一戳] ${uid} ${Math.round((Date.now() - last) / 1000)}s 前刚回过话` +
           `（冷却 ${Math.round(cooldown / 1000)}s）→ 这次不回话${wantBack ? '（但拍回去了）' : ''}`,
@@ -12755,6 +12928,20 @@ export class Bot {
       //      那是"你跟群友的长期记忆"，两个机器人自己刷的时候用不上，纯烧 token。
       const sl = lean ? '' : storyline.promptBlock(5, scopeId);
       if (sl) parts.push('\n' + sl);
+
+      // ⚠️⚠️ 2026-10-21 加（用户：「dicelog 也可以进记忆库吧」）——
+      //    `diceLog.promptBlock()` 原来**零调用**：跑团记录一直在拉、在压缩成章节，
+      //    但章节**从来没进过提示词** ⇒ 她压根不知道"上一局发生了什么"，
+      //    跑团时接话全靠临时上下文（重启一次就全忘）。
+      //    ⇒ 和 `storyline` 并列接进来，两者不重复：
+      //      · storyline =「她自己经历过什么」（长期）
+      //      · diceLog   =「这一局跑过什么」（按群，章节形式）
+      //    ⚠️ 只给**群**（私聊没有"局"）；`lean`（互刷）时不带 —— 用不上，纯烧 token。
+      //    ⚠️ `promptBlock` 只在**有章节**时才返回内容，没跑过团时是空串，不会占位。
+      if (!lean && event?.message_type === 'group' && event?.group_id) {
+        const dl = diceLog.promptBlock(String(event.group_id), 900);
+        if (dl) parts.push('\n' + dl);
+      }
     } else {
       parts.push('\n（注意：知识库未加载成功，请只做最保守的回答，并说明自己暂时查不到资料）');
     }
@@ -13093,6 +13280,23 @@ export class Bot {
             '   把问话的群友认成了榜单上的另一个人，群友当场指出「你怎么分不清人」。）',
             '',
             ctx,
+          ].join('\n'),
+        );
+      }
+
+      // ⚠️ 2026-10-20（用户要求「骰娘模式下安静 / 降低频率，但要能吐槽」）：
+      //    这条是"摇中的吐槽机会"（`diceMode.banterChance`），**不是**闲聊许可 ——
+      //    所以口径要钉死，否则她一旦开口就长篇大论、把跑团节奏带跑。
+      if (event?._diceBanter) {
+        parts.push(
+          [
+            '# 【骰娘模式】群里在跑团，你只是**偶尔**插一句',
+            '',
+            '- 骰子由海豹算，**结果不用你重复**（别复述数字、别解释规则、别算概率）。',
+            '- 这一句只做一件事：**像围观的人那样吐槽**（结果离谱 / 大成功大失败 / 场面好笑）。',
+            '- **一句话**，短。别开新话题、别问规则、别当主持人。',
+            '- ⚠️ **整句用中文圆括号（）包起来**（这是群里的约定：括号里才是吐槽）。',
+            '- 接不上就不说 —— 这一档本来就该安静。',
           ].join('\n'),
         );
       }
@@ -15075,14 +15279,28 @@ export class Bot {
     // ⚠️ 2026-09-14 再加一道：破折号这类聊天里不用的标点 → 逗号（用户要求）。
     //    放在 `cleanMarkdown` **之后**才对（它在前面的话，换出来的换行会被压掉）。
     //    `dropDashBreak` 是兜底：**任何路径都不许把切点标记发出去**。
-    const text = dropDashBreak(
+    let text = dropDashBreak(
       dropTrailingPeriods(stripChatUncommonPunct(cleanMarkdown(stripMarkers(raw).trim()))),
     );
+
+    // ⚠️ 2026-10-20（用户要求：「骰娘模式下的吐槽也得强制」）：
+    //    骰娘模式里"摇中吐槽"的那条回复，**整句包在中文圆括号里**。
+    //    ⚠️ 只在 `_diceBanter` 这一条上动手（普通回复一个字不变）；
+    //    ⚠️ 先剥掉模型可能自己加的括号/引号，避免出现「（（…））」。
+    if (event?._diceBanter) {
+      const inner = String(text)
+        .replace(/^[\s（(「『"'【]+/, '')
+        .replace(/[\s）)」』"'】]+$/, '')
+        .trim();
+      if (inner) text = `（${inner}）`;
+    }
 
 // ⚠️ 临时诊断（2026-09-21）：把**实际要发出去**的这条打出来，
     //    用来判断「接一句回两句」到底是「一段里两个意思」还是「真发了两个气泡」。
     //    每条气泡各打一行 → 数行数就知道分了几条。
-    if (text) log.info(`[发出气泡] ${text}`);
+    // ⚠️ 2026-10-20：`[发出气泡]` 已挪到 `sendText` 的**发送成功回调**里 ——
+    //    这一处原来只覆盖"主回复"那一条路，`sendParts` / 直调 `sendText` 的全都没记
+    //    （实测协议端 6 条、日志 3 条）。别在这里再加回来，会重复。
     // ⚠️⚠️ 2026-09-30：**模型会把"不回"两个字当成回复内容写出来**。
     //    实测：群里发「哈哈哈哈这个太草了」，她生成的正文就是「不回。」
     //    —— 提示词里那句"要么极短地回一句，要么不回"被当成了模板照抄。
@@ -16201,6 +16419,17 @@ export class Bot {
     //    ⚠️ **指令回执**（`/剧情` `/清除剧情` `/暂停`）走的是 `sendToGroup`，
     //      **不经过这里** ⇒ 静默期里指令照样能回、能被认出来 ✓
     //    ⚠️ `opts.force === true` 可以强行发（留给"必须说话"的场合）。
+    //
+    // ⚠️⚠️ 2026-10-20 加（用户要求：「骰娘模式的时候把她**主动发消息**的那个也屏蔽了」）：
+    //    跑团期间她会按定时器冒泡（日常事件 / 剧情 / 同类搭话）—— 那些不该在跑团时出现。
+    //    ⇒ 调用方传 `proactive: true` 的（= 主动发起的那几条路），骰娘模式下**直接不发**。
+    //    ⚠️ 只挡 `proactive`：正常回复和骰点转述**一个字都不受影响**（它们不传这个标记）。
+    if (!opts.force && opts.proactive && diceMode.isOn({ group_id: String(groupId ?? '') })) {
+      log.info(
+        `[骰娘] 群 ${groupId} 在骰娘模式 → 主动消息不发（${String(text ?? '').slice(0, 24)}）`,
+      );
+      return [];
+    }
     if (!opts.force && this.isMuted(groupId)) {
       log.info(
         `[静默] 群 ${groupId} 还在静默期 → 这条不发了（${String(text ?? '').slice(0, 20)}）`,
@@ -16471,7 +16700,7 @@ export class Bot {
           log.warn(`[剧情] 自动推进失败：${r?.reason ?? '不知道为啥'}`);
           return;
         }
-        const sent2 = await this.sendChatLike(gid, r.text, { maxChunks: 3 });
+        const sent2 = await this.sendChatLike(gid, r.text, { maxChunks: 3, proactive: true });
         for (const x of sent2) quest.rememberHerMsg(cur, x?.message_id);
         log.info(`[剧情] 自动推进 → 群 ${gid} 第 ${cur.stageIndex} 段（发出 ${sent2.length} 条）`);
         if (r.done) this.settleQuestEnding(gid, cur, r.ending);
@@ -16500,6 +16729,11 @@ export class Bot {
           message: [{ type: 'text', data: { text: list[i] } }],
         });
         this._markSpoke(groupId, r?.message_id);
+        // ⚠️ 2026-10-20：和 `sendText` 一样记一条 —— 这条路径**不走 `sendText`**
+        //    （它直接调 `send_group_msg`），不记的话日志里就查不到她说过这句。
+        if (!(r && r.status === 'failed')) {
+          log.info(`[发出气泡] ${String(list[i] ?? '').slice(0, 120)}`);
+        }
       } catch (e) {
         log.warn(`[补发] 第 ${i + 1}/${list.length} 条还是失败：${e.message}`);
         left.push(list[i]);
@@ -17386,7 +17620,7 @@ export class Bot {
           await this.sendToGroup(gid, `这段没写出来：${r?.reason ?? '不知道为啥'}`).catch(() => {});
           return;
         }
-        const sent = await this.sendChatLike(gid, r.text, { maxChunks: 3 });
+        const sent = await this.sendChatLike(gid, r.text, { maxChunks: 3, proactive: true });
         for (const x of sent) quest.rememberHerMsg(q, x?.message_id);
         log.info(`[剧情] 手动推进 → 群 ${gid} 第 ${q.stageIndex} 段（发出去 ${sent.length} 条）`);
         if (r.done) this.settleQuestEnding(gid, q, r.ending);
@@ -17957,7 +18191,7 @@ export class Bot {
         // ⚠️ 开场发出去之前，先记下"群里最后一条"的时间 —— 它就是旧话题的上界
         //    （下面那道"抹旧话题"的窗口终点要用它，见那段注释）
         const beforeAt = recent.lastMessageAt(gid);
-        const sent = await this.sendChatLike(gid, r.text, { maxChunks: 3 });
+        const sent = await this.sendChatLike(gid, r.text, { maxChunks: 3, proactive: true });
         for (const x of sent) quest.rememberHerMsg(r.quest, x?.message_id);
         // ⚠️⚠️ 2026-10-07 加（用户：「**`/清除剧情` 指令应该也要屏蔽一分钟 bot 发言，也失效了**」）：
         //    开场已经发出去了 ⇒ **把刚才那道静默按回去（只按剩下的时间）**。
@@ -18447,6 +18681,14 @@ export class Bot {
    */
   async sendToGroup(groupId, text, opts = {}) {
     if (!text) return null;
+    // ⚠️ 2026-10-20（同 `sendChatLike`）：骰娘模式下**主动发起**的那几条路一律不发 ——
+    //    管理界面手动触发不传 `proactive`，照旧能发（那是人在操作，不该被跑团挡住）。
+    if (!opts.force && opts.proactive && diceMode.isOn({ group_id: String(groupId ?? '') })) {
+      log.info(
+        `[骰娘] 群 ${groupId} 在骰娘模式 → 主动消息不发（sendToGroup：${String(text).slice(0, 24)}）`,
+      );
+      return null;
+    }
     // ⚠️⚠️ 2026-10-06 加（用户：「**还是没回**」查到底的那一处）：
     //    **这里也是"她说话了"的出口** —— 管理界面手动触发的同类搭话、
     //    剧情播报、日常事件都走 `sendToGroup`，**不走 `sendChatLike`**。

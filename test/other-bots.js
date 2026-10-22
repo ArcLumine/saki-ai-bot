@@ -1373,8 +1373,10 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
     '★★★ 传了 `maxChunks` 就**最多 3 条**（超出的并进最后一条）',
   );
   const bsrc23b = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  // ⚠️ 2026-10-20：调用处多了 `proactive: true`（骰娘模式下要挡主动消息），
+  //    所以不能再要求右括号紧跟 —— 只认"传了 maxChunks: 3"。
   check(
-    (bsrc23b.match(/sendChatLike\(gid, r\.text, \{ maxChunks: 3 \}\)/g) ?? []).length === 3,
+    (bsrc23b.match(/sendChatLike\(gid, r\.text, \{ maxChunks: 3[^}]*\}/g) ?? []).length === 3,
     '★★ 剧情三条路（开场 / 手动推进 / 自动推进）**都传了** `maxChunks: 3`',
   );
   check(

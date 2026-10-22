@@ -830,7 +830,7 @@ if (true) {
         // ⚠️ 同样走 `sendChatLike`（会分条）—— 日常小事也是"她说的话"。
         // ⚠️ `outbox:false`：日常事件**不进待发箱**，见下面「顺延」那段的原因。
         const sent = await bot
-          .sendChatLike(g, text, { kind: 'life', outbox: false })
+          .sendChatLike(g, text, { kind: 'life', outbox: false, proactive: true })
           .catch(() => []);
         if (!Array.isArray(sent) || !sent.length) {
           // ⚠️⚠️ **一条都没发出去 → 不记账**（`fired` 不加）→ 这就是「自动顺延」：
@@ -1011,7 +1011,7 @@ startOutboxTick();
       //    用户要求：「剧情在发群里时一样要分条……只要不是那种排行榜之类
       //    完全不是属于人类发的消息，都要分条」。一条 150 字的"祥子的话"
       //    看着就像公告，不像人在群里说话。
-      const sent = await bot.sendChatLike(gid, text);
+      const sent = await bot.sendChatLike(gid, text, { proactive: true });
       // ⚠️ **每一条**都要记 id —— 群友可能回复其中任何一条（"回复她"判据要用）
       for (const r of sent) quest.rememberHerMsg(q, r?.message_id);
       // ⚠️ `sendChatLike` 吞掉错误、只回成功的 —— **空数组 = 一条都没发出去**。
@@ -1044,7 +1044,7 @@ startOutboxTick();
     if (!gid) return;
     setTimeout(() => {
       bot
-        .sendToGroup(gid, text)
+        .sendToGroup(gid, text, { proactive: true })
         .catch((e) => log.warn(`[剧情] 结局播报发送失败：${e.message}`));
       log.info(
         `[剧情] 结局播报 → 群 ${gid}（${r.ending === 'good' ? '好' : '坏'}结局，${r.applied.length} 人）`,

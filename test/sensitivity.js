@@ -205,6 +205,10 @@ async function setup(level, basePort, groupId = GROUP) {
   parsed.groupParams = {
     [GROUP]: { chat: { answerServer: level < 3 } },
   };
+  // ⚠️⚠️ 2026-10-20 加：协议端换到**另一台机器**之后，`config.yml` 的 `onebot.url`
+  //    不再是本机 3001 ⇒ 这里必须**显式**指向本套件自己的假协议端（`WS_PORT`），
+  //    否则既连不到假端、又会去连真协议端。原来这条是"碰巧成立"的。
+  parsed.onebot = { ...(parsed.onebot ?? {}), url: `ws://127.0.0.1:${WS_PORT}` };
   writeFileSync(CFG, yaml.dump(parsed, { lineWidth: 120, noRefs: true }), 'utf8');
   if (!String(parsed.onebot?.url).includes(String(WS_PORT))) throw new Error('onebot.url 没换掉');
   if (!String(parsed.llm?.baseURL).includes(String(LLM_PORT))) throw new Error('llm.baseURL 没换掉');

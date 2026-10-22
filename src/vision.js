@@ -27,8 +27,20 @@ const VISION_MODELS = {
   //    （400 `model [deepseek-flash] service info not found`），能看图的是 `glm-5v-turbo`。
   //    它不是推理模型，2000 token 足够描述一张图（8000 只是白占额度）。
   'glm-5v-turbo': { maxTokens: 2000, reasoning: false },
+  // ⚠️⚠️ 2026-10-20 晚换到 `kimi-k3`，原因：`glm-5v-turbo` 是**国内版模型**，
+  //    而这个 Key 绑的是**国际版出口** ⇒ 400「只在国内版提供，请改用对应出口的 Key」。
+  //    同一批实测（同一张 JPEG，见下）：
+  //      · kimi-k3        ✅ 描述准确（还带推理）
+  //      · step-5-preview ✅ 也准，作为备选
+  //      · glm-5.2 / 5.3 / 5.3-flash ⚠️ **HTTP 200 但正文说"我无法查看图片"** ——
+  //        不支持视觉却不报错，配成它们会**静默返回"看不到图"**，比 400 更难查 ✗
+  //      · gemini-3.x / gpt-5.x / gpt-6-x / grok-4.7 ❌ 11158 not allowed for personal_free_user
+  //      · minimax-m3.1-flash ❌ 国内版出口（同 glm-5v-turbo 的坑）
+  //    ⇒ **换识图模型一定要先用一张真图实测**，别看名字像多模态就填。
+  'kimi-k3': { maxTokens: 2500, reasoning: true },
+  'step-5-preview': { maxTokens: 2500, reasoning: true },
 };
-const DEFAULT_VISION_MODEL = 'deepseek-flash';
+const DEFAULT_VISION_MODEL = 'kimi-k3';
 
 /** flash 是推理模型，思考链会占掉一大半 token，所以这里给得比较宽 */
 const DEFAULT_MAX_TOKENS = 8000;
@@ -282,6 +294,34 @@ export async function describeImageDetailed(image, opts = {}) {
   } catch (e) {
     log.warn(`识图：读图失败 ${e.message}`);
     return { text: '', skipped: `读图失败：${e.message}` };
+  }
+
+  // ⚠️⚠️ 2026-10-20 修（用户报「识图一直失败」）——
+  //    `glm-5v-turbo` **不收 GIF**：同一张图实测 ——
+  //      GIF  → HTTP 400 `11135 Please start a new conversation, replace the image` ✗
+  //      PNG  → HTTP 200（sharp 转出来再发就正常）✓
+  //      JPEG → HTTP 200 ✓
+  //    而 **QQ 表情包一大半是 GIF** ⇒ 线上识图永远 400，日志里一路 `识图失败`。
+  //    ⇒ 送模型前把 gif / webp 统一转 PNG：
+  //      · 保留透明通道（表情包常带透明）；
+  //      · 动图只取第一帧 —— 识图不需要动画，而且 data URL 只认单帧。
+  if (data.mime === 'image/gif' || data.mime === 'image/webp') {
+    try {
+      // ⚠️ `sharp` 在 `shrink()` 里是**局部变量**，这里拿不到 —— 自己 import 一次
+      //    （ESM 会缓存，重复 import 不会重复加载）。
+      const sharpMod = (await import('sharp')).default;
+      const buf = Buffer.isBuffer(image) ? image : readFileSync(image);
+      const out = await sharpMod(buf).png().toBuffer();
+      const before = data.mime;
+      data = {
+        url: `data:image/png;base64,${out.toString('base64')}`,
+        bytes: out.length,
+        mime: 'image/png',
+      };
+      log.debug(`识图：${before} 不受模型支持 → 已转 PNG（${Math.round(out.length / 1024)}KB）`);
+    } catch (e) {
+      log.warn(`识图：${data.mime} 转 PNG 失败（按原样试一次）：${e.message}`);
+    }
   }
 
   // 超限先压缩，别再直接跳过

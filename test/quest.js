@@ -956,7 +956,9 @@ console.log('\n【21】★★ 分条：像人说的话都要分条，机器格�
   const idx = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
   const js = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
   const botSrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
-  check(/sendChatLike\(gid, text\)/.test(idx), '★ 剧情那段走 sendChatLike（会分条）');
+  // ⚠️ 2026-10-20：调用处多了 `{ proactive: true }`（骰娘模式下要挡住主动消息），
+  //    所以断言**不能再要求右括号紧跟** —— 只认"走了 sendChatLike"。
+  check(/sendChatLike\(gid, text/.test(idx), '★ 剧情那段走 sendChatLike（会分条）');
   // ⚠️ 2026-09-15：日常那一路多了参数（`{ kind:'life', outbox:false }` —— 日常靠"顺延"
   //    不靠"补发"，见 src/outbox.js 的注释），所以断言不能写死 `sendChatLike(g, text)`。
   check(/sendChatLike\(g, text/.test(idx), '★ 一级日常也走 sendChatLike');
