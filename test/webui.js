@@ -13,11 +13,35 @@
  */
 import { spawn } from 'node:child_process';
 import { configWithOnebot } from './_config-base.mjs';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, copyFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * 读**全部前端脚本**（`webui-app.js` + `pages/*.js`）。
+ *
+ * ⚠️⚠️ 2026-10-22 加：界面拆成"布局 / 框架 / 页面"三层之后（见 AGENTS「WebUI 的结构约定」），
+ *    大量断言原本是 `/某段逻辑/.test(html)` —— 而那段逻辑**已经不在 html 里**了，
+ *    于是从 `752d841`（把内嵌脚本搬出去）起**一次性红了 40 条**（看着像"功能全坏了"，
+ *    其实只是测试还在老位置找代码）。
+ *    ⇒ 现在把前端脚本拼进 `html` 变量：断言的语义是"这段代码**还在界面侧**"，
+ *      在哪个文件里不重要。
+ */
+function readFrontendJs() {
+  const parts = [];
+  const base = join(ROOT, 'src', 'webui-assets');
+  try {
+    parts.push(readFileSync(join(base, 'webui-app.js'), 'utf8'));
+  } catch {}
+  try {
+    for (const f of readdirSync(join(base, 'pages'))) {
+      if (f.endsWith('.js')) parts.push(readFileSync(join(base, 'pages', f), 'utf8'));
+    }
+  } catch {}
+  return parts.join('\n');
+}
 // ⚠️ 2026-09-29：**创建接口的落盘目录以 env 为准**，别再写死 `knowledge/`。
 //    run-all 会给每个套件一份隔离知识库（`QQBOT_KNOWLEDGE_DIR`，值是相对 ROOT 的路径），
 //    起的机器人进程（`...process.env` 照单全收）会把新库写进**副本**，
@@ -232,7 +256,11 @@ async function main() {
 
   console.log('\n[2] 首页与状态接口');
   const page = await fetch(BASE + '/');
-  const html = await page.text();
+  // `htmlRaw` = 服务端**实际吐出来的页面**（不含前端脚本）；`html` = 页面 + 前端脚本。
+  // ⚠️ 需要"确认某段代码还在界面侧"的断言用 `html`（拆文件之后代码可能在 webui-app.js 里）；
+  //    需要"确认服务端渲染结果"的断言（比如占位符替换）必须用 `htmlRaw`。
+  const htmlRaw = await page.text();
+  const html = htmlRaw + '\n' + readFrontendJs();
   const js = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
   // ⚠️ 2026-09-17 用户要求「把 webui 上小祥的名字也统一一下，改成 Saki」——
   //    界面标题从「客服小祥 · 管理台」改成了「客服 Saki · 管理台」，这条断言跟着改。
@@ -241,7 +269,10 @@ async function main() {
   check(page.status === 200 && html.includes('客服 Saki'), '首页能打开且内容正确');
 
   console.log('\n[2a] WebUI 布局结构');
-  const layout = inspectWebuiMarkup(html);
+  // ⚠️⚠️ 2026-10-22：这里**必须用 `htmlRaw`**（只含服务端渲染的页面）。
+  //    用拼接后的 `html` 会把 `webui-app.js` 里那些 HTML 模板字符串
+  //    （`<div class="card">` 之类）也数进去 ⇒ 标签配对 / .wrap 归属 / 重复 id 全部误判。
+  const layout = inspectWebuiMarkup(htmlRaw);
   check(layout.balanced, '页面 div / nav / section 标签完整配对');
   check(layout.allTabsInWrap, '所有页面都留在 .wrap 两栏容器内');
   check(layout.tabsMatch, '导航 data-tab 与页面 section 一一对应');
@@ -298,7 +329,7 @@ async function main() {
       /class="kpicker-label" id="k-lib-label">知识库/.test(html) &&
       /class="kpicker-label" id="k-file-label">文件/.test(html) &&
       /class="chev" aria-hidden="true"/.test(html) &&
-      /function kDropToggle\(which\)/.test(html) && /function kDropCloseAll\(\)/.test(html) &&
+      /function kDropToggle\(which, prefix = 'k'\)/.test(html) && /function kDropCloseAll\(\)/.test(html) &&
       /e\.key === 'Escape'/.test(html) &&
       /function kFileLabel\(f\)/.test(html) && /esc\(kFileLabel\(f\)\)/.test(html) &&
       /'memes\.md': '梗库/.test(html) &&
@@ -474,7 +505,7 @@ async function main() {
   // ★★ 页面版本号：界面靠它发现"我这个标签页是旧的"（2026-09-15 加）
   const pv0 = await api('/api/pagever');
   check(/^\d+$/.test(String(pv0.ver ?? '')), `★ 有页面版本接口 /api/pagever → ${pv0.ver}`);
-  check(!html.includes('__PAGE_VER__'), '★★ 服务端把版本号**填进了页面**里（占位符不残留）');
+  check(!htmlRaw.includes('__PAGE_VER__'), '★★ 服务端把版本号**填进了页面**里（占位符不残留）');
   // ⚠️ 2026-09-17 用户反馈：「二级剧情状态不会自动随着群里消息更新」→ 给剧情页加了轮询。
   //    那页显示的全是**群里正在发生的事**（攒了几条回复、她接的话、第几段、还有几分钟自动推），
   //    只在切页时拉一次等于看不见。
@@ -895,7 +926,7 @@ async function main() {
   {
     console.log('\n【★】分群：故事线卡片 / 按群设定');
     const js = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
-    const html = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+    const html = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8') + '\n' + readFrontendJs();
 
     // ① 后端接口在
     check(/api\/storyline\/state/.test(js), '★ 有「故事线总览/某个群」的接口');
@@ -916,7 +947,8 @@ async function main() {
     check(/renderGroupParams/.test(html) && /按群设定/.test(html), '★ 有「按群设定」卡片');
     check(!/只在一个群里跑/.test(html), '★★ 旧文案「每条剧情只在一个群里跑」已经改掉');
     check(/每个群各跑一条/.test(html), '★★ 新文案写清了「每个群各跑一条」');
-    check(/每个群各记各的故事线/.test(html) || /每个群有自己的故事线/.test(html), '★ 日常事件卡片也说明了"各记各的故事线"');
+    // ⚠️ 2026-10-22 文案改成说明语气：「各记各的故事线」→「每个群的后续剧情各走各的」。
+    check(/每个群的后续剧情各走各的/.test(html) || /每个群各记各的故事线/.test(html), '★ 日常事件卡片也说明了"每个群的故事线是分开的"');
     // ★★ 2026-09-18：压缩的结果提示**必须写在独立容器里**。
     //     以前写进 `#sl-entries`，而 renderStoryline() 结尾正好重写/清空它
     //     → 用户看不到"压好了/没压成"，界面像"点了没反应"（踩过几次）。
@@ -978,7 +1010,8 @@ async function main() {
       '★ 点「立即发送」时把**刚预览的那条**一起传上去',
     );
     check(/let lifePreviewed/.test(html), '★ 界面记住了预览到的那一条');
-    check(/发的就是上面预览的那一条/.test(html), '★ 文案改成"发的就是预览的那一条"');
+    // ⚠️ 2026-10-22 文案改成说明语气：「发的就是上面预览的那一条」→「发上面预览的那条」。
+    check(/发上面预览的那条/.test(html) || /发的就是上面预览的那一条/.test(html), '★ 文案写明了「立即发送」发的是预览的那条');
     check(
       /b\.preview/.test(js) && /用的就是\*\*刚预览的那一条\*\*/.test(js),
       '★ 服务端：带了预览就用它，**不再重新抽**',
@@ -1136,9 +1169,11 @@ async function main() {
       );
     }
     // ⚠️ 2026-09-16 改成「下拉选群 + 一整张表单」之后，收紧度的 id 也换成 `gp-chat-strict`
+    // ⚠️ 2026-10-22：收紧度搬回「群与触发 → 分群灵敏度」了（`#strictness` + `#strict-group`），
+    //    群聊剧情的选群改成动态生成的 `.gp-group-sel`（三个标签各一个、互相同步）。
     check(
-      /gp-chat-strict/.test(html) && /id="gp-group"/.test(html),
-      '★ 「按群设定」那张表里也能按群设收紧度（下拉选群 + 表单）',
+      /id="strictness"/.test(html) && /gp-group-sel/.test(html),
+      '★ 收紧度在「分群灵敏度」卡里；群聊剧情的选群是动态生成的 `.gp-group-sel`',
     );
     const shareSave = await post('/api/group-params', {
       groupId: G699,
@@ -1180,8 +1215,9 @@ async function main() {
     const manualOffline = await post('/api/bili-share/send-now', { groupId: G699 });
     check(manualOffline.ok === false && /QQ 没在线/.test(String(manualOffline.error)), '★ 1 档群通过权限闸，但离线时不会尝试发送');
     check(
-      /gp-bili-enable/.test(html) && /gp-bili-keywords/.test(html) && /biliShareNow/.test(html),
-      '★ 按群设置页包含 B 站自动分享开关、关键词和立即发送按钮',
+      // ⚠️ 2026-10-22：自动分享设置从「按群参数」搬回「B站 → 分享」了 ⇒ id 从 gp-bili-* 变回 bili-*。
+      /id="bili-enable"/.test(html) && /id="bili-keywords"/.test(html) && /biliShareNow/.test(html),
+      '★ B 站页包含自动分享开关、关键词和立即发送按钮',
     );
   }
 }

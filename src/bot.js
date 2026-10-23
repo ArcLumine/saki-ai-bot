@@ -4476,7 +4476,7 @@ export class Bot {
   ignoranceGateApplies(event, voluntary) {
     const mode = String(voluntary ?? '');
     if (!mode) return false; // 有人明确找她（@ / 点名 / 引用）或私聊 → 不拦
-    if (mode === 'question') return false; // 有人在问服务器问题（转给服主是有用的回答）
+    if (mode === 'question') return false; // 有人在问服务器问题（转给主人是有用的回答）
     if (mode === 'followUp') return false; // 连续接话（对话延续）
     if (mode === 'mention') return false; // 有人在聊小祥（提到 saki）
     // ⚠️ 收紧度 0 豁免 —— **和 `know` 硬闸的写法逐字对偶**（那边是 `> 0` 才拦），
@@ -6916,7 +6916,10 @@ export class Bot {
     // ① 开关指令
     const m = diceMode.matchTrigger(t, config.diceMode ?? {});
     if (m) {
-      if (!this.canTeach(event)) {
+      // ⚠️ 2026-10-23 改：用 `canControl()` 而不是 `canTeach()` ——
+      //    教学总开关（`teach.enable: false`）不该顺带把骰娘模式也掐死
+      //    （实测：主人发「小祥来当骰娘」被判没权限，就是这条）。
+      if (!this.canControl(event)) {
         log.info(
           `[骰娘] 群 ${event.group_id} 有人说「${t.slice(0, 12)}」，没权限，已当普通消息`,
         );
@@ -6995,7 +6998,8 @@ export class Bot {
     if (cfg.groupId && String(cfg.groupId) !== String(event.group_id ?? '')) return false;
     const m = matchQuiet(text, cfg);
     if (!m) return false;
-    if (!this.canTeach(event)) {
+    // ⚠️ 2026-10-23 改：同骰娘模式，用 `canControl()`（教学开关不影响开/关安静）
+    if (!this.canControl(event)) {
       log.info(`[安静] 群 ${event.group_id} 有人说「${String(text).slice(0, 12)}」，没权限，已当普通消息`);
       return false;
     }
@@ -11493,6 +11497,42 @@ if (privateWork.isWorkChat(event)) return false;
 
   // ── 教学 ────────────────────────────────────────────
 
+  /**
+   * 判断发送者能不能**开 / 关状态类指令**（骰娘模式、安静指令…）。
+   *
+   * ⚠️⚠️ 2026-10-23 加（用户报：「骰娘模式怎么不起效」）：
+   *    原来这两个指令复用 `canTeach()` —— 而 `canTeach()` 第一行就是
+   *    `if (!teach.enable) return false`，于是**教学一关，连主人自己都开不了骰娘模式** ✗
+   *    （实测日志：「群 xxx 有人说「小祥来当骰娘」，没权限，已当普通消息」，
+   *      而发那句话的正是 ownerQQ 本人。）
+   *
+   *    ⇒ 拆成两个语义：
+   *      · `canTeach()`  = 能不能**教它东西**（受 teaching 开关、机器人防污染约束）
+   *      · `canControl()` = 能不能**让它进/出某个状态**（只看是不是主人 / 管理员 / 白名单）
+   *    ⚠️ 群聊里 **owner 本人也算**（不只看群角色 —— 他可能不是这个群的群主）。
+   */
+  canControl(event) {
+    const uid = String(event?.user_id ?? event?.sender?.user_id ?? '');
+    if (!uid) return false;
+
+    // ⚠️ 工作号：工作模式下**不开状态类指令**（那是客服时间，不是来掷骰子的）
+    if (privateWork.noLearn()) return false;
+
+    // ① 主人本人 —— 群聊私聊都认（本次修复的关键：以前群聊只认群角色）
+    if (String(config.ownerQQ ?? '') === uid) return true;
+
+    // ② 教学白名单（`teach.teachers`）—— 明确授权过的人也能开
+    const teachers = (config.teach?.teachers ?? []).map(String);
+    if (teachers.includes(uid)) return true;
+
+    // ③ 私聊：不是主人就不认（防止任何人私聊就能切状态）
+    if (event?.message_type === 'private') return false;
+
+    // ④ 群聊：群主 / 管理员
+    const role = event?.sender?.role;
+    return role === 'owner' || role === 'admin';
+  }
+
   /** 判断发送者有没有资格教它 */
   canTeach(event) {
     const { teach } = config;
@@ -12230,7 +12270,9 @@ if (privateWork.isWorkChat(event)) return false;
         //    同样是可以端着、可以怼、必须给方案）。这里只是把「群友」这个词
         //    换成私聊场景的说法 —— 顺手丢语气要求会让陌生私聊变得软绵绵。
         lines.push(
-          '对方不是服主，也不是管理员。你是被请来做客服的，可以端着一点：',
+          // ⚠️ 2026-10-22：这里原来写「对方不是服主」—— 「服主」是**旧叫法**，
+          //    提示词里不该出现（换人设 / 换称呼后它就成了错的），用中性说法。
+          '对方既不认识你也不认识你的主人，也不是管理员。你是被请来做客服的，可以端着一点：',
           '- 保持大小姐那种礼貌里的距离感。不必热情，也不必冷淡。',
           '- 对方没看公告就来问、问得含糊、反复问同一件事，你可以淡淡地扎一句。',
           '- **但扎人是俏皮，不是刻薄。** 目标是把话说清楚，不是把人噎回去。',
@@ -13575,9 +13617,9 @@ if (privateWork.isWorkChat(event)) return false;
             const facts = await bilibili.ownerVideoFacts();
             const line = await bilibili.videoReply({ facts, asked: q });
             await this.sendText(event, line, { reply: true }).catch(() => {});
-            log.info(`[工具] 查B站·服主视频数据：${String(line).replace(/\s+/g, ' ').slice(0, 70)}`);
+            log.info(`[工具] 查B站·主人视频数据：${String(line).replace(/\s+/g, ' ').slice(0, 70)}`);
           } catch (e) {
-            log.warn(`[工具] 查B站·服主视频失败：${e.message}`);
+            log.warn(`[工具] 查B站·主人视频失败：${e.message}`);
             await this.sendText(event, 'B站那边没查着，等下再问一次', { reply: true }).catch(() => {});
           }
           this.touchConversation(event);
@@ -13695,7 +13737,7 @@ if (privateWork.isWorkChat(event)) return false;
         const role = this.speakerRole(event);
         if (role !== 'owner' && role !== 'staff' && role !== 'admin') {
           log.info(`[工具] 「忘掉」被拦：${event?.user_id} 没权限（role=${role}）`);
-          return '⚠️ 这次没撤：撤回记忆只有服主和管理员能用（你可以照实说一句，或者笑着拒绝他）';
+          return '⚠️ 这次没撤：撤回记忆只有主人和管理员能用（你可以照实说一句，或者笑着拒绝他）';
         }
         let r;
         try {
@@ -14813,7 +14855,8 @@ if (privateWork.isWorkChat(event)) return false;
       //    ⚠️ 只给**群**（私聊没有"局"）；`lean`（互刷）时不带 —— 用不上，纯烧 token。
       //    ⚠️ `promptBlock` 只在**有章节**时才返回内容，没跑过团时是空串，不会占位。
       if (!lean && event?.message_type === 'group' && event?.group_id) {
-        const dl = diceLog.promptBlock(String(event.group_id), 900);
+        // ⚠️ 2026-10-23：1600 → **2200**（粗压梗概 1500 + 最近两章 400 + 标题）
+        const dl = diceLog.promptBlock(String(event.group_id), 2200);
         if (dl) parts.push('\n' + dl);
       }
     } else {
@@ -15726,7 +15769,7 @@ if (privateWork.isWorkChat(event)) return false;
           '- `搜` ↦ 答案在**外面**（新闻、教程、别人的事、你手上没有的数据）（词）',
           '- `拍照` ↦ 他想看你现在什么样 / 你想让他看看（拍什么）',
           '- `记住` ↦ 他**亲口**告诉你一条该长期记住的事（主题 + 内容，内容照他原话）',
-          '- `忘掉` ↦ 他让你去掉刚记下的那条（无参数，只有服主/管理员能用）',
+          '- `忘掉` ↦ 他让你去掉刚记下的那条（无参数，只有主人/管理员能用）',
           '- `提醒` ↦ 他让你**到点提醒他**（何时 + 说什么）',
           '- `引用` ↦ 该引用某条消息回（引用谁）',
           '- `动这一单` / `催进度` / `停` / `搜图` / `查B站` ↦ **只在群里、只有他本人**能让你动本机',
@@ -15819,7 +15862,7 @@ if (privateWork.isWorkChat(event)) return false;
           "  ⇒ `[工具:记住 {\"主题\":\"短标题\",\"内容\":\"那条事实\"}]`",
           "  ⚠️ 「内容」**照他的原话写**（可以压短，🚫 不许加细节、不许编）—— 代码会拿它跟他说的话核对，编的会被拒 ✓",
           "  ⚠️ 只在**他明确在告诉你**的时候写；自己猜的、别人转发的、分享卡片里的 ⇒ 别记 ✗",
-          "- 他让你**忘掉 / 撤回**刚教给你的那条 ⇒ `[工具:忘掉]`（这条只有服主和管理员能用）",
+          "- 他让你**忘掉 / 撤回**刚教给你的那条 ⇒ `[工具:忘掉]`（这条只有主人和管理员能用）",
           "- 他让你**到点提醒他** ⇒ `[工具:提醒 {\"何时\":\"明天 08:00\",\"说什么\":\"交作业\"}]`",
           "  ⚠️ 「何时」只认这几种写法：`08:00` / `明天 08:00` / `后天 8点` / `2026-10-20 08:00` / `+30分钟`",
           "  ⚠️ 他说得含糊（「晚点」「有空」）⇒ **别硬写**，先问他一句几点 ✓",
@@ -20485,7 +20528,7 @@ const prompt = parts.join('\n');
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff' && role !== 'admin') {
         log.info(`[记忆] ${event.user_id} 想撤回记忆但没权限（role=${role}）→ 已回提示`);
-        this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
+        this.replyOnceToGroup(gid, '这个只有主人和管理员能用（');
         return true;
       }
 
@@ -20707,7 +20750,7 @@ const prompt = parts.join('\n');
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff') {
         log.info(`[剧情] ${event.user_id} 想开剧情但没权限（role=${role}）→ 已回提示`);
-        this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
+        this.replyOnceToGroup(gid, '这个只有主人和管理员能用（');
         return true;
       }
       // ⚠️⚠️⚠️ 2026-10-09 加（用户问：「**如果有其他机器上的机器人也接收到了剧情开始命令，
@@ -21112,7 +21155,7 @@ const prompt = parts.join('\n');
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff') {
         log.info(`[剧情] ${event.user_id} 想清除剧情但没权限（role=${role}）→ 已回提示`);
-        this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
+        this.replyOnceToGroup(gid, '这个只有主人和管理员能用（');
         return true;
       }
 
@@ -21281,7 +21324,7 @@ const prompt = parts.join('\n');
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff') {
         log.info(`[暂停] ${event.user_id} 想暂停但没权限（role=${role}）→ 已回提示`);
-        this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
+        this.replyOnceToGroup(gid, '这个只有主人和管理员能用（');
         return true;
       }
 

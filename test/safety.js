@@ -48,7 +48,7 @@ console.log('\n【1】★ 目录独立于 knowledge/（用户明确要求）');
   }
   // ⚠️ 这条最关键：safety/ 绝不能被当成知识文件读进提示词
   const { knowledgeText } = await import('../src/knowledge.js');
-  const kt = String(knowledgeText({ groupId: '<跑团群>' }) ?? '');
+  const kt = String(knowledgeText({ groupId: '999000001' }) ?? '');
   check(!kt.includes('忽略以上指令'), '★★ 拦截规则**一个字都没进提示词**');
   check(!/做爱|口交/.test(kt), '★★ 露骨拦截词也没进提示词');
 }
@@ -165,7 +165,7 @@ console.log('\n【4】★★ 私聊放宽：**只给主人**（用户第 2 + 补
   const grp = {
     message_type: 'group',
     user_id: OWNER,
-    group_id: '<跑团群>',
+    group_id: '999000001',
     sender: { card: '主人', nickname: '主人', role: 'owner' },
   };
   const pOwner = String(bot.buildSystemPrompt('', mkPriv(OWNER), null, '抱抱') ?? '');

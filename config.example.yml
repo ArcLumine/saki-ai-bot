@@ -689,7 +689,7 @@ quiet:
   # 0 = 一直安静到有人说解除（重启后仍然记得）
   durationMs: 0
   # 只在这个群生效；留空 = 哪个群都认
-  groupId: '<跑团群>'
+  groupId: '999000001'
 search:
   merged: true
   mergedTimeoutMs: 45000

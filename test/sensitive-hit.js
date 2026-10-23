@@ -92,7 +92,7 @@ console.log('\n【1】★★ 敏感词库：总规则常驻 + 词典撞库（202
   const ev = {
     message_type: 'group',
     user_id: '99999999',
-    group_id: '<跑团群>',
+    group_id: '999000001',
     sender: { card: '路人', nickname: '路人', role: 'member' },
   };
   const plain = String(bot.buildSystemPrompt('', ev, null, '今天服务器怎么连不上') ?? '');

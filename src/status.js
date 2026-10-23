@@ -32,6 +32,24 @@ let lastGood = { at: 0, data: null };
 /** 失败后的短退避（毫秒）。**必须短**，见 queryServer 里的注释。 */
 const FAIL_RETRY_MS = 8000;
 
+/**
+ * ⚠️⚠️ 2026-10-23：**三段超时必须分开算**（用户报「实时查服务器的设定不起作用」）。
+ *
+ * 现场：服务器在美国德州这台机器上、MC 服在境内，`wm.rainplay.cn:51235`
+ * 从这台机器**所有端口都连不通**（443/80/25565/51235 全部超时，而 baidu / github
+ * 都通）—— 于是每次都撞满 6 秒硬超时，回一句「服务器没开」。
+ *
+ * 真因（代码这一侧）：原来只有一个 `HARD_TIMEOUT_MS = 6000` 包住**整个内部查询**，
+ * 而 `selfPing` 自己超时 12 秒、`queryViaApi` 15 秒 —— 都比 6 秒长。
+ * ⇒ 自查询一卡，**第三方兜底永远轮不到执行**，那段兜底等于从来没生效过 ✗
+ *
+ * 所以改成：自查询 3.5 秒 → 兜底 3.5 秒，两层都短于外层 8 秒的保险。
+ * 最坏情况 7 秒出结果，既不会把回复拖死，也真的给兜底留了机会。
+ */
+const SELF_TIMEOUT_MS = 3500;
+const API_TIMEOUT_MS = 3500;
+const HARD_TIMEOUT_MS = 8000;
+
 /** 查询端点。**只在"自己查"失败时兜底用**。 */
 function apiBase() {
   return (config.status.apiBase ?? 'https://api.mcstatus.io/v2/status/java').replace(/\/+$/, '');
@@ -124,7 +142,7 @@ function readVarInt(buf, offset = 0) {
  *
  * @returns {Promise<{online:true, version:string, players:{online:number,max:number,names:string[]}}>}
  */
-function selfPing(addr, port, timeoutMs = 12000) {
+function selfPing(addr, port, timeoutMs = SELF_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const sock = createConnection({ host: addr, port, timeout: timeoutMs });
     let buf = Buffer.alloc(0);
@@ -268,7 +286,9 @@ export async function queryServer(host, ttl = 60000) {
   //
   //    这不是掩盖 bug，而是把「查不到」和「卡死」分开 ——
   //    宁可回一句"我这会儿查不到"，也别让用户干等半分钟。
-  const HARD_TIMEOUT_MS = 6000;
+  //
+  //    ⚠️ 2026-10-23：这个值从 6000 挪到模块顶部（`HARD_TIMEOUT_MS`），
+  //       因为它现在必须**大于 自查询 + 兜底 两段之和**，否则兜底又是白写。
   log.debug(`实查开始：host="${host}" ttl=${ttl}`);
   let timer = null;
   const timeout = new Promise((resolve) => {
@@ -348,7 +368,9 @@ async function queryViaApi(host) {
   const q = target.port && target.srv ? `${target.host}:${target.port}` : host;
   const res = await fetch(`${apiBase()}/${encodeURIComponent(q)}`, {
     headers: { 'User-Agent': 'qq-ai-bot/1.0' },
-    signal: AbortSignal.timeout(15000),
+    // ⚠️ 2026-10-23：15 秒 → `API_TIMEOUT_MS`（3.5 秒）。原来它比外层硬超时还长，
+    //    等于每次都被外层先掐掉；现在它必须**短到能在外层还剩的时间里跑完**。
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const j = await res.json();
@@ -382,10 +404,31 @@ export function describe(data, serverName = '服务器') {
   ].join('\n');
 
   if (!data?.ok) {
-    return `${head}${serverName}状态：暂时查不到（${data?.error ?? '未知错误'}）。请直接告诉群友查询失败，不要编造。`;
+    // ⚠️⚠️ 2026-10-23（用户报「实时查服务器的设定不起作用」）：
+    //    原来这句只写「请直接告诉群友查询失败，不要编造」，
+    //    实测她回的是「**现在服务器没开**，看不到谁在线」—— 把「我没查到」
+    //    说成了「服务器关着」，这是两种完全不同的结论 ✗
+    //    ⇒ 这里必须把两者**分开写死**：查不到 = 我这边没连上，不等于服务器关了。
+    return [
+      `${head}${serverName}状态：**这次没查到**（${data?.error ?? '未知错误'}）。`,
+      '',
+      '## ⚠️⚠️ 「查不到」**不等于**「服务器关了」',
+      '',
+      '- 🚫 不许说「服务器没开」「关服了」「服务器炸了」—— 你只知道**自己没连上**。',
+      '  真实踩过：她回「现在服务器没开，看不到谁在线」，而那会儿服是开着的 ✗',
+      '- ✅ 照实说：「我这会儿查不到」/「连不上服务器，看不到在线情况」。',
+      '- ✅ 可以补一句让他自己确认：「你要是进得去，那就是我这边没连上」。',
+      '- 🚫 也别把「上一个离线的人是谁」这种**需要历史数据**的问题编一个答案。',
+    ].join('\n');
   }
   if (!data.online) {
-    return `${head}${serverName}状态：当前未开机 / 无法连接（离线）。`;
+    // 只有第三方 API 会给出 `online:false`（自己查要么成功、要么直接抛错）。
+    // ⚠️ 它同样推不出「服务器关了」—— 从境外探测一个境内服，连不上是常态。
+    return (
+      `${head}${serverName}状态：对外的查询显示**连不上**（离线）。` +
+      '\n\n⚠️ 这只说明"从外面连不进去"，**不代表服务器一定关着** ——' +
+      '可以说「我这边连不上」，别断言「服务器关了」。'
+    );
   }
   const { online, max, names } = data.players;
   // ⚠️⚠️ 2026-10-01（用户截图 + 纠正）：

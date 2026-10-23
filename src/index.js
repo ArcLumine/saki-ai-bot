@@ -1744,14 +1744,26 @@ if (config.diceLog?.enable === true) {
     // ⚠️ 压缩是**整理已有内容**，不需要深推理 ⇒ 关掉思考链。
     //    跟 storyline 那次同一个理由：思考链会烧掉绝大部分 token，
     //    正文写不完就被 `finish_reason: length` 截断 ⇒ JSON 不完整 ⇒ 整次作废。
-    const { collect, thinkingField } = await import('./llm.js');
-    return collect(
+    // ⚠️⚠️ 2026-10-23 修（用户问「她读了多少」时抓到的）：原来写的是
+    //      `const { collect, thinkingField } = await import('./llm.js');`
+    //    但 **`llm.js` 根本没有这两个导出**（`thinkingField` 在 `config.js`，
+    //    `collect` 是各模块自己包的一层，见 `storyline.js` 里那个同名私有函数）
+    //    ⇒ 压缩一跑就 `TypeError: thinkingField is not a function`，
+    //      和 `diceLog.reload` 是同一批 merge 后遗症 ✗
+    const { streamChat } = await import('./llm.js');
+    const { thinkingField } = await import('./config.js');
+    let out = '';
+    for await (const d of streamChat(
       [
         { role: 'system', content: system },
         { role: 'user', content: user },
       ],
+      undefined,
       { maxTokens: 4000, timeoutMs: 150000, ...thinkingField() },
-    );
+    )) {
+      out += d;
+    }
+    return out;
   };
   diceLog.reload();
   log.info(

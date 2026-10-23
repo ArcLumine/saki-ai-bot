@@ -83,6 +83,10 @@ import QR from 'qrcode';
 import { listEntries } from './learned.js';
 import { faceTags, reload as reloadFaces } from './faces.js';
 import { hasKnowledge, reloadKnowledge, knowledgeText } from './knowledge.js';
+// ⚠️ 2026-10-23 加：观察记录页要展示「跑团记录读了什么」（statsOf / promptBlock / recent）
+import * as diceLog from './dice-log.js';
+// ⚠️ 2026-10-23 加：跑团记录页的「按 log 名称选局」要实时问海豹
+import * as sealdice from './sealdice.js';
 // ⚠️ 2026-09-28：/api/knowledge/verify 判敏感词库时要用（词典按需注入，
 //    判据改成"总规则在不在里面" —— 见那个 handler 里的注释）
 import { sensitiveRules } from './sensitive.js';
@@ -2318,6 +2322,127 @@ const routes = {
       send(res, 200, { ok: true, on, until: Number(st?.until) || 0, by: String(st?.by ?? '') });
     } catch (e) {
       send(res, 200, { ok: false, on: false, error: e.message });
+    }
+  },
+  // ⚠️ 2026-10-23 加：「观察记录」页 —— 跑团记录（海豹 log）读了什么。
+  //    · `stats`  = 每个群拉了多少条、压了多少章、上次拉取/压缩时间
+  //    · `block`  = **她实际读到的那段**（promptBlock 的输出，就是进提示词的内容）
+  //    · `recent` = 最近的原始条目（还没压成章节的）
+  //    ⚠️ 只读，不触发拉取/压缩（那两个动作要花钱，走 `POST /api/dice-log/run`）。
+  // ⚠️ 2026-10-23 加（用户：「根据 log 名称来选 log」）：
+  //    列出某个群在海豹里的**所有局**（局名 / 条数 / 更新时间）。
+  'GET /api/dice-log/games': async (req, res, url) => {
+    try {
+      const gid = String(url?.searchParams?.get('group_id') ?? '').trim();
+      if (!gid) return send(res, 400, { ok: false, error: '缺 group_id' });
+      const { list } = await sealdice.storyLogs({ groupId: gid, pageSize: 100 });
+      send(res, 200, {
+        ok: true,
+        list: list.map((g) => ({
+          name: String(g.name ?? ''),
+          size: Number(g.size) || 0,
+          updatedAt: Number(g.updatedAt) || 0,
+        })),
+      });
+    } catch (e) {
+      send(res, 200, { ok: false, list: [], error: e.message });
+    }
+  },
+  'GET /api/dice-log': async (req, res, url) => {
+    try {
+      const groups = Array.isArray(config.diceLog?.groups)
+        ? config.diceLog.groups.map(String)
+        : [];
+      const q = String(url?.searchParams?.get('group_id') ?? '').trim();
+      const logName = String(url?.searchParams?.get('log_name') ?? '').trim();
+      // ⚠️ 没指定群时，优先挑**有内容的那个群**（有章节 > 有条目 > 第一个）
+      //    —— 否则默认落到一个空群上，用户一进页面看到 0 条会以为坏了
+      const score = (g) => {
+        const st = diceLog.statsOf(g);
+        return (st.chapters > 0 ? 2 : 0) + (st.items > 0 ? 1 : 0);
+      };
+      const best = groups.slice().sort((a, b) => score(b) - score(a))[0];
+      const pick = q || best || '';
+
+      // ⚠️⚠️ 2026-10-23 加：指定了局名就**实时**从海豹拉那一局（**不落盘**、
+      //    不动 dice-log 的当前状态）—— 用来翻历史局，不影响正在压的那一局。
+      //    ⚠️ 场外发言也在这里一起统计，方便看出"剔掉一半"的效果。
+      if (pick && logName) {
+        const items = [];
+        for (let page = 1; page <= 10; page++) {
+          const batch = await sealdice.storyItems({
+            groupId: pick,
+            logName,
+            pageNum: page,
+            pageSize: 500,
+          });
+          if (!batch.length) break;
+          items.push(...batch);
+          if (batch.length < 500) break;
+        }
+        let chars = 0;
+        let dice = 0;
+        let ooc = 0;
+        for (const it of items) {
+          const t = String(it.message ?? '').trim();
+          chars += t.length;
+          if (/^[（(]/.test(t)) ooc++;
+          if (it.isDice || /鉴定结果|检定结果|D100=|1d100=/i.test(t)) dice++;
+        }
+        // ⚠️ 2026-10-23：选的这一局如果**就是已压的那一局**，把梗概/章节一起带上
+        //    （否则用户点开自己刚压过的局，看到的却是「还没压出梗概」）
+        const curGame = diceLog.gameOf(pick);
+        const same = curGame && curGame === logName;
+        return send(res, 200, {
+          ok: true,
+          enabled: diceLog.enabled(),
+          groups,
+          current: pick,
+          logName,
+          live: true,
+          sameGame: !!same,
+          stats: { items: items.length, chapters: same ? diceLog.statsOf(pick).chapters : 0, chars, dice, ooc, cursor: 0, lastNoteAt: 0 },
+          summary: same ? diceLog.summaryOf(pick) : '',
+          block: same ? diceLog.promptBlock(pick, 2200) : '',
+          chapters: same ? diceLog.chaptersOf(pick) : [],
+          recent: items.slice(0, 20).map((x) => ({
+            who: String(x.nickname ?? ''),
+            text: String(x.message ?? '').slice(0, 200),
+            dice: !!x.isDice,
+          })),
+        });
+      }
+
+      send(res, 200, {
+        ok: true,
+        enabled: diceLog.enabled(),
+        groups,
+        current: pick,
+        live: false,
+        stats: pick ? diceLog.statsOf(pick) : null,
+        summary: pick ? diceLog.summaryOf(pick) : '',
+        block: pick ? diceLog.promptBlock(pick, 2200) : '',
+        chapters: pick ? diceLog.chaptersOf(pick) : [],
+        recent: pick ? diceLog.recent(pick, 20) : [],
+      });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+  // ⚠️ 2026-10-23 加：手动修正「她实际读到的章节」——
+  //    模型偶尔把骰子数值说错，删掉/改掉一句比重跑一次压缩便宜。
+  //    ⚠️ 只改 chapters，不动 items（原始流水账留着，下次压缩还能用）。
+  'POST /api/dice-log/chapters': async (req, res) => {
+    try {
+      const body = await jsonBody(req);
+      const gid = String(body.group_id ?? '').trim();
+      if (!gid) return send(res, 400, { ok: false, error: '缺 group_id' });
+      const list = Array.isArray(body.chapters)
+        ? body.chapters
+        : String(body.content ?? '').split(/\n{2,}/);
+      send(res, 200, diceLog.setChapters(gid, list));
+    } catch (e) {
+      send(res, 400, { ok: false, error: e.message });
     }
   },
   'POST /api/seal-say': async (req, res) => {
@@ -4774,7 +4899,20 @@ function serveStatic(req, res, url) {
   if (rel.startsWith('/library/')) {
     file = join(LIB, name);
   } else if (rel.startsWith('/assets/')) {
-    file = join(ROOT, 'src', 'webui-assets', name);
+    // ⚠️ 2026-10-22 改：`/assets/` **保留子目录**（原来用 `basename(rel)` 把路径压平了，
+    //    `pages/model.js` 会被当成 `webui-assets/model.js` ⇒ 404 ✗）。
+    //    现在按页面拆文件（`webui-assets/pages/*.js`），必须支持子目录。
+    //    ⚠️ 路径穿越必须挡：`..` / 绝对路径 / 反斜杠一律 404（这是能读盘的入口）。
+    let sub;
+    try {
+      sub = decodeURIComponent(rel.slice('/assets/'.length));
+    } catch {
+      return send(res, 400, '文件名编码错误', 'text/plain; charset=utf-8');
+    }
+    if (!sub || sub.includes('..') || sub.includes('\\') || sub.startsWith('/')) {
+      return send(res, 404, 'Not found', 'text/plain; charset=utf-8');
+    }
+    file = join(ROOT, 'src', 'webui-assets', sub);
   } else {
     return send(res, 404, 'Not found', 'text/plain; charset=utf-8');
   }
@@ -4793,9 +4931,39 @@ let PAGE_VER = '0';
 function loadPage() {
   try {
     const p = join(ROOT, 'src', 'webui.html');
-    const ver = String(Math.round(statSync(p).mtimeMs));
+    // ⚠️⚠️ 2026-10-22 修（用户：「还是没有啊」）：版本号原来**只取 webui.html 的 mtime** ——
+    //    但页面现在引用的是**外部 JS**（`webui-app.js` + `pages/*.js`），
+    //    这几个「改了但 html 没动」的时候版本号不变 ⇒ 浏览器继续用**缓存里的旧 JS**，
+    //    表现就是"我明明改了、刷新还是老样子"（改下拉那次 real 踩到了：html 03:58:04、
+    //    js 03:58:38，版本号还是前者）。
+    //    ⇒ 取「html + 所有前端脚本」里**最新的那个 mtime**。
+    const frontFiles = [p];
+    const assetsDir = join(ROOT, 'src', 'webui-assets');
+    try {
+      for (const f of readdirSync(assetsDir)) {
+        if (f.endsWith('.js')) frontFiles.push(join(assetsDir, f));
+      }
+      const pagesDir = join(assetsDir, 'pages');
+      for (const f of readdirSync(pagesDir)) {
+        if (f.endsWith('.js')) frontFiles.push(join(pagesDir, f));
+      }
+    } catch {
+      /* 目录不存在就算了，至少还有 html */
+    }
+    let ver = '0';
+    for (const f of frontFiles) {
+      try {
+        ver = String(Math.max(Number(ver), Math.round(statSync(f).mtimeMs)));
+      } catch {
+        /* 单个文件读不到就跳过 */
+      }
+    }
     if (ver !== PAGE_VER) {
-      PAGE = readFileSync(p, 'utf8').replace('__PAGE_VER__', ver);
+      // ⚠️ 2026-10-22：**必须用 replaceAll** —— 页面现在引用**多个**脚本
+      //    （`webui-app.js` + `pages/model.js`），每行都带 `?v=__PAGE_VER__`；
+      //    原来用 `.replace()` 只换第一个 ⇒ 第二个会留成字面量 `__PAGE_VER__`，
+      //    那个文件的 URL 就永远指向 `?v=__PAGE_VER__`（浏览器缓存永远命中旧的）✗
+      PAGE = readFileSync(p, 'utf8').replaceAll('__PAGE_VER__', ver);
       PAGE_VER = ver;
     }
   } catch {

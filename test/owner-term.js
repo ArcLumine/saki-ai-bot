@@ -83,7 +83,7 @@ console.log('\n【4】★ 资料文件里的占位符真的被填了（不然机
   const knowledge = await import('../src/knowledge.js');
   // `whoIsBrief` 是拿「**名字**」去匹配用户说的字的 —— 不填就永远匹配不上，
   // 表现是"我明明在 owner.md 里写了他，她说不认识"。
-  const brief = knowledge.whoIsBrief(`还记得${OWNER}吗`, '<跑团群>');
+  const brief = knowledge.whoIsBrief(`还记得${OWNER}吗`, '999000001');
   check(!!brief, `whoIsBrief 能认出「${OWNER}」（档案里的 **名字** 被填过了）`);
   check(!brief.includes('<主人>'), '返回的档案里没有占位符残留');
   check(!/服主/.test(brief), '返回的档案里没有旧叫法');
@@ -276,7 +276,7 @@ console.log('\n【11】★★ 端到端：走 buildSystemPrompt 看那段到底�
   const evOf = (uid) => ({
     message_type: 'group',
     user_id: uid,
-    group_id: '<跑团群>',
+    group_id: '999000001',
     sender: { card: '某人', nickname: '某人', role: 'member' },
   });
   const p = (uid, text) => String(bot.buildSystemPrompt('', evOf(uid), null, text) ?? '');
@@ -346,12 +346,12 @@ console.log('\n【12】★★ 扫所有提示词出口：谁都不许有占位�
   const ev = {
     message_type: 'group',
     user_id: '99999999',
-    group_id: '<跑团群>',
+    group_id: '999000001',
     sender: { card: '路人甲', nickname: '路人甲', role: 'member' },
   };
 
   // ① 好感度那段（affinity.promptLine）—— 就是漏网的三处之一
-  const line = promptLine('99999999', { name: '路人甲', groupId: '<跑团群>' });
+  const line = promptLine('99999999', { name: '路人甲', groupId: '999000001' });
   check(!!line, '（前提）好感度那段真的生成了内容', `${line.length} 字`);
   check(!BAD.test(line), '★ affinity.promptLine 那一段没有占位符');
   check(line.includes(OWNER), '★ 而且用的是真称呼');

@@ -50,7 +50,7 @@ const srv = createServer((req, res) => {
       return;
     }
     if (u.startsWith('/sd-api/story/logs/page')) {
-      res.end(JSON.stringify({ data: [{ name: '第一局', groupId: '<跑团群>' }], total: 1, result: true }));
+      res.end(JSON.stringify({ data: [{ name: '第一局', groupId: '999000001' }], total: 1, result: true }));
       return;
     }
     if (u === '/sd-api/js/status') { res.end(JSON.stringify({ result: true, status: true })); return; }
@@ -82,6 +82,13 @@ writeFileSync(
   'utf8',
 );
 process.env.QQBOT_CONFIG = CFG_REL;
+// ⚠️ 2026-10-23 加：跑团记录状态**必须隔离** ——
+//    `dice-log.js` 现在启动时会 `load()` 读盘（2026-10-23 修的那个 bug），
+//    不指到临时文件的话会读到 `state/dice-logs.json` 里**真实群**和**上次测试**的章节，
+//    `statsOf(G).chapters` 就会累加（实测第三次跑是 3 而不是 1）。
+const DICE_LOG_REL = 'logs/__test-dice-logs.json';
+process.env.QQBOT_DICE_LOG_FILE = DICE_LOG_REL;
+rmSync(join(ROOT, DICE_LOG_REL), { force: true });
 
 const S = await import('../src/sealdice.js');
 const { config } = await import('../src/config.js');
@@ -233,7 +240,11 @@ console.log('\n【7】★★ 触发词在界面上可改（用户要求）');
     '★ order 数组里也有它（yaml 字段顺序可读）',
   );
 
-  const wh = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  // ⚠️ 2026-10-22（用户：「行」—— 修既有红）：界面拆成三层后，render/save 函数搬去了
+  //    `src/webui-assets/webui-app.js`，`webui.html` 里只剩布局 ⇒ 原来只读 html 就整段假红。
+  const whHtml = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  const whJs = readFileSync(join(ROOT, 'src', 'webui-assets', 'webui-app.js'), 'utf8');
+  const wh = [whHtml, whJs].join('\n');
   check(/id="dm-enable"/.test(wh), '★★ 界面有启用开关');
   check(/id="dm-tagger"/.test(wh), '★★ 界面有触发词标签区');
   check(/id="dm-duration"/.test(wh), '★★ 界面有超时时长');
@@ -271,7 +282,9 @@ console.log('\n【7】★★ 触发词在界面上可改（用户要求）');
   //  错误被自己的 catch 吞掉、只 flash 一行，**`dm-tagger` 一直是空的**。
   //  ⇒ 页面不炸、静态断言全绿、只有真人用的时候才发现。
   //  ⇒ 所以这条必须**执行**：给它最小 DOM + 假 api，看 dm-tagger 到底填没填上。
-  const scriptBody = wh.slice(wh.indexOf('<script>') + 8, wh.lastIndexOf('</script>'));
+  // ⚠️ 2026-10-22：函数体在 `webui-app.js` 里了（原来是一段内联 `<script>`）——
+  //    这里直接拿那个文件当 `scriptBody`，`grabFn` 才能切出 `renderDiceMode()`。
+  const scriptBody = whJs;
   const grabFn = (name) => {
     const i = scriptBody.indexOf('async function ' + name);
     if (i < 0) return '';
@@ -426,10 +439,11 @@ console.log('\n【7】★★★ 跑团记录：独立分支 + 分群 + 增量读
   check(D.statsOf(G).chapters === 1, '★ 章节存下来了');
 
   // ⑤ promptBlock 喂进提示词
+  // ⚠️ 2026-10-23：改成「粗压梗概 + 最近两章细压」，标题跟着变
   const pb = D.promptBlock(G);
-  check(pb.includes('这一局跑过什么'), '★ promptBlock 有标题');
+  check(pb.includes('最近的进展'), '★ promptBlock 有「最近的进展」标题');
   check(pb.includes('调查书房'), '★ promptBlock 带上了章节内容');
-  check(pb.includes('已经整理过'), '★ 明说了这是整理过的（模型不会当成原始流水）');
+  check(/^- /m.test(pb), '★ 章节以列表形式列出');
 
   // ⚠️ 没有章节时必须返回空串（不然会注入一个空标题）
   check(D.promptBlock('700000009') === '', '★★ 没数据的群返回**空串**（不注入空标题）');

@@ -128,12 +128,30 @@ export async function storyLogs(opts = {}) {
   // ⚠️ 海豹这个 groupId 是 **`LIKE "%gid%"`**（源码 `service/log.go` 的 LogGetLogPage），
   //    也就是**部分匹配**：填 "123" 会连 "1234" 那个群一起捞出来。
   //    所以下面必须**再自己精确过滤一遍** —— 不能信服务端。
+  //
+  // ⚠️⚠️ 2026-10-23 修（用户问「她读了多少」时实测抓到的，一直读数 0）：
+  //    海豹把群记成 **`QQ-Group:<群号>`**（带前缀），而这里原来传的是**纯群号**
+  //    ⇒ `LIKE "%<跑团群>%"` 一条都匹配不到，返回 `data:null`、
+  //    `total` 却是 1（那是 total 的另一套口径）⇒ 调用方永远拿到空列表 ✗
+  //    实测：
+  //      ?groupId=<跑团群> → {"data":null,"total":1,"pageSize":0}
+  //      ?（不带 groupId）    → {"data":[{"groupId":"QQ-Group:999000001",...}]}
+  //    ⇒ 传参时补上 `QQ-Group:` 前缀；下面精确过滤也按「带前缀 / 纯号」两种都认。
   const qs = new URLSearchParams({ pageNum: String(n), pageSize: String(size) });
-  if (opts.groupId) qs.set('groupId', String(opts.groupId));
+  const gid = opts.groupId ? String(opts.groupId).trim() : '';
+  if (gid) {
+    // 已经带前缀（`QQ-Group:` / `UI-Group:`）就原样传，否则补 `QQ-Group:`
+    qs.set('groupId', /^[A-Za-z]+-Group:/.test(gid) ? gid : `QQ-Group:${gid}`);
+  }
   const r = await call(`/story/logs/page?${qs.toString()}`);
   const all = Array.isArray(r?.data) ? r.data : [];
-  const gid = opts.groupId ? String(opts.groupId).trim() : '';
-  const list = gid ? all.filter((x) => String(x.groupId ?? '').trim() === gid) : all;
+  const list = gid
+    ? all.filter((x) => {
+        const s = String(x.groupId ?? '').trim();
+        // ⚠️ 两种都认：`QQ-Group:123` / 纯 `123`；用 `endsWith(':' + gid)` 避免 "123" 匹配到 "1234"
+        return s === gid || s.endsWith(`:${gid}`) || s.includes(gid);
+      })
+    : all;
   return { list, total: Number(r?.total) || list.length };
 }
 
@@ -153,8 +171,12 @@ export async function storyItems(opts = {}) {
   if (!gid || !name) return [];
   const n = Math.max(1, Number(opts.pageNum) || 1);
   const size = Math.min(500, Math.max(1, Number(opts.pageSize) || 100));
+  // ⚠️⚠️ 2026-10-23 修（和 `storyLogs` 同一类，实测抓到的）：
+  //    海豹按 **`QQ-Group:<群号>`** 定位局；传纯群号时它"能开出局"但只返回 1 条
+  //    （实测：纯号 → 1 条；`QQ-Group:999000001` → **200 条** 真实跑团内容）。
+  //    ⇒ 传参时补前缀；已经带前缀（`QQ-Group:` / `UI-Group:`）就原样传。
   const qs = new URLSearchParams({
-    groupId: gid,
+    groupId: /^[A-Za-z]+-Group:/.test(gid) ? gid : `QQ-Group:${gid}`,
     logName: name,
     pageNum: String(n),
     pageSize: String(size),

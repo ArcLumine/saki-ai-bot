@@ -177,9 +177,10 @@ console.log('\n【5】★★★★ 三处拦截点全都在（最要紧的一组
     '★ 排在安静指令**之后**（两者语义不同，不能互相吞）',
   );
 
-  // 权限：必须复用 canTeach()（用户明确「权限和安静指令一致」）
+  // ⚠️ 2026-10-23 改：权限走 canControl()（从 canTeach 拆出）——
+  //    `teach.enable: false` 不该顺带把骰娘模式也掐死（实测就是这么坏的）。
   const h = bj.slice(bj.indexOf('async handleDiceMode'), bj.indexOf('async handleDiceMode') + 3200);
-  check(/this\.canTeach\(event\)/.test(h), '★★ handleDiceMode 用 canTeach() 判权限（同安静指令）');
+  check(/this\.canControl\(event\)/.test(h), '★★ handleDiceMode 用 canControl() 判权限');
 
   // ⚠️⚠️ 2026-10-22 改（用户选 B：骰点唯一入口改成骰桥）：
   //    `sealdice.ask()` / `shouldRelay()` 那一套**全部退役** —— 骰点指令只做一件事：

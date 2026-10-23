@@ -52,6 +52,12 @@ const check = (ok, label, extra = '') => {
 };
 
 const { matchQuiet, Bot } = await import('../src/bot.js');
+// ⚠️ 2026-10-23：本机真实 accounts/<号>.yml 会覆盖测试配置（实测 groupId 变成真实群号），
+//    导致作用域断言全红。这里强制指回测试群 —— 测的是逻辑，不是读配置。
+const { config } = await import('../src/config.js');
+config.quiet.groupId = '1001';
+config.quiet.enable = true;
+config.quiet.durationMs = 0;
 const CFG = { keywords: ['小祥安静'], releaseKeywords: ['小祥说话'], durationMs: 0, groupId: '1001' };
 const GROUP = { message_type: 'group', group_id: '1001' };
 const OTHER_GROUP = { message_type: 'group', group_id: '2002' };
@@ -138,7 +144,7 @@ console.log('\n【7】权限：没资格的人下不了令');
     const bot = Object.create(Bot.prototype);
     bot.quiet = {};
     bot.sendText = async (_e, t) => { said.push(t); };
-    bot.canTeach = () => canTeach;
+    bot.canControl = () => canTeach;
     return bot;
   };
 
@@ -171,7 +177,7 @@ console.log('\n【8】带时限的安静（durationMs ≠ 0）');
   const bot = Object.create(Bot.prototype);
   bot.quiet = {};
   bot.sendText = async (_e, t) => { said.push(t); };
-  bot.canTeach = () => true;
+  bot.canControl = () => true;
   config.quiet.durationMs = 10 * 60 * 1000;
   await bot.handleQuiet(GROUP, '小祥安静');
   check((bot.quiet['1001']?.until ?? 0) > Date.now(), '到点时间被记下来了（10 分钟后）');

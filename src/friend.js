@@ -106,6 +106,10 @@ export function noticeText(userId) {
  *    不给群号 = 那份"没指定群"的旧标记（兼容老状态）。
  */
 export function shouldNotice(userId, groupId = '') {
+  // ⚠️ 2026-10-22 拆开关：`noticeEnable` 管「到线通知」，`dmEnable` 管「主动私聊」——
+  //    原来只有 `enable` 一个总开关，用户要求把两件事拆开（通知归好感度页、私聊归私聊页）。
+  //    ⚠️ 老的 `enable` 仍然算数（`=== false` 时两个都关），旧配置不会突然"全开"。
+  if (cfg().noticeEnable === false) return false;
   const id = String(userId ?? '').trim();
   if (!id) return false;
   const k = String(groupId ?? '').trim();
@@ -257,7 +261,7 @@ export function inDayWindow(now = Date.now()) {
  * @returns {{userId:string}|{skip:string}}
  */
 export function pickForToday(now = Date.now(), rng = Math.random) {
-  if (cfg().enable === false) return { skip: '好友功能没开' };
+  if (cfg().dmEnable === false) return { skip: '主动私聊没开' };
   if (!inDayWindow(now)) return { skip: '不在白天时段' };
   const today = dayKey(now);
   if (st.lastPickDate === today) return { skip: '今天已经挑过了' };
