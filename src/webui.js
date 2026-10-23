@@ -2350,9 +2350,27 @@ const routes = {
   },
   'GET /api/dice-log': async (req, res, url) => {
     try {
-      const groups = Array.isArray(config.diceLog?.groups)
+      let groups = Array.isArray(config.diceLog?.groups)
         ? config.diceLog.groups.map(String)
         : [];
+      // ⚠️⚠️ 2026-10-23 加（用户在另一台机器上看到「（config.yml 里没配 diceLog.groups）」，
+      //    那台机器没法用这个页面）：
+      //    没配 `diceLog.groups` 时，从**海豹里已有的局**反推群号 —— 她本来就在那些群跑团，
+      //    没必要让人先去改 yml 才能看到记录。
+      //    ⚠️ 只是**给界面用**，不会写回 config.yml（定时拉取仍然只认配置里那几个群）。
+      if (!groups.length && sealdice.enabled()) {
+        try {
+          const all = await sealdice.storyLogs({ pageSize: 100 });
+          const set = new Set();
+          for (const g of all.list ?? []) {
+            const m = String(g.groupId ?? '').match(/(\d{5,})$/);
+            if (m) set.add(m[1]);
+          }
+          groups = [...set];
+        } catch {
+          /* 海豹没起来就保持空，界面照旧提示去配 yml */
+        }
+      }
       const q = String(url?.searchParams?.get('group_id') ?? '').trim();
       const logName = String(url?.searchParams?.get('log_name') ?? '').trim();
       // ⚠️ 没指定群时，优先挑**有内容的那个群**（有章节 > 有条目 > 第一个）
@@ -2474,6 +2492,13 @@ const routes = {
       //    原来试过"跑团时按 banterChance 降频"，用户不要，所以这里不做概率判断。
       {
         try {
+          // ⚠️⚠️ 2026-10-23 加（用户：「log 阅读和吐槽联动」）：
+          //    把**这一局到目前为止**的梗概/最近章节塞进吐槽的上下文 ——
+          //    原来只喂一串骰点数字，她只能在数字上瞎吐槽（「好惨」「这运气」）；
+          //    现在她知道"刚才在迈阿密的酒吧、还在被那个缠黑布的怪人追"，
+          //    吐槽才能接上剧情（「又来？」「这已经是今天第三次了」）。
+          //    ⚠️ 只在**有内容**时才加（没跑团记录时是空串，行为完全不变）。
+          const storyCtx = gid ? diceLog.promptBlock(gid, 1200) : '';
           const say = await phrase({
             system: [
               `你是${persona.shortName()}，正在群里围观一局跑团。`,
@@ -2484,10 +2509,13 @@ const routes = {
               '- ⚠️ **整句必须用中文圆括号（）包起来**，括号里就是你的吐槽（代码那边也会再包一次，别加两套）。',
               '- **不要重复数字**、不要解释规则、不要问"要不要继续"、别当主持人。',
               '- 可以吐槽运气（大成功 / 大失败）、角色的惨状、玩家的操作。',
+              '- 知道剧情就**接上剧情**说（「还来？」「这运气跟刚才差不多」），别只会说"好惨"。',
               '- 拿不准就短一点（「……这运气」「好惨」也算）。',
               '- 🚫 不要说「我看不到」「作为 AI」这类话。',
             ].join('\n'),
-            user: `骰点结果：${text}`,
+            user:
+              `骰点结果：${text}` +
+              (storyCtx ? `\n\n这一局到目前为止：\n${storyCtx}` : ''),
             maxTokens: 120,
             timeoutMs: 12000,
           });

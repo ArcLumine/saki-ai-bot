@@ -1750,20 +1750,25 @@ if (config.diceLog?.enable === true) {
     //    `collect` 是各模块自己包的一层，见 `storyline.js` 里那个同名私有函数）
     //    ⇒ 压缩一跑就 `TypeError: thinkingField is not a function`，
     //      和 `diceLog.reload` 是同一批 merge 后遗症 ✗
-    const { streamChat } = await import('./llm.js');
+    const { streamChat, withFallback } = await import('./llm.js');
     const { thinkingField } = await import('./config.js');
-    let out = '';
-    for await (const d of streamChat(
-      [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-      undefined,
-      { maxTokens: 4000, timeoutMs: 150000, ...thinkingField() },
-    )) {
-      out += d;
-    }
-    return out;
+    // ⚠️⚠️ 2026-10-23 加（实测压缩撞到中转站 502 直接抛错，那一批就白跑了）：
+    //    包一层 `withFallback` —— 主提供商 5xx/超时后自动换备用模型重试一次。
+    //    ⚠️ `withFallback` 是**重试整个一次调用**（不是续写），所以它包在整段外面。
+    return withFallback(async () => {
+      let out = '';
+      for await (const d of streamChat(
+        [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        undefined,
+        { maxTokens: 16000, timeoutMs: 240000, ...thinkingField() },
+      )) {
+        out += d;
+      }
+      return out;
+    }, 'dice-log compress');
   };
   diceLog.reload();
   log.info(

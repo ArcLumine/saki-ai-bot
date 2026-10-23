@@ -50,6 +50,104 @@ const SELF_TIMEOUT_MS = 3500;
 const API_TIMEOUT_MS = 3500;
 const HARD_TIMEOUT_MS = 8000;
 
+/**
+ * 出口代理（`status.proxy`）。**留空 = 直连**，一切照旧。
+ *
+ * ⚠️ 为什么需要它（2026-10-23）：这台机器在**美国德州**，MC 服在境内，
+ *    从这边 ALL PORTS 都连不上那个地址（443/80/25565/51235 全超时），
+ *    而这台机器自己出网是好的（baidu / github 都通）。
+ *    ⇒ 这是"境外连不进去"，不是代码问题，也不是服务器关了。
+ *    ⇒ 给只要"服务器状态"这一条查询一个能进得去的出口：
+ *      走一个**境内部署的 HTTP 代理**（CONNECT 隧道），只影响这一条链路，
+ *      别的（模型 / QQ / 搜索）全都不动。
+ *
+ * 格式：`http://user:pass@host:port`，也接受 `host:port`（省略 http://）。
+ * ⚠️ 它只会用在 status 查询上 —— 别写成全局代理，那会把模型请求也带偏。
+ */
+function proxyUrl() {
+  const p = String(config.status?.proxy ?? '').trim();
+  return p || '';
+}
+
+/** 解析代理地址（带默认端口 + Basic 认证头） */
+function parseProxy(raw) {
+  const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`);
+  const auth =
+    u.username || u.password
+      ? 'Basic ' +
+        Buffer.from(
+          `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`,
+          'utf8',
+        ).toString('base64')
+      : '';
+  return {
+    host: u.hostname,
+    port: Number(u.port || 80),
+    auth,
+    label: `${u.hostname}:${u.port || 80}`,
+  };
+}
+
+/**
+ * 经 HTTP 代理开一条**到目标端口**的隧道（CONNECT），返回一个已经连通的 socket。
+ *
+ * ⚠️ 只实现 HTTP CONNECT，不做 SOCKS5 —— 用户的场景是"境内一台机器开个 http 代理"，
+ *    CONNECT 够用，而且不引依赖。
+ * ⚠️ 握手里的 `Host` 用**目标地址**，不是代理地址 —— 用错了代理会拒。
+ */
+function connectViaProxy(raw, targetHost, targetPort, timeoutMs = SELF_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const p = parseProxy(raw);
+    const sock = createConnection({ host: p.host, port: p.port, timeout: timeoutMs });
+    let settled = false;
+    let buf = '';
+    const fail = (e) => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {}
+      reject(e);
+    };
+
+    const timer = setTimeout(() => fail(new Error(`代理 ${p.label} 连接超时`)), timeoutMs);
+    timer.unref?.();
+
+    sock.once('connect', () => {
+      sock.write(
+        `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n` +
+          `Host: ${targetHost}:${targetPort}\r\n` +
+          (p.auth ? `Proxy-Authorization: ${p.auth}\r\n` : '') +
+          'Proxy-Connection: keep-alive\r\n\r\n',
+      );
+    });
+
+    sock.on('data', (d) => {
+      if (settled) return;
+      buf += d.toString('latin1');
+      const end = buf.indexOf('\r\n\r\n');
+      if (end < 0) {
+        if (buf.length > 8192) fail(new Error('代理返回的响应头异常（太长）'));
+        return;
+      }
+      const status = /^HTTP\/1\.[01]\s+(\d{3})/.exec(buf);
+      if (!status) return fail(new Error(`代理响应不是 HTTP：${buf.slice(0, 40)}`));
+      if (status[1] !== '200') {
+        return fail(new Error(`代理拒绝隧道（HTTP ${status[1]}）`));
+      }
+      settled = true;
+      clearTimeout(timer);
+      sock.removeAllListeners('data');
+      sock.setTimeout(0);
+      // 隧道已经建好 —— 之后这个 socket 就是"直连目标"的效果
+      resolve(sock);
+    });
+
+    sock.once('error', (e) => fail(new Error(`代理 ${p.label} 连接失败：${e.code ?? e.message}`)));
+    sock.once('timeout', () => fail(new Error(`代理 ${p.label} 连接超时`)));
+  });
+}
+
 /** 查询端点。**只在"自己查"失败时兜底用**。 */
 function apiBase() {
   return (config.status.apiBase ?? 'https://api.mcstatus.io/v2/status/java').replace(/\/+$/, '');
@@ -142,9 +240,13 @@ function readVarInt(buf, offset = 0) {
  *
  * @returns {Promise<{online:true, version:string, players:{online:number,max:number,names:string[]}}>}
  */
-function selfPing(addr, port, timeoutMs = SELF_TIMEOUT_MS) {
+function selfPing(addr, port, timeoutMs = SELF_TIMEOUT_MS, existingSocket = null) {
   return new Promise((resolve, reject) => {
-    const sock = createConnection({ host: addr, port, timeout: timeoutMs });
+    // ⚠️ 2026-10-23：`existingSocket` 是**已经建好的隧道**（走代理时由
+    //    `connectViaProxy()` 交过来）。用了它就不能再自己 createConnection ——
+    //    否则等于绕过代理、又去直连那个连不上的地址。
+    const sock =
+      existingSocket ?? createConnection({ host: addr, port, timeout: timeoutMs });
     let buf = Buffer.alloc(0);
     let settled = false;
     const done = (fn, v) => {
@@ -156,7 +258,7 @@ function selfPing(addr, port, timeoutMs = SELF_TIMEOUT_MS) {
       fn(v);
     };
 
-    sock.on('connect', () => {
+    const handshake = () => {
       try {
         const hostBuf = Buffer.from(addr, 'utf8');
         const portBuf = Buffer.alloc(2);
@@ -176,7 +278,12 @@ function selfPing(addr, port, timeoutMs = SELF_TIMEOUT_MS) {
       } catch (e) {
         done(reject, e);
       }
-    });
+    };
+
+    // ⚠️ 走代理时 socket 已经连通了（CONNECT 隧道建好之后才交过来），
+    //    **不会再发 connect 事件** —— 直接开握手；直连时等 connect。
+    if (existingSocket && sock.readyState === 'open') handshake();
+    else sock.once('connect', handshake);
 
     sock.on('data', (d) => {
       buf = Buffer.concat([buf, d]);
@@ -319,8 +426,16 @@ async function queryServerInner(host, ttl = 60000) {
   // ① 先自己查
   try {
     const target = await resolveTarget(host);
+    const viaProxy = proxyUrl();
+    let tunnel = null;
+    if (viaProxy) {
+      // ⚠️ 走代理时**必须**在 `SELF_TIMEOUT_MS` 里把 CONNECT 建好 ——
+      //    不然外层 8 秒保险会被它吃掉，兜底又没机会了。
+      tunnel = await connectViaProxy(viaProxy, target.host, target.port, SELF_TIMEOUT_MS);
+      log.debug(`实查走代理：${parseProxy(viaProxy).label} → ${target.host}:${target.port}`);
+    }
     log.debug(`实查目标：${target.host}:${target.port}${target.srv ? '（SRV）' : ''}`);
-    const r = await selfPing(target.host, target.port);
+    const r = await selfPing(target.host, target.port, SELF_TIMEOUT_MS, tunnel);
     log.debug(`自己查成功：${r.version} ${r.players?.online}/${r.players?.max} 名单 ${r.players?.names?.length ?? 0} 人`);
     const data = {
       ok: true,

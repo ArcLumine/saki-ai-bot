@@ -1078,6 +1078,12 @@ const DEFAULTS = {
     displayName: '服务器',
     cacheSeconds: 60,
     keywords: [],
+    /**
+     * 查服务器状态时走的出口代理（`http://user:pass@host:port`，留空 = 直连）。
+     * ⚠️ 2026-10-23 加：机器在境外、服在境内时，实查会**全部端口连不通**，
+     *    只能借一个能连进去的出口。**只给这一条链路用**，不是全局代理。
+     */
+    proxy: '',
     apiBase: 'https://api.mcstatus.io/v2/status/java',
   },
   teach: {
@@ -1875,6 +1881,9 @@ function load() {
     .map((k) => k.trim().toLowerCase());
   cfg.status.cacheSeconds = Math.max(5, Number(cfg.status.cacheSeconds) || 60);
   cfg.status.host = String(cfg.status.host ?? '').trim();
+  // ⚠️ 2026-10-23：出口代理留空 = 直连。写了就原样保留（含 user:pass），
+  //    只在 `status.js` 里用 —— 别 trim 掉认证信息里的字符，只去首尾空白。
+  cfg.status.proxy = String(cfg.status.proxy ?? '').trim();
 
   cfg.teach.teachers = (cfg.teach.teachers ?? [])
     .filter((g) => g !== null && g !== undefined && String(g).trim())
@@ -2871,6 +2880,16 @@ export function validate() {
   }
   if (status.enable && status.keywords.length === 0) {
     problems.push('status.keywords 为空，实查永远不会被触发');
+  }
+  // ⚠️ 2026-10-23：代理写错了**不会报错、只会一直查不到**（症状和"服务器关了"一样）——
+  //    所以这里先把明显写错的挡下来，别让它静默失效。
+  if (status.proxy) {
+    try {
+      // eslint-disable-next-line no-new
+      new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(status.proxy) ? status.proxy : `http://${status.proxy}`);
+    } catch {
+      problems.push(`status.proxy 格式不对（要 http://host:port）："${status.proxy}"`);
+    }
   }
   return problems;
 }

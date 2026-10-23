@@ -3000,65 +3000,89 @@ async function peerChatNow(poke) {
 
 async function saveLifeParams() {
   const gid = String(localStorage.getItem('gp-group') || '').trim();
-  if (!gid) return;
+  // ⚠️ 2026-10-23：原来这里 `if (!gid) return;` —— 静默什么都不做，
+  //    用户点「保存」看起来完全没反应。至少说一句"先选群"。
+  if (!gid) {
+    flash($('msg-gp-life'), false, '先在上面「群聊选择」里选一个群');
+    return;
+  }
   const btn = event?.target;
   if (btn) btn.disabled = true;
-  const r = await api('/api/group-params', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      groupId: gid,
-      patch: {
-        life: {
-          enable: _gpBool('gp-life-enable'),
-          holidays: _gpBool('gp-life-holidays'),
-          minPerDay: _gpNum('gp-life-min'),
-          maxPerDay: _gpNum('gp-life-max'),
-          startHour: _gpNum('gp-life-sh'),
-          endHour: _gpNum('gp-life-eh'),
-          cooldownMs: _gpMin('gp-life-cool'),
-          lateToleranceMs: _gpMin('gp-life-late'),
+  // ⚠️⚠️ 2026-10-23 修（用户：「选了群、点了关，然后卡住了」）：
+  //    原来没有 try/finally —— `api()` 一抛异常（网络断、超时、后端 500），
+  //    下面那行 `btn.disabled = false` 就永远执行不到 ⇒ **按钮一直灰着，看着像卡死** ✗
+  try {
+    const r = await api('/api/group-params', {
+      signal: AbortSignal.timeout(15000),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        groupId: gid,
+        patch: {
+          life: {
+            enable: _gpBool('gp-life-enable'),
+            holidays: _gpBool('gp-life-holidays'),
+            minPerDay: _gpNum('gp-life-min'),
+            maxPerDay: _gpNum('gp-life-max'),
+            startHour: _gpNum('gp-life-sh'),
+            endHour: _gpNum('gp-life-eh'),
+            cooldownMs: _gpMin('gp-life-cool'),
+            lateToleranceMs: _gpMin('gp-life-late'),
+          },
         },
-      },
-    }),
-  });
-  if (btn) btn.disabled = false;
-  flash($('msg-gp-life'), r.ok, r.ok ? `已保存到群 ${gid}` : '保存失败：' + (r.error || ''));
-  if (r.ok) await fillGroupParams();
+      }),
+    });
+    flash($('msg-gp-life'), r.ok, r.ok ? `已保存到群 ${gid}` : '保存失败：' + (r.error || ''));
+    if (r.ok) await fillGroupParams();
+  } catch (e) {
+    flash($('msg-gp-life'), false, '保存出错：' + (e?.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function saveQuestParams() {
   const gid = String(localStorage.getItem('gp-group') || '').trim();
-  if (!gid) return;
+  if (!gid) {
+    flash($('msg-gp-quest'), false, '先在上面「群聊选择」里选一个群');
+    return;
+  }
   const btn = event?.target;
   if (btn) btn.disabled = true;
-  const r = await api('/api/group-params', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      groupId: gid,
-      patch: {
-        quest: {
-          commands: _gpBool('gp-quest-commands'),
-          enable: _gpBool('gp-quest-enable'),
-          chance: _gpNum('gp-quest-chance'),
-          maxPerWeek: _gpNum('gp-quest-max'),
-          waitMs: _gpMin('gp-quest-wait'),
-          maxStages: _gpNum('gp-quest-stages'),
-          coldAutoLimit: _gpNum('gp-quest-cold'),
-          affinityGood: _gpNum('gp-quest-good'),
-          affinityBad: _gpNum('gp-quest-bad'),
-          replyMode: (() => {
-            const v = String($('gp-quest-mode')?.value ?? '');
-            return v === '' ? null : v;
-          })(),
+  // ⚠️ 2026-10-23：同 `saveLifeParams` —— 补 try/finally，异常时按钮也恢复
+  try {
+    const r = await api('/api/group-params', {
+      signal: AbortSignal.timeout(15000),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        groupId: gid,
+        patch: {
+          quest: {
+            commands: _gpBool('gp-quest-commands'),
+            enable: _gpBool('gp-quest-enable'),
+            chance: _gpNum('gp-quest-chance'),
+            maxPerWeek: _gpNum('gp-quest-max'),
+            waitMs: _gpMin('gp-quest-wait'),
+            maxStages: _gpNum('gp-quest-stages'),
+            coldAutoLimit: _gpNum('gp-quest-cold'),
+            affinityGood: _gpNum('gp-quest-good'),
+            affinityBad: _gpNum('gp-quest-bad'),
+            replyMode: (() => {
+              const v = String($('gp-quest-mode')?.value ?? '');
+              return v === '' ? null : v;
+            })(),
+          },
         },
-      },
-    }),
-  });
-  if (btn) btn.disabled = false;
-  flash($('msg-gp-quest'), r.ok, r.ok ? `已保存到群 ${gid}` : '保存失败：' + (r.error || ''));
-  if (r.ok) await fillGroupParams();
+      }),
+    });
+    flash($('msg-gp-quest'), r.ok, r.ok ? `已保存到群 ${gid}` : '保存失败：' + (r.error || ''));
+    if (r.ok) await fillGroupParams();
+  } catch (e) {
+    flash($('msg-gp-quest'), false, '保存出错：' + (e?.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function saveBotsParams() {
@@ -3066,22 +3090,29 @@ async function saveBotsParams() {
   if (!gid) return;
   const btn = event?.target;
   if (btn) btn.disabled = true;
-  const split = (id) =>
-    String($(id)?.value ?? '')
-      .split(/[\s,，、]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-  const r = await api('/api/group-params', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      groupId: gid,
-      patch: { peers: split('gp-peers'), otherBots: split('gp-other-bots') },
-    }),
-  });
-  if (btn) btn.disabled = false;
-  flash($('msg-gp-bots'), r.ok, r.ok ? `已保存到群 ${gid}` : '保存失败：' + (r.error || ''));
-  if (r.ok) await fillGroupParams();
+  // ⚠️ 2026-10-23：同 `saveLifeParams` —— 补 try/finally
+  try {
+    const split = (id) =>
+      String($(id)?.value ?? '')
+        .split(/[\s,，、]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const r = await api('/api/group-params', {
+      signal: AbortSignal.timeout(15000),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        groupId: gid,
+        patch: { peers: split('gp-peers'), otherBots: split('gp-other-bots') },
+      }),
+    });
+    flash($('msg-gp-bots'), r.ok, r.ok ? `已保存到群 ${gid}` : '保存失败：' + (r.error || ''));
+    if (r.ok) await fillGroupParams();
+  } catch (e) {
+    flash($('msg-gp-bots'), false, '保存出错：' + (e?.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function clearGroupParams() {
@@ -3089,6 +3120,7 @@ async function clearGroupParams() {
   if (!gid) return;
   if (!confirm(`把群 ${gid} 的设置清掉，回到**内置起点**？\n\n（不是回到别的群 —— 每个群各是各的）`)) return;
   const r = await api('/api/group-params', {
+      signal: AbortSignal.timeout(15000),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -4180,6 +4212,7 @@ async function setGroupAnswerServer(gid, on, box) {
   if (box) box.disabled = true;
   try {
     const r = await api('/api/group-params', {
+      signal: AbortSignal.timeout(15000),
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groupId: gid, patch: { chat: { answerServer: !!on } } }),
@@ -5044,6 +5077,7 @@ async function saveStrictForGroup() {
   if (!gid) return flash(el, false, '先选一个 1 档群');
   const v = Number($('strictness')?.value ?? 50);
   const r = await api('/api/group-params', {
+      signal: AbortSignal.timeout(15000),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupId: gid, patch: { chat: { strictness: v } } }),
@@ -5057,6 +5091,7 @@ async function clearStrictForGroup() {
   const gid = String($('strict-group')?.value || '').trim();
   if (!gid) return;
   const r = await api('/api/group-params', {
+      signal: AbortSignal.timeout(15000),
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ groupId: gid, patch: { chat: { strictness: null } } }),

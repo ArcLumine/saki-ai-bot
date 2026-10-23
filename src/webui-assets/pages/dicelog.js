@@ -49,14 +49,15 @@ async function loadDiceGames(gid) {
   }
 }
 
-async function loadDiceLog() {
+async function loadDiceLog(force = false) {
   const sel = $('dl-group');
   const logSel = $('dl-log');
   const msg = $('dl-msg');
   const gid = sel?.value || '';
 
-  // ⚠️ 2026-10-23：群变了就重新拉一次「这个群有哪些局」
-  if (sel && gid && sel.dataset.gid !== gid) {
+  // ⚠️ 2026-10-23：群变了就重新拉一次「这个群有哪些局」；
+  //    **点刷新（force）也重拉** —— 否则海豹那边新开的局在页面上看不到。
+  if (sel && gid && (force || sel.dataset.gid !== gid)) {
     sel.dataset.gid = gid;
     await loadDiceGames(gid);
   }

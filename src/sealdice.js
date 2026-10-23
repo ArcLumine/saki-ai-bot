@@ -131,10 +131,10 @@ export async function storyLogs(opts = {}) {
   //
   // ⚠️⚠️ 2026-10-23 修（用户问「她读了多少」时实测抓到的，一直读数 0）：
   //    海豹把群记成 **`QQ-Group:<群号>`**（带前缀），而这里原来传的是**纯群号**
-  //    ⇒ `LIKE "%<跑团群>%"` 一条都匹配不到，返回 `data:null`、
+  //    ⇒ `LIKE "%999000001%"` 一条都匹配不到，返回 `data:null`、
   //    `total` 却是 1（那是 total 的另一套口径）⇒ 调用方永远拿到空列表 ✗
   //    实测：
-  //      ?groupId=<跑团群> → {"data":null,"total":1,"pageSize":0}
+  //      ?groupId=999000001 → {"data":null,"total":1,"pageSize":0}
   //      ?（不带 groupId）    → {"data":[{"groupId":"QQ-Group:999000001",...}]}
   //    ⇒ 传参时补上 `QQ-Group:` 前缀；下面精确过滤也按「带前缀 / 纯号」两种都认。
   const qs = new URLSearchParams({ pageNum: String(n), pageSize: String(size) });
