@@ -179,7 +179,7 @@ console.log('\n【5】★★★★ 三处拦截点全都在（最要紧的一组
 
   // ⚠️ 2026-10-23 改：权限走 canControl()（从 canTeach 拆出）——
   //    `teach.enable: false` 不该顺带把骰娘模式也掐死（实测就是这么坏的）。
-  const h = bj.slice(bj.indexOf('async handleDiceMode'), bj.indexOf('async handleDiceMode') + 3200);
+  const h = bj.slice(bj.indexOf('async handleDiceMode'), bj.indexOf('async handleDiceMode') + 8000);
   check(/this\.canControl\(event\)/.test(h), '★★ handleDiceMode 用 canControl() 判权限');
 
   // ⚠️⚠️ 2026-10-22 改（用户选 B：骰点唯一入口改成骰桥）：
@@ -194,7 +194,8 @@ console.log('\n【5】★★★★ 三处拦截点全都在（最要紧的一组
     .join('\n');
   check(!/sealdice\.(ask|shouldRelay|enabled)\(/.test(hCode), '★★ 不再调 sealdice（骰点交给桥）');
   check(
-    /diceMode\.isDiceCommand\([\s\S]{0,200}?return true/.test(h),
+    // ⚠️ 2026-10-24：窗口 200 → 900 —— 中间加了「没进骰娘模式就提示一句」那段
+    /diceMode\.isDiceCommand\([\s\S]{0,900}?return true/.test(h),
     '★★ 骰点指令**照样消费掉**（别让它当普通消息走 decide）',
   );
 }

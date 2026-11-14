@@ -15,6 +15,9 @@ import { sensitiveRules } from './sensitive.js';
 import * as names from './names.js';
 // ⚠️ 2026-10-22：短期共享记忆（QQ 聊天和 B站评论回复读的是同一份）
 import * as shortMemory from './short-memory.js';
+// ⚠️ 2026-11-12：**日账** —— 她自己这两天说过的事（`src/daybook.js`）。
+//    放在「最近两天发生的事」那段旁边，**不另开一整段**（交接文档 §十② 的倾向）。
+import * as daybook from './daybook.js';
 // ⚠️ 2026-10-22：**实时状态机** —— 用户要求「QQ 和 B站两边状态要一致」
 //    两边读的是**同一份** `state/bili-presence.json`（`bili-presence.js`）⇒ 天然一致 ✓
 import * as presence from './bili-presence.js';
@@ -1740,6 +1743,16 @@ export function knowledgeText(opts = {}) {
     if (sm) parts.push(sm);
   } catch (e) {
     log.debug(`短期记忆拼进提示词失败（不影响聊天）：${e.message}`);
+  }
+
+  // ⚠️ 2026-11-12 加（交接文档 `daybook-handoff.md` §六）：
+  //    她自己这两天说过的事 —— **紧跟在短期记忆后面**，不是新的一段知识。
+  //    ⚠️ 空的就不 push（别塞"（暂无）"，那会被当成真的什么都没有到处复述）。
+  try {
+    const db = daybook.block({ maxChars: 600 });
+    if (db) parts.push(db);
+  } catch (e) {
+    log.debug(`日账拼进提示词失败（不影响聊天）：${e.message}`);
   }
   return fillOwnerTerms(parts.join('\n\n---\n\n'));
 }

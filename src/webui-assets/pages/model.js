@@ -366,7 +366,7 @@ function renderProfiles() {
 
 async function saveProfile() {
   const m = $('msg-pf');
-  const name = String(($('pf-name') || {}).value || '').trim();
+  const name = String(($('pf-profile-name') || {}).value || '').trim();
   if (!name) { flash(m, false, '先给这份设定起个名字'); return; }
   const r = await (await fetch('/api/llm-profiles/save', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -375,7 +375,7 @@ async function saveProfile() {
   if (!r.ok) { flash(m, false, '存不下来：' + (r.error || '')); return; }
   PF_LIST = r.profiles || [];
   renderProfiles();
-  if ($('pf-name')) $('pf-name').value = '';
+  if ($('pf-profile-name')) $('pf-profile-name').value = '';
   flash(m, true, `已存「${name}」✓`);
 }
 

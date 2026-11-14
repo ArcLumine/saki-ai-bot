@@ -649,6 +649,10 @@ function saveConfig(patch) {
   //    （那个文件里的注释写得很清楚："存得进去、显示不出来"的坑踩过一次）。
   //    ⚠️ **不要**在这里写 `sealdice.token` —— 那是本机密钥，界面只用来填触发词。
   put('diceMode', patch.diceMode);
+  // ⚠️ 2026-10-24 加（用户：「跑团记录没启用（config.yml 的 diceLog.enable）是不是也可以加个开关」）：
+  //    只放行 `enable`（界面上的开关）。⚠️ 别整段覆盖 —— `groups` / `compress` 这些
+  //    界面上没有，覆盖会把它们冲掉；`put` 是逐键合并，所以传 `{ enable }` 就够。
+  put('diceLog', patch.diceLog);
   // ⚠️ 2026-10-22：`sealdice.relay` 的写入**整段删掉**（退役，用户选 B）。
   //    骰点唯一入口是骰桥，桥按 `GET /api/dice-mode` 决定发不发 ——
   //    界面不再需要"小祥要不要替海豹转述"这个开关。

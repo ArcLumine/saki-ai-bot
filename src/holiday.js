@@ -113,6 +113,8 @@ export function parse(text) {
   let cur = null;
   /** 节日专属事件段的名字 */
   let evName = null;
+  /** ⚠️ 2026-11-13：上一条**事件**（`>` 行要挂到它身上当走向，不能挂到节日条目上） */
+  let lastEvent = null;
 
   for (const raw of String(text ?? '').split(/\r?\n/)) {
     const line = raw.trim();
@@ -127,10 +129,22 @@ export function parse(text) {
     const ev = /^###\s*(.+?)\s*$/.exec(line);
     if (ev) {
       evName = ev[1].trim();
+      lastEvent = null;
       continue;
     }
     if (line.startsWith('>')) {
-      // 紧跟在节日后面 → 是它的"她怎么过这天"；否则当注释丢掉
+      // ⚠️ 2026-11-13：`>` 现在有两种身份 ——
+      //    · 跟在**事件行**后面 → 这一格的**走向**（`> 凶：…`），四种档位
+      //    · 跟在**节日条目**后面 → 是它的"她怎么过这天"的说明
+      const br = /^>\s*(大凶|凶|平|吉|大吉)\s*[:：]\s*(.+)$/.exec(line);
+      if (br && lastEvent) {
+        const text = br[2].trim();
+        if (text) {
+          lastEvent.branches = lastEvent.branches || [];
+          lastEvent.branches.push({ tier: br[1], text });
+        }
+        continue;
+      }
       if (cur) cur.note = [cur.note, line.replace(/^>\s?/, '')].filter(Boolean).join(' ');
       continue;
     }
@@ -152,7 +166,10 @@ export function parse(text) {
             return '';
           });
           body = body.replace(/\s+/g, ' ').trim();
-          if (body) owner.events.push({ w: Math.min(5, Math.max(1, Number(t[1]))), text: body, tags });
+          if (body) {
+            lastEvent = { w: Math.min(5, Math.max(1, Number(t[1]))), text: body, tags };
+            owner.events.push(lastEvent);
+          }
         }
         continue;
       }
@@ -162,6 +179,7 @@ export function parse(text) {
     if (item) {
       const rule = parseDate(item[1]);
       if (!rule) continue;
+      lastEvent = null;
       cur = {
         name: item[2].trim(),
         region,
@@ -231,14 +249,35 @@ function hit(h, now) {
  * @returns {{all:Array, names:string[], off:boolean,
  *            local:Array, foreign:Array, events:Array, noteText:string}}
  */
+/** 节日名去重（见 on() 里 names 那段注释） */
+function tidyNames(names) {
+  const core = (s) => String(s).replace(/[节假期]+$/, '') || String(s);
+  const best = new Map();
+  for (const n of names) {
+    const c = core(n);
+    const prev = best.get(c);
+    if (!prev) { best.set(c, n); continue; }
+    const better = (/节$/.test(n) && !/节$/.test(prev)) || n.length < prev.length;
+    if (better) best.set(c, n);
+  }
+  return [...new Set(best.values())];
+}
+
 export function on(now = Date.now()) {
   const all = list.filter((h) => hit(h, now));
   const local = all.filter((h) => !h.foreign);
   const foreign = all.filter((h) => h.foreign);
-  const events = local.flatMap((h) =>
+  // ⚠️ 2026-11-13：**中国的节日也出事件**（用户要的是「国内过节时她跟群友有互动感」）。
+  //    原来只 `local.flatMap` ⇒ 给中国节日写了专属事件也永远抽不出来。
+  //    ⚠️ `off`（放假）仍然只认 local —— 中国的节不给她放假。
+  const events = [...local, ...foreign].flatMap((h) =>
     h.events.map((e) => ({ ...e, holiday: h.name, tags: [...(e.tags ?? []), h.name] })),
   );
-  const noteText = local
+  // ⚠️ 2026-11-13：**中国的节日也带上**。
+  //    原来这里只取 `local`（日本）⇒ `holidays.md` 里中国段那 15 条 note 一条都没进过提示词，
+  //    她只知道"今天是中秋节"这个**名字**，不知道"这天要团圆、她一个人吃了块月见团子"。
+  //    ⚠️ `off` / `events` 仍然只认 `local` —— 中国的节不给她放假、也不出专属事件。
+  const noteText = [...local, ...foreign]
     .filter((h) => h.note)
     .map((h) => `${h.name}：${h.note}`)
     .join('\n');
@@ -257,7 +296,11 @@ export function on(now = Date.now()) {
     .join('\n');
   return {
     all,
-    names: all.map((h) => h.name),
+    // ⚠️ 2026-11-13：**同一天别把「中秋节」和「中秋假期」都说一遍**。
+    //    `holidays.md` 里每个节都有「节日」和「假期」两行（后者是放假的日期区间），
+    //    撞在同一天时拼出来是「但今天是中秋节、中秋假期」，读着像口吃。
+    //    按核心词去重：中秋节 / 中秋假期 → 中秋，优先留带「节」的那个。
+    names: tidyNames(all.map((h) => h.name)),
     /** 放假（会屏蔽「上课 / 赶电车」那类事件） */
     off: local.some((h) => h.off),
     local,

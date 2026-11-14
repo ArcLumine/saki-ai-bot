@@ -124,6 +124,10 @@ import * as meal from './meal.js';
 // ⚠️ 2026-09-18 用户要求：「做一个她**人位置在哪里，正在做什么事**的状态机」
 //    （日程算默认值，她说过的话可以覆盖它，覆盖最多活 2 小时）
 import * as whereState from './where.js';
+// ⚠️ 2026-11-12 加（交接文档 `daybook-handoff.md`）：**日账** —— 她自己这两天说过的事。
+//    治的是「编了收不住」：感官细节好编、核心名词一追问就露 ⇒ 把她自己说的话存下来，
+//    再聊到的时候必须对得上。只留 3 天 / 只存她自己说的 / 这一版纯正则、不用标记。
+import * as daybook from './daybook.js';
 import * as remind from './remind.js';
 import * as friend from './friend.js';
 // ⚠️ 2026-10-14：**私聊工作模式**（那个接单号用的）—— 同步 import，
@@ -6923,6 +6927,9 @@ export class Bot {
         log.info(
           `[骰娘] 群 ${event.group_id} 有人说「${t.slice(0, 12)}」，没权限，已当普通消息`,
         );
+        // ⚠️ 2026-10-24 加：**别静默** —— 群友发了触发词却什么都没发生，会以为坏了。
+        //    每群 10 分钟最多说一句（冷却在 `diceHint` 里），之后照常当普通消息走。
+        await this.diceHint(event, '……这个得群主或者管理员点头才行。');
         return false;
       }
       const cfg = config.diceMode ?? {};
@@ -6974,11 +6981,42 @@ export class Bot {
     //      ⇒ 一条指令两条不同结果（2026-10-22 实测：48/80 和 26/80）✗
     //    ⇒ 这里只做一件事：**把这条指令消费掉**，别让它掉进 `decide()` 当闲聊回嘴。
     if (!diceMode.isDiceCommand(t, config.diceMode ?? {})) return false;
+    if (!this.isDiceMode(event)) {
+      // ⚠️ 2026-10-24 加（用户：「不进骰娘形态的指令没有回复…总得让人知道是什么情况」）：
+      //    没进骰娘模式时骰点**不会出结果**（桥直接拦下海豹的发言），群友只看到"打了没反应"，
+      //    会以为机器人坏了 ⇒ 每群 10 分钟提示一次（`diceHint` 管冷却），别每打一个骰子说一句。
+      const ew = Array.isArray(config.diceMode?.enterKeys) ? config.diceMode.enterKeys : [];
+      const enter = String(ew[0] ?? '').trim();
+      await this.diceHint(
+        event,
+        enter
+          ? `（现在没在骰娘模式——骰点不会出结果。想开的话发「${enter}」。）`
+          : '（现在没在骰娘模式——骰点不会出结果。）',
+      );
+    }
     log.debug(
       `[骰娘] 骰点指令已消费（交给骰桥）：「${String(t).slice(0, 20)}」` +
         (this.isDiceMode(event) ? '（骰娘模式）' : '（日常模式，不回）'),
     );
     return true;
+  }
+
+  /**
+   * 骰娘模式的「说一句」—— **带冷却**（每群 10 分钟最多一次）。
+   *
+   * ⚠️ 2026-10-24 加（用户：「不进骰娘形态的指令没有回复…总得让人知道是什么情况」）：
+   *    原来两条路都完全静默 —— 没权限的人发触发词 = 没反应；没进模式打骰 = 没反应。
+   *    群友只会觉得"这机器人坏了"。
+   *    ⚠️ 但也不能每次都回：连着打十个骰子就是十句废话 ⇒ 冷却兜住。
+   */
+  async diceHint(event, text) {
+    const gid = String(event?.group_id ?? '');
+    if (!gid || !text) return;
+    this._diceHintAt ??= {};
+    const now = Date.now();
+    if (now - (this._diceHintAt[gid] || 0) < 10 * 60 * 1000) return;
+    this._diceHintAt[gid] = now;
+    await this.sendText(event, text, { reply: true }).catch(() => {});
   }
 
   /**
@@ -10986,6 +11024,15 @@ if (privateWork.isWorkChat(event)) return false;
 
       history.remember(key, text, stripMarkers(full).trim());
       this.stats.replied++;
+      // ⚠️ 2026-11-12 加（交接文档 §五②：**纯正则兜底**，这一版不做 `[记:…]` 标记）——
+      //    把「今天/明天 + 吃了/去了」这类事记进日账，接着 3 天的提示词里会带上它。
+      //    ⚠️ 只在**成功发出**之后记（这里已经是 sentFirst 之后）；只记她自己说的话。
+      //    ⚠️ 记账失败绝不影响聊天 —— 它是锦上添花，不是主链路。
+      try {
+        daybook.record(stripMarkers(full).trim());
+      } catch (e) {
+        log.debug(`[日账] 记账失败（不影响聊天）：${e.message}`);
+      }
       // 记一笔「这条回复算不算在劝人睡觉」——
       // 劝过之后，今晚的提示词里就会变成「已经提过了，不要再提」（一晚一次，代码强制）
       noteSleepNudge(stripMarkers(full).trim());
@@ -19913,6 +19960,25 @@ const prompt = parts.join('\n');
       //    ⇒ 收到**最小**：只砍这几个最明确的"设定"节，其余一律保留 ✓
       //      宁可少省一点，也绝不能把她砍得不像她、或者把教过的东西砍掉 ✗
       const DROP = /(现在住哪|住在哪|住在哪儿|一天(是)?怎么过|入职日)/;
+      // ⚠️⚠️ 2026-11-13 修（**这里原来引用了一个从没声明过的 `ALWAYS`**）：
+      //
+      //    现场：`mustKeep` 那段写的是 `ALWAYS.test(t)`，而全仓 `ALWAYS` **只有这一处出现**
+      //    —— 没有 `const`、没有 import、没有任何声明。于是「模型挑中节」那条分支
+      //    一执行就抛 `ReferenceError: ALWAYS is not defined`，被本函数外层
+      //    `catch (e) { log.debug('按节挑人设失败（原样返回）'); return full; }` 吞掉 ⇒
+      //    **「让模型挑该回忆哪几节」这条从 2026-10-09 起从来没生效过**：
+      //      · 人设每轮都是**整份**灌进提示词（style.md 那 32,461 字一节没省）；
+      //      · 更亏的是 `warmPickCache()` 在 `handle()` 里 `await` 等一次模型调用
+      //        （10s 超时 / maxTokens 120），算出的编号写进缓存，
+      //        紧接着这里一读就崩 ⇒ **每条消息白付一次往返、白花一次钱**。
+      //    ⚠️ 为什么一直没被发现：`test/other-bots.js`【42】调 `leanSections()` 时
+      //      **不传 groupId** ⇒ `_cachedSectionPick()` 直接返回 null ⇒ 只走规则版（DROP），
+      //      正好绕开了这条分支。套件绿，坏的那半一句都没测到。
+      //
+      //    修法：按 2026-10-09 定下的那张白名单补回来
+      //    ——「铁律 / 说话方式 / 语气词 / 长短句 / 标点 / 别自言自语 / 身份」。
+      //    作用：模型挑输了这几节，也得把她留下（挑输了也不能不像她）。
+      const ALWAYS = /铁律|说话的方式|说话方式|语气|长短句|长度|标点|自言自语|身份/;
       const head = parts[0];
       const rest = parts.slice(1);
       const q = String(currentText ?? '');
@@ -20080,7 +20146,10 @@ const prompt = parts.join('\n');
       //    而失败那条是 `debug`（不写盘）⇒ 真实运行里"到底有没有发起、失败在哪"
       //    完全查不到（实测就吃了这个亏：日志里一条 `[挑库]` 都没有）。
       log.debug(`[挑库] 后台问一次（${titles.length} 个标题）`);
-      phrase({ system: sys, user, maxTokens: 120, timeoutMs: 10000 })
+      // ⚠️ 2026-11-13：`maxTokens` 从 120 抬到 400。挑库输出只有几个编号，但主模型
+      //    是带思考链的推理模型，实测思考要 100~160 token ⇒ 120 被吃光、正文 0 字、
+      //    请求返回 200 却**悄悄换成备用模型**（那条分支原来一行日志都不写）。
+      phrase({ system: sys, user, maxTokens: 400, timeoutMs: 10000 })
         .then((out) => {
           const ids = [
             ...new Set(
@@ -20139,7 +20208,7 @@ const prompt = parts.join('\n');
         `【条目清单】\n${titles.map((t, i) => `${i + 1}. ${t}`).join('\n')}\n\n` +
         `【刚收到的消息】${String(text ?? '').slice(0, 300)}\n\n` +
         '该带哪几个编号？';
-      const out = await phrase({ system: sys, user, maxTokens: 120, timeoutMs: 10000 });
+      const out = await phrase({ system: sys, user, maxTokens: 400, timeoutMs: 10000 });
       const ids = [
         ...new Set(
           (String(out ?? '').match(/\d{1,3}/g) ?? [])

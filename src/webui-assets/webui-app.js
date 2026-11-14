@@ -2775,6 +2775,12 @@ async function renderGroupParams() {
     gpGroups = all.filter(isEvent).sort();
     const skipped = all.filter((g) => !isEvent(g)).sort();
     if (!gpGroups.length) {
+      // ⚠️ 2026-10-23 修（用户截图：下拉完全空白，不知道是"没有群"还是"坏了"）：
+      //    原来这里直接 `return`，`.gp-group-sel` 的选项根本没填 ⇒ 下拉是个空壳 ✗
+      //    现在至少塞一条占位选项，让人一眼看出是"没有 1 档群"。
+      document.querySelectorAll('.gp-group-sel').forEach((sel) => {
+        sel.innerHTML = '<option value="">（没有 1 档群）</option>';
+      });
       box.innerHTML =
         '<p class="hint">现在<b>没有 1 档群</b> —— 只有 1 档群才进事件系统（日常事件 + 剧情）。' +
         (skipped.length ? `<br>不在事件系统里的群：${skipped.map(esc).join('、')}` : '') +
@@ -2997,6 +3003,40 @@ async function peerChatNow(poke) {
 
 // ⚠️ 2026-10-22 删掉 `saveGroupParams()`：拆成 saveLifeParams / saveQuestParams / saveBotsParams 之后，
 //    它已经没有调用点了（三个标签各自提交自己那段）。留着的话有人会误以为它还在用。
+
+/**
+ * 「按群设定」表单的三个读值小工具。
+ *
+ * ⚠️⚠️ 2026-10-23 补（用户报「保存出错：_gpBool is not defined」）：
+ *    2026-10-22 那次「参数跟着功能走」的重构里**只写了引用、没写定义** ——
+ *    于是 `saveLifeParams()` / `saveQuestParams()` 一点保存就抛 `ReferenceError`，
+ *    界面上表现成「点了没反应 / 卡住」✗（这才是那个"卡住"的真因，不是网络问题）。
+ *
+ * ⚠️ 开关用的是 `onoff()` 生成的 `<select>`：`value="1"` = 开，`value="0"` = 关。
+ */
+function _gpBool(id) {
+  const el = $(id);
+  if (!el) return null;
+  const v = String(el.value ?? '').trim();
+  if (!v) return null;
+  return v === '1' || v === 'on' || v === 'true';
+}
+
+/** 数字输入：空 → null（让后端回落到默认值） */
+function _gpNum(id) {
+  const el = $(id);
+  if (!el) return null;
+  const v = String(el.value ?? '').trim();
+  if (!v) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 「分钟」输入 → 毫秒（空 → null） */
+function _gpMin(id) {
+  const n = _gpNum(id);
+  return n == null ? null : Math.max(0, Math.round(n * 60000));
+}
 
 async function saveLifeParams() {
   const gid = String(localStorage.getItem('gp-group') || '').trim();
@@ -3685,113 +3725,207 @@ async function savePerUserCall() {
 // ── QQ 登录 ──
 
 async function qqRefresh() {
-  const el = $('qq-status');
-  if (!el) return;
-  el.innerHTML = kv('状态', '正在查…');
+  const sEl = $('qq-status');
+  if (!sEl) return;
+  const vEl = $('qq-verdict');
+  const pEl = $('qq-provider');
+  sEl.innerHTML = kv('状态', '正在查…');
+  if (vEl) vEl.innerHTML = '';
+  if (pEl) pEl.innerHTML = '';
   try {
     const r = await api('/api/qq/status');
-    if (!r.ok) { el.innerHTML = kv('出错', esc(r.error || '查询失败')); return; }
+    if (!r.ok) {
+      sEl.innerHTML = kv('出错', esc(r.error || '查询失败'));
+      return;
+    }
     const n = r.napcat || {};
     const o = r.onebot || {};
-    // ⚠️ 协议端（2026-09-17 加）：收发跟它无关，但"出码/重启"这些能力由它决定。
-    //    不支持的能力**把按钮禁掉并说明去哪儿做** —— 比点了弹错好。
+    // ⚠️ 协议端：收发跟它无关，但「出码 / 重启 / 启停」这些能力由它决定。
     const pv = r.provider || {};
     const caps = pv.caps || {};
-
-    // 两边都看：NapCat 说「已登录」不代表 QQ 真在线
     const online = o.online === true;
-    const badge = online
-      ? '<b style="color:#16a34a">✅ 在线</b>'
-      : '<b style="color:#dc2626">❌ 离线（收不到消息）</b>';
-
-    let html =
-      kv('协议端', esc(pv.label || '—') +
-        (pv.manageUrl ? ' · <a href="' + esc(pv.manageUrl) + '" target="_blank">它自己的管理界面</a>' : '') +
-        // ⚠️⚠️ 2026-09-19 加（用户要求：「在 webui 加个切换控制」）：
-        //    界面上直接换协议端 = 改 `config.yml` 的 `provider.name`。
-        //    ⚠️ **收发本身跟协议端无关**（都走 onebot.url + token），换的是
-        //      "出码 / 重启 / 启停 / 假在线自愈"这些**管理能力**；
-        //    ⚠️ 而 provider 是**启动时读**的 → **改完必须重启机器人才生效**，
-        //      所以这里把这句话写在旁边，别让人以为一选就换过去了。
-        //    ⚠️ 选项写死这几个是故意的（= `provider.js` 里 REGISTRY 的键）。
-        //    ⚠️⚠️ 2026-09-20：**这三处必须同时有这个协议端，否则会被"归一化成 onebot"**：
-        //       ① `provider.js` 的 REGISTRY  ② `config.js` 的 KNOWN_PROVIDERS
-        //       ③ 就是这行选项。
-        //       今天就踩了：换到 SnowLuma 之后只改了 ①，结果启动日志打
-        //       「已连接到协议端（onebot）」、界面显示「通用 OneBot 11 实现」——
-        //       因为 config.js 的白名单里没有它，`name` 被改成了 onebot
-        //       （原值只留在 `provider.nameRaw` 里，害我查了半天）。
-        //      将来加协议端，这里要跟着加（或者让 `/api/status` 把 NAMES 带过来）。
-        ' <select id="pv-name" style="margin-left:6px;vertical-align:middle">' +
-        ['napcat', 'llonebot', 'snowluma', 'onebot']
-          .map((x) => '<option value="' + x + '"' + (x === pv.name ? ' selected' : '') + '>' + x + '</option>')
-          .join('') +
-        '</select>' +
-        ' <button onclick="qqSwitchProvider()">切换</button>' +
-        ' <span class="hint">换完**重启机器人**才生效；收发不受影响，出码/重启那些按钮会跟着变</span>') +
-      kv('QQ 是否在线', badge) +
-      kv('账号', esc(o.qq || '—') + (o.nickname ? ' (' + esc(o.nickname) + ')' : '') +
-        ' <span class="hint">（这条来自 OneBot 侧，换任何协议端都准）</span>');
-
-    // 只对支持的协议端显示"进程在不在"（别的协议端我们探测不到）
     const running = r.running === true;
-    if (caps.status || caps.launch) {
+    const pvLabel = pv.label || '—';
+
+    // ⚠️ 2026-11-03 加：**能探测**和**能收发**是两件事。
+    //    远端协议端（`onebot.url` 指向另一台机器）时，本机 `caps` 全 false、
+    //    `/api/qq/status` 的 `running` 恒为 false —— 那时候说"协议端没在跑"是**瞎猜**✗
+    //    所以先判断能不能探，探不了就如实说"这边看不到"。
+    const canProbe = caps.status === true || caps.launch === true;
+    // ── ① 结论：能用吗 + 下一步 ──
+    if (vEl) {
+      let color;
+      let title;
+      let next;
+      if (online) {
+        color = '#16a34a';
+        title = '✅ 在线 —— 能收消息';
+        next = '';
+      } else {
+        color = '#dc2626';
+        title = '❌ 离线 —— 收不到消息';
+        if (!canProbe) {
+          // 探不到协议端：只能说"QQ 侧没在线"，不能断言协议端死活
+          next =
+            `这边探不到协议端（${esc(pvLabel)}）的状态 —— 它挂在别的地方。` +
+            '去它自己的界面看账号在不在线' +
+            (pv.manageUrl
+              ? `：<a href="${esc(pv.manageUrl)}" target="_blank">${esc(pv.manageUrl)}</a>`
+              : '（管理界面地址还没配）') +
+            '。还连不上就检查 `onebot.url` 和 `accessToken` 对不对。';
+        } else if (running) {
+          // 协议端在跑还离线 ⇒ 是 QQ 那边的登录掉了
+          next = caps.qrcode || caps.refreshQr
+            ? `协议端（${esc(pvLabel)}）在跑，说明是 QQ 那边的登录掉了。点下面「显示二维码」重新登一次。`
+            : `协议端（${esc(pvLabel)}）在跑，说明是 QQ 那边的登录掉了。` +
+              '这个协议端没有出码接口 —— 去它自己的界面重新登录' +
+              (pv.manageUrl
+                ? `：<a href="${esc(pv.manageUrl)}" target="_blank">${esc(pv.manageUrl)}</a>`
+                : '（管理界面地址还没配）') +
+              '。';
+        } else {
+          next =
+            caps.restart || caps.launch
+              ? `协议端（${esc(pvLabel)}）没在跑。下面那张卡的「启动协议端」会把它起起来。`
+              : `协议端（${esc(pvLabel)}）没在跑，而且这个协议端配不了自动启动 —— 去它自己的界面把它起起来。`;
+        }
+      }
+      vEl.innerHTML =
+        `<div style="font-size:17px;font-weight:700;color:${color};margin-bottom:6px">${title}</div>` +
+        (next ? `<div class="hint" style="margin:0">${next}</div>` : '');
+    }
+
+    // ── ② 状态（只读）──
+    let html =
+      kv(
+        '账号',
+        esc(o.qq || '—') +
+          (o.nickname ? ' (' + esc(o.nickname) + ')' : '') +
+          ' <span class="hint">（这条来自 OneBot 侧，换任何协议端都准）</span>',
+      ) +
+      kv(
+        'QQ 是否在线',
+        online ? '<b style="color:#16a34a">✅ 在线</b>' : '<b style="color:#dc2626">❌ 离线</b>',
+      );
+    // 只对**能探测**的协议端显示"进程在不在"（远端协议端本机根本看不到它）
+    if (canProbe) {
       html += kv(
         '协议端进程',
         running ? '<b style="color:#16a34a">在跑</b>' : '<b style="color:#dc2626">没在跑</b>',
       );
+    } else {
+      html += kv('协议端进程', '<span class="hint">探不到 —— 它不在本机</span>');
+    }
+    // ⚠️ `r.napcat` 里全是 **NapCat 专属**字段（它 6099 那套 HTTP 接口）——
+    //    别的协议端根本没有，混进通用状态里会显示成「连不上」（2026-09-20 踩过）。
+    //    ⇒ 只有当前生效的是 napcat 才显示这一段。
+    // ⚠️ 大小写不敏感：`provider.name()` 直接取配置里的原文，
+    //    写 `NapCat` 这种大小写时 `def()` 会退回 onebot，但这里也别因为大小写就漏掉整段。
+    if (String(pv.name || '').toLowerCase() === 'napcat') {
+      if (n.reachable) {
+        html += kv('NapCat 侧登录状态', n.isLogin ? '已登录' : '未登录');
+        if (n.isOffline) html += kv('NapCat 侧', '<b style="color:#dc2626">标记为离线</b>');
+        if (n.loginError) html += kv('登录错误', esc(n.loginError));
+        if (n.quickLogin && n.quickLogin.length) {
+          html += kv('可快速登录的号', n.quickLogin.map(esc).join('、'));
+        }
+      } else if (n.error) {
+        // ⚠️ 这是「管理接口没配」，不是「机器人坏了」—— 灰字说明就够，别用红字
+        html += kv('NapCat 管理接口', '<span class="hint">' + esc(n.error) + '</span>');
+      }
+    }
+    sEl.innerHTML = html;
+
+    // ── ③ 协议端（配置 + 能力清单）──
+    if (pEl) {
+      // ⚠️ 能力 → 人话。顺序按"用户最可能找的"排。
+      const CAPS_TEXT = [
+        ['status', '查登录状态'],
+        ['qrcode', '显示二维码'],
+        ['refreshQr', '重新出码'],
+        ['quickLogin', '免扫码快速登录'],
+        ['autoRecover', '一键恢复登录'],
+        ['restart', '由这里重启'],
+        ['launch', '由这里启动'],
+      ];
+      const can = [];
+      const cant = [];
+      for (const [k, txt] of CAPS_TEXT) (caps[k] === true ? can : cant).push(txt);
+      pEl.innerHTML =
+        kv(
+          '当前生效',
+          `<b>${esc(pvLabel)}</b>` +
+            (pv.name ? ` <span class="hint">provider.name = ${esc(pv.name)}</span>` : '') +
+            (pv.manageUrl
+              ? ` · <a href="${esc(pv.manageUrl)}" target="_blank">它自己的管理界面</a>`
+              : ''),
+        ) +
+        kv('能做', can.length ? can.join('、') : '<span class="hint">只负责收发消息</span>') +
+        (cant.length
+          ? kv('做不了（要去它自己的界面）', '<span class="hint">' + cant.join('、') + '</span>')
+          : '') +
+        (pv.how ? `<p class="hint" style="margin:8px 0 0">${esc(pv.how)}</p>` : '') +
+        '<div class="kv" style="margin-top:10px"><b>切换</b><span>' +
+        '<select id="pv-name">' +
+        // ⚠️ 选项写死这几个是故意的（= `provider.js` 里 REGISTRY 的键）。
+        //    ⚠️⚠️ 加协议端时**三处**必须同步：① `provider.js` 的 REGISTRY
+        //       ② `config.js` 的 KNOWN_PROVIDERS ③ 就是这行。
+        //       今天踩过：只改 ① ⇒ `name` 被归一化成 onebot，界面显示「通用 OneBot 11 实现」。
+        ['napcat', 'llonebot', 'snowluma', 'onebot']
+          .map(
+            (x) =>
+              '<option value="' + x + '"' + (x === pv.name ? ' selected' : '') + '>' + x + '</option>',
+          )
+          .join('') +
+        '</select> <button onclick="qqSwitchProvider()">切换</button>' +
+        ' <span class="hint">改的是配置；<b>重启机器人</b>之后才生效（收发不受影响）</span>' +
+        '</span></div>';
     }
 
-    // ⚠️⚠️ 2026-09-20 加（用户：「webui 加一个重启机器人的」+「要能成功切换端口」）：
-    //    **重启机器人**和"重启协议端"是两件事 —— 前者只是按当前 config 重连一次
-    //    协议端（SnowLuma / LLBot 都支持，不涉及 QQ 登录），而后者 SnowLuma 压根没有。
-    //    改完配置（尤其切协议端）**必须重启机器人才生效**，所以这个按钮放在状态页最显眼处。
-    html += kv(
-      '机器人进程',
-      '<button class="ghost" id="btn-bot-restart" onclick="qqRestartBot()">重启机器人</button>' +
-        ' <span class="hint">= 按当前配置重新连一次协议端（改完配置 / 切完协议端点它生效）；' +
-        '**不是**重启协议端，也不涉及 QQ 登录</span>',
-    );
+    // ── 按钮跟着"状态 + 协议端能力"变 ──
+    // ⚠️ 不支持的能力**直接不显示**：摆着一个点了报错的按钮，比没有更差。
+    const showBtn = (id, on) => {
+      const b = $(id);
+      if (b) b.style.display = on ? '' : 'none';
+    };
+    showBtn('btn-qq-recover', caps.autoRecover === true);
+    showBtn('btn-qq-showqr', caps.qrcode === true);
+    showBtn('btn-qq-newqr', caps.refreshQr === true);
 
-    // 按钮跟着"状态 + 协议端能力"变
     const btn = $('btn-qq-restart');
     if (btn) {
-      const canRestart = caps.restart === true || caps.launch === true;
-      btn.disabled = !canRestart;
-      btn.textContent = !canRestart
-        ? '当前协议端不支持（看它自己的界面）'
-        : running && caps.restart
-          ? '重启协议端（重新出码）'
-          : '启动协议端';
-      btn.style.background = !canRestart ? '#6b7280' : running && caps.restart ? '#dc2626' : '#16a34a';
+      // ⚠️ 三种情况分开（别混成"不支持 / 能重启 / 能启动"三态）：
+      //    ① 支持从这儿重启、而且正在跑  → 「重启协议端（重新出码）」
+      //    ② 能启动、但没在跑            → 「启动协议端」
+      //    ③ 已经在跑、可这个协议端不支持重启 → **这颗按钮根本不该出现**
+      //       （SnowLuma 就是这种：`launch: true` + `restart: false`。
+      //         以前会显示成「启动协议端」—— 它明明在跑，点下去没意义 ✗）
+      const canRestart = caps.restart === true;
+      const canLaunch = caps.launch === true;
+      const mode = canRestart && running ? 'restart' : canLaunch && !running ? 'launch' : '';
+      btn.style.display = mode ? '' : 'none';
+      btn.disabled = !mode;
+      if (mode === 'restart') {
+        btn.textContent = '重启协议端（重新出码）';
+        btn.style.background = '#dc2626';
+      } else if (mode === 'launch') {
+        btn.textContent = '启动协议端';
+        btn.style.background = '#16a34a';
+      }
     }
     const h = $('qq-restart-hint');
     if (h) {
-      if (pv.how) h.textContent = pv.how + (pv.license ? '　｜　' + pv.license : '');
+      // 默认把那句 how 摆出来；"能启动但已在跑、又不能重启"时补一句指路
+      const alreadyRunning = running && caps.restart !== true;
+      h.textContent =
+        (pv.how || '') +
+        (pv.license ? '　｜　' + pv.license : '') +
+        (alreadyRunning
+          ? '　｜　它已经在跑了，这个协议端不支持从这儿重启 —— 要重启请去它自己的界面。'
+          : '');
     }
-
-    // ⚠️⚠️ 2026-09-20 修（用户截图：LLBot 下这里显示「NapCat 管理接口 连不上 — fetch failed」）：
-    //    我为 LLBot 也打开了 `caps.status`（为了能看登录状态），可**这一段的字段全是
-    //    NapCat 专属的**（`r.napcat` = 它 6099 那套 HTTP 接口）→ LLBot 也走进来、显示"连不上" ✗
-    //    ⇒ 按协议端分开：**只有 napcat 才显示这几张卡**。
-    //      LLBot 的登录状态在**二维码那张卡**上看（它会直接把正在出的码显示出来，
-    //      "在出码"就等于"没登录"，见 `src/llbot.js`）。
-    const isNapcat = String(pv.name || '').toLowerCase() === 'napcat';
-    if (isNapcat && !caps.status) {
-      html += kv('协议端管理接口', '<span class="hint">' + esc(n.error || '当前协议端没有这套接口') + '</span>');
-    } else if (isNapcat && !n.reachable) {
-      html += kv('NapCat 管理接口', '<b style="color:#dc2626">连不上</b> — ' + esc(n.error || ''));
-    } else if (isNapcat) {
-      html += kv('NapCat 侧登录状态', n.isLogin ? '已登录' : '未登录');
-      if (n.isOffline) html += kv('NapCat 侧', '<b style="color:#dc2626">标记为离线</b>');
-      if (n.loginError) html += kv('登录错误', esc(n.loginError));
-      if (n.quickLogin && n.quickLogin.length) {
-        html += kv('可快速登录的号', n.quickLogin.map(esc).join('、'));
-      }
-    }
-    el.innerHTML = html;
   } catch (e) {
-    el.innerHTML = kv('出错', esc(e.message));
+    sEl.innerHTML = kv('出错', esc(e.message));
   }
 }
 
@@ -4060,6 +4194,14 @@ async function renderDiceMode() {
     $('dm-enable').checked = d.enable !== false;
     // ⚠️ 分钟 ⇄ 毫秒：config.yml 里存的是毫秒，界面上填分钟更好读
     $('dm-duration').value = Math.round((Number(d.durationMs) || 0) / 60000);
+    // ⚠️ 2026-10-24 加：主动接话开关 + 两档概率（原来只能在 config.yml 里改）
+    if ($('dm-banter')) $('dm-banter').value = d.banter === false ? '0' : '1';
+    if ($('dm-banter-related')) {
+      $('dm-banter-related').value = Math.round((Number(d.banterChanceRelated ?? 0.45)) * 100);
+    }
+    if ($('dm-banter-plain')) {
+      $('dm-banter-plain').value = Math.round((Number(d.banterChance ?? 0.05)) * 100);
+    }
 
     const box = $('dm-tagger');
     if (!box) return;
@@ -4107,6 +4249,14 @@ async function saveDiceMode() {
           skipDiceKeys: pjList($('dm-skip').value),
           // ⚠️ 界面填「分钟」，config.yml 存「毫秒」—— 别搞反了
           durationMs: Math.max(0, Number($('dm-duration').value) || 0) * 60000,
+          // ⚠️ 2026-10-24 加：主动接话开关 + 两档概率（界面填 %，config.yml 存 0~1）
+          banter: $('dm-banter') ? $('dm-banter').value !== '0' : true,
+          banterChanceRelated: $('dm-banter-related')
+            ? Math.max(0, Math.min(100, Number($('dm-banter-related').value) || 0)) / 100
+            : 0.45,
+          banterChance: $('dm-banter-plain')
+            ? Math.max(0, Math.min(100, Number($('dm-banter-plain').value) || 0)) / 100
+            : 0.05,
         },
       }),
     });

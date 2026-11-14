@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 一级日常事件（`src/life.js`）回归。
  *
  * ## 这个套件盯的四件事（都是用户明确要求的）
@@ -153,12 +153,20 @@ console.log('\n【1】事件库解析：皮实、能吃手改的 md');
   check(!!noon, '有「中午」时段');
   check(noon.startMin === 12 * 60 && noon.endMin === 13 * 60 + 30, '中午 = 12:00-13:30');
   check(
-    noon.templates.some((t) => t.tags.includes('外卖')),
-    '★ 标签能解析出来（`#外卖`）',
+    // ⚠️ 2026-11-13：标签收成固定表后 `#外卖` 并进 `#吃饭` 了，这里跟着改
+    noon.templates.some((t) => t.tags.includes('吃饭')),
+    '★ 标签能解析出来（`#吃饭`）',
+  );
+  // ⚠️ 2026-11-12 改：权重下限从 1 放到 **0.1** 了（大凶 / 大吉要压到"一年四五次"，
+  //    池子总权重三百多，整数最低的 1 已经是一年 4.5 次一条 —— 见 `src/life.js` 的 parse()）。
+  //    所以这条断言跟着改：**只许 0.1~5**，不许 0（0 = 永远抽不到，等于删了但看不出来）。
+  check(
+    noon.templates.every((t) => t.w >= 0.1 && t.w <= 5),
+    '权重都在 0.1-5',
   );
   check(
-    noon.templates.every((t) => t.w >= 1 && t.w <= 5),
-    '权重都在 1-5',
+    life.parse('### 中午 12:00-13:00\n- 0.2 | 很小的事 #大凶\n- 0 | 权重 0 不行\n')[0].templates.every((t) => t.w >= 0.1),
+    '写 0 会被抬到 0.1（不会变成"永远抽不到"）',
   );
   // 坏行不许炸
   const junk = life.parse('### 中午 12:00-13:00\n- 不是合法行\n- xx | \n-\n### 坏的 99\n');
@@ -172,8 +180,15 @@ console.log('\n【2】时段：午饭的事只在中午出（不许凌晨三点�
   const s = life.slotAt(at(12, 30));
   check(s?.name === '中午', '12:30 → 中午', s?.name);
   check(life.slotAt(at(3, 0)) === null, '★ 03:00 → 没有时段（也就抽不到午饭）');
-  check(life.slotAt(at(8, 0))?.name === '早上', '08:00 → 早上');
-  check(life.slotAt(at(23, 30))?.name === '深夜', '23:30 → 深夜');
+  check(life.slotAt(at(8, 0))?.name === '路上', '08:00 → 路上');
+  check(life.slotAt(at(7, 20))?.name === '在家', '07:20 → 在家');
+  // ⚠️ 2026-11-12：傍晚 16:30-20:00 → 收尾 / 晚饭 / 到家 / 睡前
+  check(life.slotAt(at(23, 30))?.name === '睡前', '23:30 → 睡前');
+  check(life.slotAt(at(19, 20))?.name === '傍晚·在外', '19:20 → 傍晚·在外');
+  check(life.slotAt(at(20, 10))?.name === '收尾', '20:10 → 收尾');
+  check(life.slotAt(at(20, 40))?.name === '晚饭', '20:40 → 晚饭');
+  check(life.slotAt(at(21, 30))?.name === '到家', '21:30 → 到家');
+  check(life.slotAt(at(22, 45))?.name === '睡前', '22:45 → 睡前');
 
   // 中午强制发 60 次，全部必须来自中午时段
   // ⚠️ 每次都要把 nextAt 按回"现在" —— 否则第一次之后全是"还没到点"，
@@ -522,7 +537,7 @@ console.log('\n【★】2026-10-13：日常事件不许发第三人称原文 + �
   );
   // ② 同一条 15 分钟内在同一个群出现两遍：回执超时 ≠ 没发到
   check(
-    /life\.noteFailed\(g, plan\.template\.text/.test(srcIndex),
+    /life\.noteFailed\(g, plan\.template\.baseText \?\? plan\.template\.text/.test(srcIndex),
     '★★ 发失败（含回执超时）→ 登记 `life.noteFailed`（重排不再抽同一条）',
   );
   check(/FAIL_COOLDOWN_MS = 45 \* 60 \* 1000/.test(srcLife), '★ 冷藏窗口 = 45 分钟');
@@ -533,26 +548,29 @@ console.log('\n【★】2026-10-13：日常事件不许发第三人称原文 + �
   const first = life.plan(at(12, 30), seqRng([0]));
   check(first.fire === true, '先正常抽一条中午的事件', first.reason ?? '');
   const text = first.template?.text ?? '';
+  // ⚠️ 2026-11-12：有分支的事件 `text` 是这一次的**走向**，
+  //    而冷藏 / 当天去重都按**事情**（`baseText`）算 —— 见 `src/life.js` 的 `pickBranch`。
+  const base = first.template?.baseText ?? text;
   check(!!text, '抽到的事件文本非空', text);
 
-  life.noteFailed('', text, at(12, 31));
+  life.noteFailed('', base, at(12, 31));
   check(
-    readFileSync(join(ROOT, LIFE_REL), 'utf8').includes(text.slice(0, 10)),
+    readFileSync(join(ROOT, LIFE_REL), 'utf8').includes(base.slice(0, 10)),
     '★ 冷藏名单**落盘**（重启也不丢）',
   );
   arm(at(12, 36), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(12, 36) });
   const second = life.plan(at(12, 36), seqRng([0]));
   check(
-    second.fire === true && second.template?.text !== text,
+    second.fire === true && (second.template?.baseText ?? second.template?.text) !== base,
     '★★ 5 分钟后重排 → **不再是同一条**（防"超时其实发到了"的重复）',
-    second.template?.text ?? '',
+    second.template?.baseText ?? second.template?.text ?? '',
   );
   arm(at(13, 20), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(13, 20) });
   const third = life.plan(at(13, 20), seqRng([0]));
   check(
-    third.template?.text === text,
+    (third.template?.baseText ?? third.template?.text) === base,
     '★ 过了 45 分钟 → 又能抽到它（只是冷藏，不是永久拉黑）',
-    third.template?.text ?? '',
+    third.template?.baseText ?? third.template?.text ?? '',
   );
 }
 

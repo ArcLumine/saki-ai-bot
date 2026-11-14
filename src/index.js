@@ -1145,7 +1145,10 @@ if (true) {
           //    用户截图里那句话就在群里，而系统这里判了失败 ⇒ 顺延重排又抽到同一条 ⇒ 群里看两遍 ✗
           //    ⇒ 这条文本在这个群冷藏 45 分钟（`life.noteFailed`），重排就抽别的事 ✓
           //    ⚠️ 它**不记账**（`fired` 不加），所以"今天该发几条"一点也不少。
-          life.noteFailed(g, plan.template.text, Date.now());
+          //    ⚠️ 2026-11-12：冷藏按**事情**记（`baseText`），不按这一次的走向 ——
+          //       有分支的事件 text 是走向（"点的拼好饭被人拿走了"），
+          //       重排时过滤用的是起因（"中午的饭"），按走向记就对不上、冷藏失效 ✗
+          life.noteFailed(g, plan.template.baseText ?? plan.template.text, Date.now());
           continue;
         }
         // ⚠️ 只给这个群记账、只写这个群的故事线（分群之后各算各的）
@@ -1729,17 +1732,20 @@ startPendingArtsTick();
 
 // ── 跑团记录（海豹 log → 章节，2026-09-30）────────────────
 //
-// ⚠️⚠️ **默认关闭**（`diceLog.enable` 默认 false，用户 2026-09-30 明确
-//    「先写出来但是不启用，我后面再改」）。所以：
-//      · 不注入 `__runner` ⇒ `compress()` 直接返回"没注入压缩用的模型调用"，不花钱
-//      · 不注册定时器 ⇒ `note()` / `compress()` 都不会被调
-//    ⇒ 整个模块现在是**零调用**的死代码，改它不会影响机器人。
-//    启用只需在 config.yml 里把 `diceLog.enable` 改成 true。
+// ⚠️⚠️ 2026-10-24 改（用户：「开有没有办法不用重启」）：
+//    原来整个块被 `if (config.diceLog?.enable === true)` 包着 —— 那段代码只在**进程启动时**
+//    执行一次，之后在界面上把「启用跑团记录」打开，配置是变了，但定时器**不会补注册**
+//    ⇒ 必须重启才生效 ✗
+//    ⇒ 现在**总是注册**这四样，用开关控制"干不干活"：
+//      ① `__runner`（压缩用的模型调用，纯赋值，不花任何资源）
+//      ② `reload()`（从磁盘读回已压好的章节/梗概，本地文件，很快）
+//      ③④ 两个定时器 —— 回调里先判 `diceLog.enabled()`，关着就直接 return
+//    ⇒ 点「开」之后最多一个 tick（≤5 分钟）就自己开始拉，**不用重启** ✓
 //
 // ⚠️ 为什么模型调用要**注入**而不是模块自己 import llm.js：
 //    那会拉进一整条依赖链（llm → config → …），`dice-log.js` 就没法在套件里
 //    单独跑了。注入的写法见下面 `__runner` 那一行。
-if (config.diceLog?.enable === true) {
+{
   config.diceLog.__runner = async (system, user) => {
     // ⚠️ 压缩是**整理已有内容**，不需要深推理 ⇒ 关掉思考链。
     //    跟 storyline 那次同一个理由：思考链会烧掉绝大部分 token，
@@ -1772,12 +1778,15 @@ if (config.diceLog?.enable === true) {
   };
   diceLog.reload();
   log.info(
-    `[跑团记录] 已启用（海豹 ${config.sealdice?.baseUrl || '未配置'}` +
-      `${config.sealdice?.baseUrl ? '' : ' —— 拉不到 log，只是先待命'}）`,
+    `[跑团记录] ${config.diceLog?.enable === true ? '已启用' : '未启用（diceLog.enable: false，定时器待命）'}；` +
+      `海豹 ${config.sealdice?.baseUrl || '未配置'}` +
+      `${config.sealdice?.baseUrl ? '' : ' —— 拉不到 log，只是先待命'}`,
   );
 
   const everyDice = Math.max(60000, Number(config.diceLog.compress?.checkIntervalMs) || 10 * 60 * 1000);
   setInterval(() => {
+    // ⚠️ 2026-10-24：开关关着就什么都不做（原来是把整个定时器放在 if 里，热改开关不生效）
+    if (!diceLog.enabled()) return;
     diceLog
       .compressIfDue()
       .catch((e) => log.debug(`[跑团记录] 定时压缩出错：${e.message}`));
@@ -1785,17 +1794,24 @@ if (config.diceLog?.enable === true) {
 
   // ⚠️ 拉 log 也得有人调。这里只在**有海豹且配置了群**时才拉 ——
   //    不知道哪些群在跑团，硬拉就是白花钱。
-  const diceGroups = Array.isArray(config.diceLog?.groups) ? config.diceLog.groups : [];
-  if (diceGroups.length && config.sealdice?.baseUrl) {
-    const everyNote = Math.max(60000, Number(config.diceLog.pullIntervalMs) || 5 * 60 * 1000);
-    setInterval(() => {
-      for (const gid of diceGroups) {
-        diceLog.note({ groupId: gid }).catch((e) => log.debug(`[跑团记录] 拉取出错：${e.message}`));
-      }
-    }, everyNote).unref();
-    log.info(`[跑团记录] 拉取已启用，群：${diceGroups.join('、')}`);
-  } else if (!diceGroups.length) {
+  // ⚠️ 2026-10-24：`groups` 改成**每个 tick 重新读**（原来只在启动时读一次），
+  //    这样在界面上补了群号也能在下一个 tick 生效，不用重启。
+  const everyNote = Math.max(60000, Number(config.diceLog?.pullIntervalMs) || 5 * 60 * 1000);
+  setInterval(() => {
+    if (!diceLog.enabled()) return;
+    if (!config.sealdice?.baseUrl) return;
+    const gs = Array.isArray(config.diceLog?.groups) ? config.diceLog.groups.map(String) : [];
+    if (!gs.length) return;
+    for (const gid of gs) {
+      diceLog.note({ groupId: gid }).catch((e) => log.debug(`[跑团记录] 拉取出错：${e.message}`));
+    }
+  }, everyNote).unref();
+
+  const bootGroups = Array.isArray(config.diceLog?.groups) ? config.diceLog.groups : [];
+  if (!bootGroups.length) {
     log.info('[跑团记录] ⚠️ 没填 diceLog.groups ⇒ 不会去拉 log（不知道哪些群在跑团）');
+  } else {
+    log.info(`[跑团记录] 拉取定时器已就绪，群：${bootGroups.join('、')}`);
   }
 }
 

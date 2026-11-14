@@ -191,14 +191,15 @@ console.log('\n【5】★★ 方案约束：同号接 IM 的三条「硬约束�
   // ⚠️⚠️ 2026-10-22 改（用户选 B：骰点唯一入口改成骰桥，`sealdice.ask()` 退役）：
   //    handleDiceMode 里**不该再出现任何 sealdice 调用** —— 骰点指令一律消费掉，
   //    由桥把消息转给海豹、桥再决定「在骰娘模式就转 /api/seal-say」。
-  const h = botjs.slice(botjs.indexOf('async handleDiceMode'), botjs.indexOf('async handleDiceMode') + 3000);
+  const h = botjs.slice(botjs.indexOf('async handleDiceMode'), botjs.indexOf('async handleDiceMode') + 8000);
   // ⚠️ 先剥注释再查（注释里自己就写着「绝不能再调 sealdice.ask()」）
   const hCode = h
     .split(/\r?\n/)
     .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
     .join('\n');
   check(!/sealdice\.(ask|shouldRelay|enabled)\(/.test(hCode), '★★ handleDiceMode 不再调 sealdice（骰点交给桥）');
-  check(/diceMode\.isDiceCommand\([\s\S]{0,200}?return true/.test(h), '★★ 骰点指令**照样 return true**（消费掉，别掉进 decide()）');
+  // ⚠️ 2026-10-24：窗口 200 → 900 —— 中间加了「没进骰娘模式就提示一句」那段
+  check(/diceMode\.isDiceCommand\([\s\S]{0,900}?return true/.test(h), '★★ 骰点指令**照样 return true**（消费掉，别掉进 decide()）');
 
   const ex = readFileSync(join(ROOT, 'config.example.yml'), 'utf8');
   check(/token: ''/.test(ex), '★★ 模板里 token 是空的 ⇒ 照模板配的人不会被意外启用');

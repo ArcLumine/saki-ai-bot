@@ -126,12 +126,15 @@ console.log("\n【4】区间 + 跨年区间");
 
 console.log('\n【5】★★ 日本节日 vs 中国节日：绝不能混');
 {
-  // 春节：中国的 → foreign
+  // 春节：中国的 → foreign（不放假）
   const spring = hol.on(D('2026-02-17'));
   check(spring.foreign.some((h) => h.name === '春节'), '★ 春节被标成 foreign');
+  check(!spring.off, '★ 春节**不给她放假**（中国的节不由她过）');
+  // ⚠️ 2026-11-13 改：中国节日**也有专属事件了**，立场是「群友在过节，她参与」
+  //    （用户原话：「国内过节的时候小祥要对群友有互动感」）。原来断言的是"一条都不出"。
   check(
-    !spring.events.some((e) => /春节/.test(e.holiday ?? '')),
-    '★★ 春节**不产生事件**（她自己不会过，得等群友说）',
+    spring.events.some((e) => /春节/.test(e.holiday ?? '')),
+    '★★ 春节有专属事件（群里在过年，她怎么接）',
   );
   // 元日：日本的 → 有事件
   const newyear = hol.on(D('2026-01-01'));

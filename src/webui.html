@@ -1570,7 +1570,7 @@
         ⚠️ 存档<b>包含 API Key</b>，就存在本地 <code>config.yml</code> / 账号文件里（不出机器）。
       </p>
       <div class="row" style="align-items:flex-end">
-        <div style="flex:2"><label>存成什么名字</label><input type="text" id="pf-name" placeholder="例如：DeepSeek 主力 / Gemini 备用"></div>
+        <div style="flex:2"><label>存成什么名字</label><input type="text" id="pf-profile-name" placeholder="例如：DeepSeek 主力 / Gemini 备用"></div>
         <div style="flex:1"><button class="act" style="width:100%" onclick="saveProfile()">存下来</button></div>      </div>
       <div id="pf-list" style="margin:12px 0"></div>
       <span class="msg" id="msg-pf"></span>
@@ -1751,6 +1751,20 @@
       <div class="row mt8">
         <div><label>超时自动退出（分钟）<span class="q" tabindex="0" data-q="填 0 = 永不自动退，只能靠下面的退出词解除。
 ⚠️ 建议别设成 0：忘了解除的话她会长时间不说话，那种情况比「超时退出了」难受得多。">?</span></label><input type="number" id="dm-duration" min="0" step="5"></div>
+      </div>
+      <!-- ⚠️ 2026-10-24 加（用户：「骰娘模式的好多开关在 webui 里边没有进出」）：
+           这三个原来只能改 config.yml —— `banter`（要不要主动接话）+ 两档概率。 -->
+      <div class="row mt8">
+        <div>
+          <label>跑团时主动接话<span class="q" tabindex="0" data-q="关掉 = 她**只**对骰点结果吐槽，不主动插嘴（但仍会回应 @ 她 / 叫她名字 / 戳一戳）。
+⚠️ 开 = 按下面两档概率在群里接话。">?</span></label>
+          <select id="dm-banter" class="wauto-m0">
+            <option value="1">开（按下面的概率接）</option>
+            <option value="0">关（只吐槽骰点）</option>
+          </select>
+        </div>
+        <div><label>相关闲聊概率（%）<span class="q" tabindex="0" data-q="和本局相关的消息（检定 / 角色 / 剧情词）她接话的概率。">?</span></label><input type="number" id="dm-banter-related" min="0" max="100" step="5"></div>
+        <div><label>无关闲聊概率（%）<span class="q" tabindex="0" data-q="纯闲聊（「我去倒杯水」这种）她接话的概率。">?</span></label><input type="number" id="dm-banter-plain" min="0" max="100" step="1"></div>
       </div>
       <div class="btns">
         <button class="ghost" onclick="saveDiceMode()">保存</button>
@@ -2001,6 +2015,17 @@
           </div>
         </div>
         <p class="hint" id="dl-stats">（还没加载）</p>
+        <div class="switch mt8">
+          <input type="checkbox" id="dl-enabled">
+          <div>
+            <div class="t">启用跑团记录</div>
+            <div class="d">关掉之后不再拉海豹的 log、也不压缩（省模型调用）；已压好的章节还留着。</div>
+          </div>
+        </div>
+        <div class="btns mt8">
+          <button class="ghost" onclick="saveDiceLogEnabled()">保存开关</button>
+          <span class="msg" id="dl-enable-msg"></span>
+        </div>
 
         <div class="subtabs dl-subtabs">
           <button data-dlsub="prompt" class="on" onclick="dlTab('prompt')">提示词原文</button>
@@ -3231,22 +3256,45 @@ mygo
 
   <section id="tab-qqlogin" class="hidden">
     <!-- ⚠️ 2026-10-22：这一页原来拆了「登录 / 排错」两个二级标签，用户说并回去 ——
-         总共就三张卡，还得多点一次标签，不如一屏看完。 -->
+         总共就三张卡，还得多点一次标签，不如一屏看完。
+         ⚠️⚠️ 2026-11-03 重排（用户截图：「状态 / 配置 / 操作混在一个清单里」）：
+            原来所有东西排成一个 kvs 列表 —— 在线状态、协议端下拉、重启说明、
+            NapCat 管理接口全挤在一起。离线时看不出「下一步做什么」，
+            而 SnowLuma 下「出码 / 重启」那几个按钮摆着、点了才报不支持。
+            ⇒ 拆成三块：① 现在能用吗（结论 + 下一步）② 状态（只读）③ 协议端（配置 + 能力）。
+               按钮按协议端能力**显隐**，不支持的直接不显示。 -->
     <div class="card">
-      <h2>QQ 登录状态</h2>
+      <h2>现在能用吗</h2>
+      <div id="qq-verdict"></div>
+      <div class="btns mt10">
+        <button class="act" onclick="qqRecover()" id="btn-qq-recover"
+                style="background:#16a34a">一键恢复登录（先试免扫码）</button>
+        <button class="ghost" onclick="qqReloadQr()" id="btn-qq-showqr">显示二维码</button>
+        <button class="ghost" onclick="qqNewQr()" id="btn-qq-newqr">重新出码</button>
+        <button class="ghost" onclick="qqRefresh()">刷新状态</button>
+      </div>
+      <p class="hint mt10" id="qq-recover-msg"></p>
+    </div>
+
+    <div class="card">
+      <h2>状态</h2>
       <p class="hint">
         能不能收消息取决于 QQ <b>真的在线</b>。
         进程和端口正常不代表在线，被踢下线时消息收不到。
       </p>
       <div id="qq-status" class="kvs"></div>
       <div class="btns">
-        <button class="act" onclick="qqRecover()" id="btn-qq-recover"
-                style="background:#16a34a">一键恢复登录（先试免扫码）</button>
-        <button class="ghost" onclick="qqRefresh()">刷新状态</button>
-        <button class="ghost" onclick="qqReloadQr()">显示二维码</button>
-        <button class="ghost" onclick="qqNewQr()" id="btn-qq-newqr">重新出码</button>
+        <button class="ghost" onclick="qqRestartBot()" id="btn-bot-restart">重启机器人</button>
+        <span class="hint">
+          = 按当前配置重新连一次协议端（改完配置 / 切完协议端点它生效）；
+          <b>不是</b>重启协议端，也不涉及 QQ 登录
+        </span>
       </div>
-      <p class="hint mt10" id="qq-recover-msg"></p>
+    </div>
+
+    <div class="card">
+      <h2>协议端</h2>
+      <div id="qq-provider"></div>
     </div>
     <div class="card" id="qq-qr-card" style="display:none">
       <h2>用手机 QQ 扫码登录</h2>
@@ -3266,16 +3314,19 @@ mygo
     </div>
 
     <div class="card">
-      <h2>为什么会掉线 / 起不来 <span class="q" tabindex="0" data-q="掉线大多是：① 有人重复扫码登录，QQ 把旧会话踢了；② 网络抖动导致心跳超时；③ 机器人进程被别的脚本杀掉了。起不来大多是：① 协议端（NapCat）没起来；② 端口被占用；③ token 过期。">?</span></h2>
+      <h2>为什么会掉线 / 起不来 <span class="q" tabindex="0" data-q="掉线大多是：① 有人重复扫码登录，QQ 把旧会话踢了；② 网络抖动导致心跳超时；③ 机器人进程被别的脚本杀掉了。起不来大多是：① 协议端没起来；② 端口被占用；③ token 过期。">?</span></h2>
       <p class="hint">
         <b>网络瞬断</b>：网恢复后一般会自己重连。<br>
         <b>被踢下线</b>（日志里写 <code>KickedOffLine</code>）：登录态已作废，<b>必须重新扫码</b>。<br>
-        ⚠️ <b>NapCat 没在跑时</b>（电脑重启过、QQ 被关掉），下面按钮会把它启动起来。
+        ⚠️ <b>协议端没在跑时</b>（电脑重启过、QQ 被关掉），下面按钮会把它启动起来 ——
+        <b>能不能从这儿启停，取决于当前协议端</b>（上面那张卡列了它能做什么）。
       </p>
       <p class="hint mb8" id="qq-restart-hint"></p>
       <div class="btns">
+        <!-- ⚠️ 2026-11-03：按钮文案由 `qqRefresh()` 按协议端能力动态设置；
+             不支持/已在跑又不能重启时它会被**隐藏**（不是禁用后还摆着）。 -->
         <button class="act" onclick="qqRestart()" id="btn-qq-restart"
-                style="background:#dc2626">重启 NapCat（重新出码）</button>
+                style="background:#dc2626">重启协议端</button>
       </div>
     </div>
   </section>

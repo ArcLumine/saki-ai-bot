@@ -208,8 +208,12 @@ export function liveProbeCleanup(root, name, env) {
     if (!key.startsWith('QQBOT_') || !String(rel).startsWith('logs/')) continue;
     // 临时人设目录由下面的按测试名清理统一处理；这里只删状态文件。
     if (key === 'QQBOT_PERSONA_DIR') continue;
-    rmSync(join(root, rel), { force: true });
-    rmSync(join(root, `${rel}.tmp`), { force: true });
+    // ⚠️ 2026-11-13：**必须递归**。`ask-attitude` 的 line 档会把 `QQBOT_ACCOUNTS_DIR`
+    //    指到一个**目录**（`logs/__live-attitude-accounts`），这里原来不带 recursive ⇒
+    //    收尾时 `ERR_FS_EISDIR` 崩掉、退出码变 1 —— 看着像测试失败，其实 11 条早跑完了。
+    //    对普通文件来说 `recursive: true` 也是合法的（就是 unlink），所以统一带上。
+    rmSync(join(root, rel), { force: true, recursive: true });
+    rmSync(join(root, `${rel}.tmp`), { force: true, recursive: true });
   }
   rmSync(join(root, `logs/__live-${safe}-persona`), { recursive: true, force: true });
   // ⚠️ 2026-10-02 加：共用层副本也必须清。

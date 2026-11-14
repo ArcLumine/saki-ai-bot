@@ -49,6 +49,37 @@ async function loadDiceGames(gid) {
   }
 }
 
+/**
+ * 保存「启用跑团记录」开关（`diceLog.enable`）。
+ *
+ * ⚠️ 2026-10-24 加（用户：「跑团记录没启用（config.yml 的 diceLog.enable）是不是也可以加个开关」）。
+ * ⚠️ 只提交 `enable` —— `put()` 是逐键合并，`groups` / `compress` 这些界面外的字段不会被冲掉。
+ * ⚠️ 打开后**要重启**才真正开始拉取：定时器是在 `index.js` 启动时注册的，热重载不会补注册。
+ */
+async function saveDiceLogEnabled() {
+  const msg = $('dl-enable-msg');
+  const on = !!$('dl-enabled')?.checked;
+  try {
+    const r = await api('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ diceLog: { enable: on } }),
+    });
+    flash(
+      msg,
+      r.ok,
+      r.ok
+        ? on
+          ? '已启用 —— 最多 5 分钟后开始拉取（**不用重启**）'
+          : '已关闭（下一个检查周期起就不再拉取/压缩）'
+        : '保存失败：' + (r.error || ''),
+    );
+    if (r.ok) loadDiceLog();
+  } catch (e) {
+    flash(msg, false, '出错：' + (e?.message || e));
+  }
+}
+
 async function loadDiceLog(force = false) {
   const sel = $('dl-group');
   const logSel = $('dl-log');
@@ -87,6 +118,9 @@ async function loadDiceLog(force = false) {
     }
 
     const st = r.stats || {};
+    // ⚠️ 2026-10-24：启用开关（`diceLog.enable`）回填
+    const en = $('dl-enabled');
+    if (en) en.checked = !!r.enabled;
     const el = $('dl-stats');
     if (el) {
       if (!r.enabled) {

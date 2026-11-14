@@ -1088,12 +1088,23 @@ export function personaLine() {
  * @param {{system:string, user:string, maxTokens?:number, timeoutMs?:number}} p
  * @returns {Promise<string>}
  */
+/**
+ * ⚠️ 2026-11-13 加：本进程内"主模型带思考会返回空正文"这件事**实测到一次就够了**。
+ * 之后 `phrase()` 优先关思考（省掉每次白跑的那一轮）；重启/换模型就重新学。
+ * 不落盘是有意的：换模型之后这个判断可能就不成立了，落盘反而会一直错下去。
+ */
+let phraseNoThinkFirst = false;
+
 export async function phrase(p = {}) {
   const llm = llmCfg();
   const sys = String(p.system ?? '').trim();
   const user = String(p.user ?? '').trim();
   if (!sys || !user) return '';
-  const maxTokens = Math.max(60, Math.min(900, Number(p.maxTokens) || 220));
+  // ⚠️ 默认值 2026-11-13 从 220 抬到 400：主模型是**带思考链**的推理模型，
+  //    实测一次"润色一句话"就要 reasoning 109~159 token（`completion_tokens_details.reasoning_tokens`）。
+  //    原来给 220，思考吃光后正文为 0 字 ⇒ 返回 200 空正文 ⇒ 静默换备用模型 ✗
+  //    （调用方显式传的 `maxTokens` 仍然作数，这里只改默认。）
+  const maxTokens = Math.max(60, Math.min(900, Number(p.maxTokens) || 400));
   const timeoutMs = Math.max(3000, Number(p.timeoutMs) || Number(llm.phraseTimeoutMs) || 15000);
 
   // ⚠️⚠️ 2026-10-22 加（用户：「为什么吐槽不起作用」+「备用已经填了，直接调用就行」）：
@@ -1106,14 +1117,28 @@ export async function phrase(p = {}) {
   //      ③ 走备用 base 时**不带** `thinking` / `reasoning`（Gemini 兼容层不认，会 400）；
   //      ④ 记账用**实际用的模型名**（不然账单里两个模型混一起）。
   const bk = llm.backup ?? {};
-  const attempts = [
-    { model: String(llm.model ?? ''), baseURL: String(llm.baseURL ?? ''), apiKey: String(llm.apiKey ?? '') },
-  ];
+  const mainAttempt = (noThink) => ({
+    model: String(llm.model ?? ''),
+    baseURL: String(llm.baseURL ?? ''),
+    apiKey: String(llm.apiKey ?? ''),
+    noThink,
+  });
+  // ⚠️⚠️ 2026-11-13：**默认顺序 = 带思考 → 关思考 → 备用模型**。
+  //    实测（deepseek-v4.1-flash，挑库/润色那种一句话的活，max_tokens 400）：
+  //    带思考 6 次里 5 次返回空正文（200 + content 空），关掉思考 6 次全成功。
+  //    ⇒ 主模型要试两次，**别一空就直接换 gemini** —— 换过去的那几条
+  //      就是"她怎么突然变笨"的来源（模型换了，人设还是一样的）。
+  //    ⚠️ 一旦实测到「带思考必空」，本进程内把顺序翻成"关思考优先"，
+  //      省掉每次白跑的那一轮（见 `phraseNoThinkFirst`）。
+  const attempts = phraseNoThinkFirst
+    ? [mainAttempt(true), mainAttempt(false)]
+    : [mainAttempt(false), mainAttempt(true)];
   if (bk.baseURL && bk.model) {
     attempts.push({
       model: String(bk.model),
       baseURL: String(bk.baseURL),
       apiKey: String(bk.apiKey ?? ''),
+      noThink: false,
     });
   }
 
@@ -1134,7 +1159,14 @@ export async function phrase(p = {}) {
           ],
           temperature: 1.0,
           max_tokens: maxTokens,
-          ...(isMain ? { ...thinkingField(), ...reasoningField() } : {}),
+          // ⚠️ 2026-11-13：`noThink` 那条 attempt 显式发 `thinking:{type:'disabled'}`。
+          //    用途见下面"空正文"分支：主模型带思考链时，`max_tokens` 常被思考吃光 ⇒
+          //    200 + 空正文。先试"关着思考再要一次"，比直接换备用模型划算得多。
+          ...(isMain
+            ? a.noThink
+              ? { thinking: { type: 'disabled' } }
+              : { ...thinkingField(), ...reasoningField() }
+            : {}),
           stream: false,
         }),
         signal: AbortSignal.timeout(timeoutMs),
@@ -1168,11 +1200,24 @@ export async function phrase(p = {}) {
         .trim();
       if (t) {
         if (!isMain) log.warn(`[备用模型] 润色已顶上（${a.model}）`);
+        // ⚠️ 2026-11-13：这一路能成，说明"关思考"才是这个出口的正解 ⇒ 之后优先关思考
+        else if (a.noThink && !phraseNoThinkFirst) {
+          phraseNoThinkFirst = true;
+          log.info('润色：主模型带思考会返回空正文 → 之后优先「关思考」（本进程内）');
+        }
         log.debug(`润色：「${t.replace(/\s+/g, ' ').slice(0, 80)}」`);
         return t;
       }
-      // 200 但正文为空（思考链把 token 吃光那种）⇒ 也换备用试一次
+      // 200 但正文为空（思考链把 token 吃光那种）
+      // ⚠️⚠️ 2026-11-13：原来这条分支**一个字都不写**，线上就表现成
+      //    「日志里只有 `[备用模型] 润色已顶上`，前面查不到任何原因」。
+      //    现在按 attempts 的顺序往下走（带思考 → 关思考 → 备用），每一步都留痕。
       lastErr = '空正文';
+      log.warn(
+        `润色主模型返回空正文（model=${a.model}，max_tokens=${maxTokens}` +
+          `${a.noThink ? '，已经关掉思考还是空' : ''}）` +
+          `${isMain ? '' : ' → 备用模型也空'}—— 多半是思考链把预算吃光了`,
+      );
       continue;
     } catch (e) {
       lastErr = String(e?.message ?? e).slice(0, 80);
